@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ContentDialog
+    x:Class="YukinoChan.Views.ShutdownCountdownDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="即将自动关机"
+    PrimaryButtonText="取消关机"
+    CloseButtonText="关闭弹窗"
+    DefaultButton="Primary">
+
+    <StackPanel Spacing="12" MinWidth="360">
+        <TextBlock x:Name="CountdownTitle"
+                   Style="{StaticResource SubtitleTextBlockStyle}"
+                   Foreground="{StaticResource YukinoDangerBrush}"
+                   HorizontalAlignment="Center" />
+
+        <TextBlock Text="若您仍需使用电脑，请点击『取消关机』。&#x0a;点击『关闭弹窗』或不进行任何操作，将继续倒计时关机。"
+                   TextWrapping="Wrap"
+                   TextAlignment="Center"
+                   Opacity="0.8" />
+
+        <TextBlock x:Name="CountdownLabel"
+                   FontSize="22"
+                   FontWeight="Bold"
+                   Foreground="{StaticResource YukinoDangerDeepBrush}"
+                   HorizontalAlignment="Center" />
+
+        <ProgressBar x:Name="CountdownBar" Minimum="0" Maximum="100" Height="4" />
+    </StackPanel>
+</ContentDialog>

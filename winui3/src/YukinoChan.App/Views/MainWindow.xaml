@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="YukinoChan.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:YukinoChan"
+    xmlns:vm="using:YukinoChan.ViewModels"
+    xmlns:views="using:YukinoChan.Views"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- ===== 自定义标题栏 ===== -->
+        <Grid x:Name="AppTitleBar" Height="44" Canvas.ZIndex="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Border
+                Grid.Column="0"
+                Width="22" Height="22" Margin="14,0,10,0"
+                Background="{StaticResource YukinoAccentBrush}"
+                CornerRadius="11">
+                <TextBlock Text="雪" Foreground="White" FontSize="12"
+                           HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Border>
+
+            <TextBlock Grid.Column="1"
+                       Text="雪乃酱 / 二游脚本助手"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       VerticalAlignment="Center"
+                       Opacity="0.85" />
+        </Grid>
+
+        <!-- ===== 主体：NavigationView 外壳 ===== -->
+        <NavigationView x:Name="NavView"
+                        Grid.Row="1"
+                        IsBackButtonVisible="Collapsed"
+                        IsSettingsVisible="False"
+                        PaneDisplayMode="Left"
+                        OpenPaneLength="196"
+                        SelectionChanged="OnNavigationSelectionChanged">
+
+            <NavigationView.MenuItems>
+                <NavigationViewItem Tag="home" Content="总览" Icon="Home" />
+                <NavigationViewItem Tag="tasks" Content="任务执行" Icon="List" />
+                <NavigationViewItem Tag="stats" Content="耗时统计" Icon="Clock" />
+                <NavigationViewItem Tag="logs" Content="运行日志" Icon="Document" />
+                <NavigationViewItem Tag="rdp" Content="远程会话" Icon="People" />
+            </NavigationView.MenuItems>
+
+            <NavigationView.FooterMenuItems>
+                <NavigationViewItem Tag="settings" Content="设置" Icon="Setting" />
+            </NavigationView.FooterMenuItems>
+
+            <NavigationView.Content>
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="320" />
+                    </Grid.ColumnDefinitions>
+
+                    <!-- 运行控制栏 -->
+                    <Border Grid.Row="0" Grid.Column="0"
+                            Padding="12,8"
+                            BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                            BorderThickness="0,0,0,1">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Content="开始执行"
+                                    Style="{StaticResource AccentButtonStyle}"
+                                    IsEnabled="{x:Bind VM.CanStart, Mode=OneWay}"
+                                    Click="OnStartClicked" />
+                            <Button Content="暂停执行"
+                                    IsEnabled="{x:Bind VM.CanPause, Mode=OneWay}"
+                                    Click="OnPauseClicked" />
+                            <Button Content="继续执行"
+                                    IsEnabled="{x:Bind VM.IsRunning, Mode=OneWay}"
+                                    Click="OnResumeClicked" />
+                            <Button Content="停止执行  F8"
+                                    IsEnabled="{x:Bind VM.CanStop, Mode=OneWay}"
+                                    Click="OnStopClicked"
+                                    Background="{StaticResource YukinoDangerBrush}" />
+                            <Button Content="紧急停止全部  Ctrl+Alt+F8"
+                                    IsEnabled="{x:Bind VM.CanStop, Mode=OneWay}"
+                                    Click="OnEmergencyStopClicked"
+                                    Background="{StaticResource YukinoDangerDeepBrush}" />
+                            <Button Content="保存配置" Click="OnSaveClicked" />
+                            <Button Content="取消关机" Click="OnCancelShutdownClicked" />
+                        </StackPanel>
+                    </Border>
+
+                    <!-- 页面容器 -->
+                    <Frame x:Name="ContentFrame"
+                           Grid.Row="1" Grid.Column="0" />
+
+                    <!-- ===== 看板娘面板 ===== -->
+                    <Border Grid.Row="0" Grid.RowSpan="2" Grid.Column="1"
+                            BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                            BorderThickness="1,0,0,0"
+                            Background="{ThemeResource LayerFillColorDefaultBrush}">
+                        <views:MascotPanel />
+                    </Border>
+                </Grid>
+            </NavigationView.Content>
+        </NavigationView>
+    </Grid>
+</Window>

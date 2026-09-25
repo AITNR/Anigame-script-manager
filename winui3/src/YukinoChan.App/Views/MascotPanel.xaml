@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="YukinoChan.Views.MascotPanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:YukinoChan.ViewModels"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">
+
+    <Grid Padding="16,14">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- 当前状态 -->
+        <Grid Grid.Row="0" Margin="0,0,0,12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="52" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="52" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="状态" Style="{StaticResource StatusLabelStyle}" />
+            <TextBlock Grid.Row="0" Grid.Column="1" Text="{x:Bind VM.StatusText, Mode=OneWay}" Style="{StaticResource StatusValueStyle}" />
+            <TextBlock Grid.Row="0" Grid.Column="2" Text="耗时" Style="{StaticResource StatusLabelStyle}" />
+            <TextBlock Grid.Row="0" Grid.Column="3" Text="{x:Bind VM.ElapsedText, Mode=OneWay}" Style="{StaticResource StatusValueStyle}" />
+
+            <TextBlock Grid.Row="1" Grid.Column="0" Text="当前" Style="{StaticResource StatusLabelStyle}" />
+            <TextBlock Grid.Row="1" Grid.Column="1" Margin="0,4,0,0" Text="{x:Bind VM.CurrentTaskName, Mode=OneWay}" Style="{StaticResource StatusValueStyle}" />
+            <TextBlock Grid.Row="1" Grid.Column="2" Text="进度" Style="{StaticResource StatusLabelStyle}" />
+            <TextBlock Grid.Row="1" Grid.Column="3" Margin="0,4,0,0" Text="{x:Bind VM.ProgressText, Mode=OneWay}" Style="{StaticResource StatusValueStyle}" />
+        </Grid>
+
+        <!-- 发言气泡（引导态可点击切换下一条） -->
+        <Button Grid.Row="1"
+                Padding="0"
+                HorizontalAlignment="Stretch"
+                HorizontalContentAlignment="Stretch"
+                Background="Transparent"
+                BorderThickness="0"
+                Click="OnBubbleClicked">
+            <Border Style="{StaticResource SpeechBubbleStyle}"
+                    Background="{ThemeResource AccentFillColorDefaultBrush}">
+                <TextBlock Text="{x:Bind VM.BubbleText, Mode=OneWay}"
+                           Style="{StaticResource SpeechBubbleTextStyle}" />
+            </Border>
+        </Button>
+
+        <!-- 看板娘立绘 -->
+        <Grid Grid.Row="2" Margin="0,16,0,0">
+            <Image Source="{x:Bind VM.MascotImage, Mode=OneWay}"
+                   Stretch="Uniform"
+                   HorizontalAlignment="Center"
+                   VerticalAlignment="Bottom" />
+
+            <!-- 无素材时的占位提示（与 Python 版一致） -->
+            <Border x:Name="MascotPlaceholder"
+                    Padding="12"
+                    CornerRadius="10"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                <TextBlock TextWrapping="Wrap" FontSize="12" Opacity="0.75" TextAlignment="Center">
+                    看板娘素材预留
+                    <LineBreak />
+                    assets/mascot/
+                    <LineBreak /><LineBreak />
+                    推荐：idle×3 / rest×3 / error×2 / work×2
+                    <LineBreak />
+                    例如 assets/mascot/idle/idle_01.png
+                </TextBlock>
+            </Border>
+        </Grid>
+    </Grid>
+</UserControl>

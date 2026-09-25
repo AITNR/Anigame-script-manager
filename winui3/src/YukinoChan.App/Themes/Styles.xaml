@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- 雪乃酱主题色：沿用经典风的雾蓝色系，适配 Fluent / WinUI 3 -->
+    <Color x:Key="YukinoAccent">#FF6C8EBF</Color>
+    <Color x:Key="YukinoAccentSoft">#FFB7C7E6</Color>
+    <Color x:Key="YukinoSurface">#FFF4F8FD</Color>
+    <Color x:Key="YukinoBorder">#FFD6E0EE</Color>
+    <Color x:Key="YukinoDanger">#FFB3261E</Color>
+    <Color x:Key="YukinoDangerDeep">#FF8B0000</Color>
+
+    <SolidColorBrush x:Key="YukinoAccentBrush" Color="{StaticResource YukinoAccent}" />
+    <SolidColorBrush x:Key="YukinoAccentSoftBrush" Color="{StaticResource YukinoAccentSoft}" />
+    <SolidColorBrush x:Key="YukinoSurfaceBrush" Color="{StaticResource YukinoSurface}" />
+    <SolidColorBrush x:Key="YukinoBorderBrush" Color="{StaticResource YukinoBorder}" />
+    <SolidColorBrush x:Key="YukinoDangerBrush" Color="{StaticResource YukinoDanger}" />
+    <SolidColorBrush x:Key="YukinoDangerDeepBrush" Color="{StaticResource YukinoDangerDeep}" />
+
+    <!-- 停止 / 紧急停止：高对比危险操作按钮 -->
+    <Style x:Key="DangerButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+        <Setter Property="Foreground" Value="White" />
+        <Setter Property="BorderThickness" Value="0" />
+    </Style>
+
+    <!-- 卡片：Fluent 圆角 + 轻量投影 -->
+    <Style x:Key="YukinoCardStyle" TargetType="Border">
+        <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+        <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="{StaticResource OverlayCornerRadius}" />
+        <Setter Property="Padding" Value="16" />
+    </Style>
+
+    <!-- 看板娘发言气泡 -->
+    <Style x:Key="SpeechBubbleStyle" TargetType="Border">
+        <Setter Property="Background" Value="{ThemeResource AccentFillColorDefaultBrush}" />
+        <Setter Property="CornerRadius" Value="14" />
+        <Setter Property="Padding" Value="14,10" />
+        <Setter Property="HorizontalAlignment" Value="Stretch" />
+    </Style>
+
+    <Style x:Key="SpeechBubbleTextStyle" TargetType="TextBlock">
+        <Setter Property="Foreground" Value="{ThemeResource TextOnAccentFillColorPrimaryBrush}" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="TextAlignment" Value="Center" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="LineHeight" Value="20" />
+    </Style>
+
+    <!-- 状态条标签 / 数值 -->
+    <Style x:Key="StatusLabelStyle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="Opacity" Value="0.7" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <Style x:Key="StatusValueStyle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+    </Style>
+
+    <!-- 总览页大卡片 -->
+    <Style x:Key="OverviewCardStyle" TargetType="Button">
+        <Setter Property="HorizontalAlignment" Value="Stretch" />
+        <Setter Property="VerticalAlignment" Value="Stretch" />
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="VerticalContentAlignment" Value="Stretch" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="CornerRadius" Value="{StaticResource OverlayCornerRadius}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+        <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+    </Style>
+
+    <!-- 表格行：鼠标悬停反馈 -->
+    <Style x:Key="TaskRowStyle" TargetType="Border">
+        <Setter Property="BorderBrush" Value="{ThemeResource DividerStrokeColorDefaultBrush}" />
+        <Setter Property="BorderThickness" Value="0,0,0,1" />
+        <Setter Property="Padding" Value="8,4" />
+        <Setter Property="MinHeight" Value="44" />
+    </Style>
+
+</ResourceDictionary>

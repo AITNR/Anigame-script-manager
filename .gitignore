@@ -43,5 +43,15 @@ Desktop.ini
 # PyInstaller cache
 *.manifest
 
+# C# / WinUI 3 (winui3/)
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.userosscache
+# 上面 *.manifest 规则会误伤 WinUI 3 工程的应用清单，这里显式放行
+!winui3/src/YukinoChan.App/app.manifest
+
 # Test cache
 .pytest_cache/

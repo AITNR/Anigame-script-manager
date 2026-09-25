@@ -7,12 +7,18 @@
 **让每日清体力变得更省心。**
 
 当前公开版本：**v1.0 RC1**  
-当前开发基线：**v31.17.1**
+当前开发基线：**v31.17.1**（Python / PySide6，已进入 legacy 维护）  
+新版开发基线：**v2.0 WinUI 3**（C# / Windows App SDK，主线开发中）
 
 GitHub：<https://github.com/yukikino001-ship-it/Anigame-script-manager>  
 Bilibili：<https://space.bilibili.com/31444141>
 
 </div>
+
+> **两套代码，一份配置。**
+> 仓库根目录的 Python + PySide6 版本（`main.py` / `core/` / `ui/`）仍是当前公开可用的 v1.0 RC1；
+> `winui3/` 目录是 C# / WinUI 3 重写版，功能等价、原生 Fluent 界面，且**共用同一个 `config.json`、`logs/`、`runtime_stats/`、`assets/mascot/`**，可以来回切换、无需重新配置。
+> 详见 [winui3/README.md](winui3/README.md)。
 
 ---
 
@@ -79,7 +85,7 @@ Bilibili：<https://space.bilibili.com/31444141>
 当前公开版本为：
 
 ```text
-YukinoChan v1.0 RC1
+YukinoChan v1.0 RC1（Python / PySide6）
 ```
 
 该版本对应开发基线：
@@ -91,6 +97,31 @@ v31.17.1
 目前核心功能已经完成，并经过多轮实际任务链测试。当前版本已经进入公开测试阶段，适合用于个人日常流程管理与反馈收集。
 
 本项目仍处于持续迭代阶段，后续功能会根据实际使用反馈调整，不会提前承诺固定路线。
+
+---
+
+## WinUI 3 重写版
+
+雪乃酱正在进行 **C# + WinUI 3 完整重写**，代码位于 [`winui3/`](winui3/README.md)。
+
+| | Python 版（本目录） | WinUI 3 版（`winui3/`） |
+|---|---|---|
+| 技术栈 | Python 3 + PySide6 + psutil | C# / .NET 8 + Windows App SDK 1.8 |
+| 界面 | Qt 自定义皮肤 | 原生 Fluent Design + Mica + 自定义标题栏 |
+| 状态 | v1.0 RC1，legacy 维护 | v2.0，主线开发 |
+| 配置 | `config.json` | **同一份，直接复用** |
+| 运行 | Python 环境 / PyInstaller 打包 | 单个 exe 直接双击运行 |
+
+重写版已完整移植：任务队列调度、窗口/进程/命令行关键词监控、三层收尾清理、并发组、超时保护、暂停 / 停止 / 紧急停止、看板娘状态机与气泡、运行日志、耗时统计、异常报告、自动关机、开机自启动。
+
+编译方式：
+
+```bash
+cd winui3
+dotnet build -c Release -p:Platform=x64
+```
+
+详细移植说明见：[winui3/README.md](winui3/README.md)
 
 ---
 

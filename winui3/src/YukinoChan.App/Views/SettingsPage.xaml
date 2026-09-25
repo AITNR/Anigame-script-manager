@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="YukinoChan.Views.SettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:models="using:YukinoChan.Models">
+
+    <ScrollViewer Padding="16,12">
+        <StackPanel Spacing="12" MaxWidth="720" HorizontalAlignment="Left">
+
+            <TextBlock Text="全局设置" Style="{StaticResource SubtitleTextBlockStyle}" />
+
+            <!-- 行为 -->
+            <Border Padding="16" Style="{StaticResource YukinoCardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="任务完成后" FontWeight="SemiBold" />
+
+                    <ToggleSwitch Header="所有任务完成后自动关机"
+                                  IsOn="{x:Bind VM.Config.ShutdownAfterDone, Mode=TwoWay}" />
+
+                    <NumberBox x:Name="ShutdownDelayBox"
+                               Header="关机倒计时（秒）"
+                               Minimum="0" Maximum="86400"
+                               SpinButtonPlacementMode="Compact"
+                               ValueChanged="OnShutdownDelayChanged" />
+
+                    <ToggleSwitch Header="所有任务完成后自动退出程序"
+                                  IsOn="{x:Bind VM.Config.AutoExitAfterDone, Mode=TwoWay}" />
+
+                    <ToggleSwitch Header="程序启动后自动开始执行任务"
+                                  IsOn="{x:Bind VM.Config.AutoStartTasks, Mode=TwoWay}" />
+
+                    <ToggleSwitch Header="超时处理时保存前后截图"
+                                  IsOn="{x:Bind VM.Config.EnableTimeoutScreenshot, Mode=TwoWay}" />
+
+                    <ToggleSwitch Header="Windows 开机自启动本程序"
+                                  IsOn="{x:Bind VM.Config.WindowsStartup, Mode=TwoWay}" />
+                </StackPanel>
+            </Border>
+
+            <!-- 外观 -->
+            <Border Padding="16" Style="{StaticResource YukinoCardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="外观" FontWeight="SemiBold" />
+                    <ComboBox x:Name="ThemeBox"
+                              Header="主题"
+                              MinWidth="220"
+                              ItemsSource="{x:Bind VM.ThemeItems, Mode=OneWay}"
+                              DisplayMemberPath="Value"
+                              SelectedValuePath="Key"
+                              SelectionChanged="OnThemeChanged" />
+                </StackPanel>
+            </Border>
+
+            <!-- 配置 -->
+            <Border Padding="16" Style="{StaticResource YukinoCardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="配置" FontWeight="SemiBold" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="保存配置" Click="OnSave" />
+                        <Button Content="导出配置" Click="OnExport" />
+                        <Button Content="导入配置" Click="OnImport" />
+                    </StackPanel>
+                    <TextBlock Text="导入只会覆盖任务列表；自动关机、开机自启动、截图开关等本机设置保持不变。"
+                               FontSize="12" Opacity="0.6" TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+
+            <!-- 目录 -->
+            <Border Padding="16" Style="{StaticResource YukinoCardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="目录" FontWeight="SemiBold" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="打开配置目录" Click="OnOpenConfigFolder" />
+                        <Button Content="打开日志目录" Click="OnOpenLogFolder" />
+                        <Button Content="打开统计目录" Click="OnOpenStatsFolder" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- 关于 -->
+            <Border Padding="16" Style="{StaticResource YukinoCardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="关于" FontWeight="SemiBold" />
+                    <TextBlock Text="雪乃酱 / 二游脚本助手 —— 让每日清体力变得更省心。"
+                               TextWrapping="Wrap" Opacity="0.8" />
+                    <TextBlock Text="本程序不提供任何游戏内自动化逻辑，只负责把已有脚本按预设顺序稳定地跑完。"
+                               TextWrapping="Wrap" FontSize="12" Opacity="0.6" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <HyperlinkButton Content="联系作者" NavigateUri="https://space.bilibili.com/31444141" />
+                        <HyperlinkButton Content="GitHub" NavigateUri="https://github.com/AITNR/Anigame-script-manager" />
+                        <Button Content="☕ 赞赏支持" Click="OnSponsor" />
+                    </StackPanel>
+                    <TextBlock x:Name="VersionText" FontSize="12" Opacity="0.55" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

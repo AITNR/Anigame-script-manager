@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    内嵌远程桌面宿主。
+    MsRdpClient 是 32/64 位 COM ActiveX，只能由 WinForms 的 AxHost 承载；
+    WinUI 3 主工程不能直接 UseWindowsForms=true（会撞 WPF 的 XAML 编译器 MC6000），
+    所以单独抽一个纯 WinForms 类库，主工程只 ProjectReference 它。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>YukinoChan.RdpHost</RootNamespace>
+    <AssemblyName>YukinoChan.RdpHost</AssemblyName>
+    <Platforms>x86;x64;ARM64</Platforms>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <PlatformTarget>x64</PlatformTarget>
+    <!-- AxMSTSCLib / MSTSCLib 是 net40 的互操作程序集 -->
+    <NoWarn>$(NoWarn);CA1416;CS1591;NU1701</NoWarn>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- RDP ActiveX 互操作：AxMsRdpClient9NotSafeForScripting / IMsRdpClientNonScriptable5 -->
+    <PackageReference Include="AxMSTSCLib" Version="1.0.1" />
+  </ItemGroup>
+
+</Project>
