@@ -1999,6 +1999,15 @@ public sealed class MainViewModel : ObservableObject
         StopRdpPolling();
         RefreshStats();
 
+        // 汇总正文优先取 Finished 事件的 Message。不要用 status.StatusText ——
+        // 常驻代理 1Hz 的 idle 心跳会把它覆盖成「代理在线，等待指令。」，
+        // 日志里已实证这个竞态真的命中过（汇总通知正文变成了一句废话）。
+        var summary = status.Events.LastOrDefault(e => e.Kind == RdpEventKinds.Finished)?.Message;
+        if (string.IsNullOrWhiteSpace(summary))
+        {
+            summary = string.IsNullOrWhiteSpace(status.StatusText) ? "全部任务结束" : status.StatusText;
+        }
+
         if (abnormal)
         {
             SetMascotState(MascotStates.Error, errorReason: "远程会话执行出现异常，请查看运行日志。");
@@ -2011,11 +2020,37 @@ public sealed class MainViewModel : ObservableObject
 
         if (RdpSettings.NotifyOnAllDone)
         {
-            NotificationService.ShowSummary("雪乃酱：远程任务结束", status.StatusText);
+            var posted = NotificationService.ShowSummary("雪乃酱：远程任务结束", summary);
+
+            // 本地多用户场景下主控端会话大概率处于锁定状态（mstsc 接管了控制台），
+            // 锁定会话不弹 Toast 横幅，通知只会静默进操作中心。
+            // 只要无法确认横幅已展示（发送失败或窗口非激活），就落一份暂存，
+            // 等窗口重新激活时由 MainWindow 补发。
+            if (!posted || !MainWindow.IsWindowActive)
+            {
+                PendingNotificationStore.Save("雪乃酱：远程任务结束", summary);
+            }
         }
 
-        AppendLog($"远程执行结束：{status.StatusText}（会话处理方式：{SessionFinishModes.Label(RdpSettings.SessionFinish)}）。");
+        AppendLog($"远程执行结束：{summary}（会话处理方式：{SessionFinishModes.Label(RdpSettings.SessionFinish)}）。");
         RefreshRdpReadiness();
+    }
+
+    /// <summary>
+    /// 窗口重新激活（用户切回主用户桌面 / 应用重启）时补发锁屏期间错过的完成通知。
+    /// 由 MainWindow 的 Activated 事件调用；TryConsume 天然幂等（取出即删）。
+    /// </summary>
+    public void PresentPendingNotification()
+    {
+        var pending = PendingNotificationStore.TryConsume();
+        if (pending is null)
+        {
+            return;
+        }
+
+        NotificationService.ShowSummary(pending.Value.Title, pending.Value.Body);
+        ShowTemporaryMascotMessage("补发一条刚才错过的完成通知～", 8, 60);
+        AppendLog("窗口重新激活，已补发锁屏期间错过的完成通知。");
     }
 
     /// <summary>
