@@ -1,5 +1,5 @@
 {
-  "theme": "yukino",
+  "theme": "system",
   "shutdown_after_done": false,
   "shutdown_delay_seconds": 60,
   "auto_exit_after_done": false,
@@ -8,7 +8,7 @@
   "enable_timeout_screenshot": true,
   "tasks": [
     {
-      "enabled": true,
+      "enabled": false,
       "name": "OneDragon-Launcher.exe",
       "script_path": "",
       "order": 1,
@@ -31,12 +31,12 @@
     {
       "enabled": true,
       "name": "March7th Assistant.exe",
-      "script_path": "",
+      "script_path": "C:\\Program Files\\March7thAssistant_v2.7.0\\March7th Launcher.exe",
       "order": 2,
       "timeout_minutes": 10,
       "timeout_action": "kill_and_continue",
       "use_args": false,
-      "args": "March7th Assistant.exe",
+      "args": "main -e",
       "wait_mode": "window_title",
       "wait_process_name": "星穹铁道",
       "confirm_enter_delay_seconds": 0,
@@ -50,7 +50,7 @@
       "game_process": ""
     },
     {
-      "enabled": true,
+      "enabled": false,
       "name": "ok-ww.exe",
       "script_path": "",
       "order": 3,
@@ -73,7 +73,7 @@
       "game_process": ""
     },
     {
-      "enabled": true,
+      "enabled": false,
       "name": "BetterGI.exe",
       "script_path": "",
       "order": 4,
@@ -96,7 +96,7 @@
       "game_process": ""
     },
     {
-      "enabled": true,
+      "enabled": false,
       "name": "MaaEnd.exe",
       "script_path": "",
       "order": 5,
@@ -119,7 +119,7 @@
       "game_process": ""
     },
     {
-      "enabled": true,
+      "enabled": false,
       "name": "MAA.exe",
       "script_path": "",
       "order": 6,
@@ -142,7 +142,7 @@
       "game_process": ""
     },
     {
-      "enabled": true,
+      "enabled": false,
       "name": "M9A.exe",
       "script_path": "",
       "order": 7,
@@ -164,5 +164,20 @@
       "main_process": "",
       "game_process": ""
     }
-  ]
+  ],
+  "rdp": {
+    "enabled": true,
+    "target_host": "127.0.0.2",
+    "bridge_path": "",
+    "target_user": "zdh",
+    "credential_saved": true,
+    "session_finish": "keep",
+    "notify_on_task_done": true,
+    "notify_on_all_done": true,
+    "notify_local_task_done": false,
+    "connect_timeout_seconds": 120,
+    "embed_remote_desktop": false,
+    "desktop_width": 1920,
+    "desktop_height": 1080
+  }
 }
