@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
@@ -13,17 +14,26 @@ using YukinoChan.Models;
 namespace YukinoChan.Services;
 
 /// <summary>
-/// 主控端与目标会话 Agent 之间的通信桥。
-/// 两个 Windows 用户会话之间不能直接通信，因此统一走 ProgramData 下的共享目录：
+/// 主控端与目标会话 Agent 之间的通信桥（**每通道一个实例**）。
+///
+/// 两个 Windows 用户会话之间不能直接通信，因此统一走共享目录下的一组文件：
 ///   command.json  主控端写、Agent 读（要执行的任务快照）
 ///   status.json   Agent 写、主控端读（进度 + 事件流）
+///   stop.json     主控端写、Agent 读（请求停止 / 紧急停止）
 /// 写入一律走"临时文件 + 原子替换"，读取容忍并发 IOException 并重试，
 /// 避免主控端正在读时 Agent 正好重写导致解析到半个文件。
+///
+/// 为什么改成实例类：多会话通道并行时，每个通道必须有自己的一座桥
+/// （同一个 command.json 会被多个代理抢读，任务就串了）。
+/// 目录由 <see cref="RdpChannelPaths"/> 按通道/用户名派生，两端各自推算出同一个路径。
 /// </summary>
-public static class RdpBridge
+public sealed class RdpBridge
 {
     private const int MaxEvents = 500;
     private const int ReadRetry = 5;
+
+    private static readonly object CacheGate = new();
+    private static readonly Dictionary<string, RdpBridge> Cache = new(StringComparer.OrdinalIgnoreCase);
 
     private static readonly JsonSerializerOptions WriteOptions = new()
     {
@@ -38,45 +48,78 @@ public static class RdpBridge
         AllowTrailingCommas = true,
     };
 
-    /// <summary>
-    /// 当前生效的共享目录。默认是本机 ProgramData 下（够用于本机多用户）；
-    /// 目标是远程主机时，两端都要指向同一个双方可访问的位置（UNC 网络共享或映射盘符）。
-    /// </summary>
-    public static string BridgeDir { get; private set; } = DefaultBridgeDir();
-
-    /// <summary>默认共享目录：C:\ProgramData\YukinoChan\rdp（所有用户可读，只有管理员/创建者可写）。</summary>
-    public static string DefaultBridgeDir() =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "YukinoChan", "rdp");
-
-    /// <summary>是否用了自定义的桥目录（非本机 ProgramData）。</summary>
-    public static bool IsCustomized { get; private set; }
-
-    /// <summary>
-    /// 设置桥目录。传空表示回到默认目录。
-    /// 主控端在连接前调用；Agent 端由 --bridge: 参数在启动时调用。
-    /// </summary>
-    public static void Configure(string? customPath)
+    /// <summary>建一座指向指定目录的桥。目录选取请优先用 <see cref="For"/> / <see cref="ForChannel"/>。</summary>
+    public RdpBridge(string directory)
     {
-        var text = (customPath ?? string.Empty).Trim();
-        if (text.Length == 0)
-        {
-            BridgeDir = DefaultBridgeDir();
-            IsCustomized = false;
-            return;
-        }
-
-        BridgeDir = text;
-        IsCustomized = true;
+        var text = (directory ?? string.Empty).Trim();
+        BridgeDir = text.Length == 0 ? DefaultBridgeDir() : text;
     }
 
-    public static string CommandPath => Path.Combine(BridgeDir, "command.json");
+    /// <summary>本座桥的共享目录。</summary>
+    public string BridgeDir { get; }
 
-    public static string StatusPath => Path.Combine(BridgeDir, "status.json");
+    /// <summary>是否用了自定义目录（不是按当前账户派生的默认目录）。</summary>
+    public bool IsCustomized =>
+        !string.Equals(
+            Path.GetFullPath(BridgeDir).TrimEnd(Path.DirectorySeparatorChar),
+            Path.GetFullPath(DefaultBridgeDir()).TrimEnd(Path.DirectorySeparatorChar),
+            StringComparison.OrdinalIgnoreCase);
 
     /// <summary>最近一次写入失败的原因，用于界面提示与排障。</summary>
-    public static string LastError { get; private set; } = string.Empty;
+    public string LastError { get; private set; } = string.Empty;
 
-    public static void EnsureDirectory()
+    public string CommandPath => Path.Combine(BridgeDir, "command.json");
+
+    public string StatusPath => Path.Combine(BridgeDir, "status.json");
+
+    /// <summary>停止请求文件：主控端写、Agent 读。老版本 Agent 不认识它，写了也不会响应（无害）。</summary>
+    public string StopPath => Path.Combine(BridgeDir, "stop.json");
+
+    // ---------------- 桥实例的选取 ----------------
+
+    /// <summary>
+    /// 默认桥目录：<c>&lt;ProgramData&gt;\YukinoChan\rdp\&lt;当前账户&gt;</c>。
+    /// 代理侧按"自己在哪个账户"算，主控端按"通道配的账户"算，两边自然对齐。
+    /// </summary>
+    public static string DefaultBridgeDir() => RdpChannelPaths.AgentBridgeDir(Environment.UserName);
+
+    /// <summary>按目录取桥实例（同目录复用同一实例）。传空 = 默认目录。</summary>
+    public static RdpBridge For(string? directory)
+    {
+        var text = (directory ?? string.Empty).Trim();
+        var key = text.Length == 0 ? DefaultBridgeDir() : text;
+
+        lock (CacheGate)
+        {
+            if (!Cache.TryGetValue(key, out var bridge))
+            {
+                bridge = new RdpBridge(key);
+                Cache[key] = bridge;
+            }
+
+            return bridge;
+        }
+    }
+
+    /// <summary>按通道取桥实例：配了 bridge_path 用它，否则按通道账户派生。</summary>
+    public static RdpBridge ForChannel(RdpChannel? channel) =>
+        For(RdpChannelPaths.BridgeDirFor(channel));
+
+    /// <summary>
+    /// Agent 进程用的桥。
+    /// 启动时由 <see cref="ConfigureAgent"/> 设定（命令行 --bridge: 优先，否则按当前账户派生）。
+    /// </summary>
+    public static RdpBridge Agent { get; private set; } = For(null);
+
+    /// <summary>Agent 启动时确定自己该读写哪座桥。</summary>
+    public static void ConfigureAgent(string? customPath)
+    {
+        Agent = For(customPath);
+    }
+
+    // ---------------- 共享目录 ----------------
+
+    public void EnsureDirectory()
     {
         try
         {
@@ -88,9 +131,27 @@ public static class RdpBridge
         }
     }
 
+    /// <summary>在资源管理器里打开共享目录（排障用）。</summary>
+    public void OpenBridgeFolder()
+    {
+        EnsureDirectory();
+        try
+        {
+            Process.Start(new ProcessStartInfo("explorer.exe")
+            {
+                Arguments = $"\"{BridgeDir}\"",
+                UseShellExecute = true,
+            });
+        }
+        catch
+        {
+            // 忽略
+        }
+    }
+
     // ---------------- 主控端：下发指令 ----------------
 
-    public static bool WriteCommand(RdpCommand command)
+    public bool WriteCommand(RdpCommand command)
     {
         EnsureDirectory();
         try
@@ -106,7 +167,7 @@ public static class RdpBridge
     }
 
     /// <summary>清空上一次的状态，并写入一个 idle 占位，让主控端立刻知道 Agent 还没接手。</summary>
-    public static void ResetStatus(string commandId)
+    public void ResetStatus(string commandId)
     {
         EnsureDirectory();
         var status = new RdpStatus
@@ -126,10 +187,79 @@ public static class RdpBridge
         }
     }
 
+    // ---------------- 主控端：请求停止 ----------------
+
+    /// <summary>请求目标会话停止当前指令（Agent 每秒检查一次）。</summary>
+    public bool WriteStop(string commandId, bool emergency)
+    {
+        EnsureDirectory();
+        try
+        {
+            LastError = string.Empty;
+            var request = new RdpStopRequest { CommandId = commandId ?? string.Empty, Emergency = emergency };
+            return WriteAtomic(StopPath, JsonSerializer.Serialize(request, WriteOptions));
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+            return false;
+        }
+    }
+
+    /// <summary>读停止请求（Agent 侧）。读不到或解析失败都返回 null。</summary>
+    public RdpStopRequest? TryReadStop()
+    {
+        try
+        {
+            if (!File.Exists(StopPath))
+            {
+                return null;
+            }
+
+            var text = ReadTextWithRetry(StopPath);
+            return string.IsNullOrWhiteSpace(text)
+                ? null
+                : JsonSerializer.Deserialize<RdpStopRequest>(text, ReadOptions);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Agent 侧判定：是否有人请求停止**当前这条指令**。
+    /// 归属校验不可省 —— 桥里可能残留上一轮指令的 stop.json，
+    /// 不校验的话新指令一启动就会被它立刻停掉。
+    /// </summary>
+    public bool IsStopRequested(string currentCommandId, out bool emergency)
+    {
+        emergency = false;
+        var request = TryReadStop();
+        if (request is null || string.IsNullOrEmpty(currentCommandId))
+        {
+            return false;
+        }
+
+        if (!string.Equals(request.CommandId, currentCommandId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        emergency = request.Emergency;
+        return true;
+    }
+
+    /// <summary>处理完停止请求后删掉它，避免重复触发。</summary>
+    public void ClearStop()
+    {
+        TryDeleteQuietly(StopPath);
+    }
+
     // ---------------- Agent：回写状态 ----------------
 
     /// <summary>Agent 侧读改写状态。Agent 是 status.json 的唯一写者，无需加锁。</summary>
-    public static bool UpdateStatus(Func<RdpStatus, RdpStatus> mutator)
+    public bool UpdateStatus(Func<RdpStatus, RdpStatus> mutator)
     {
         EnsureDirectory();
         try
@@ -200,7 +330,7 @@ public static class RdpBridge
 
     // ---------------- 双方通用读取 ----------------
 
-    public static bool TryReadCommand(out RdpCommand? command)
+    public bool TryReadCommand(out RdpCommand? command)
     {
         command = null;
         try
@@ -225,7 +355,7 @@ public static class RdpBridge
         }
     }
 
-    public static RdpStatus? TryReadStatus()
+    public RdpStatus? TryReadStatus()
     {
         try
         {
@@ -245,6 +375,46 @@ public static class RdpBridge
         }
     }
 
+    /// <summary>
+    /// 清掉指令文件（Agent 读到并接管后调用，防止代理被再次拉起时重复执行同一批任务）。
+    ///
+    /// 首选直接删。跨账户场景下删除可能被 ACL 拦（指令文件是主控端账户创建的），
+    /// 这时退化为清空内容 —— 效果一样：读取方看到空内容会当作"没有指令"。
+    /// </summary>
+    public void ConsumeCommand()
+    {
+        var path = CommandPath;
+
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+                return;
+            }
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // 落到下面清空内容
+        }
+        catch (IOException)
+        {
+            // 文件被占用等情况，同样清空内容
+        }
+
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.WriteAllText(path, string.Empty, new UTF8Encoding(false));
+            }
+        }
+        catch
+        {
+            // 彻底没辙就留着，但读取方会因为内容为空而当作"没有指令"
+        }
+    }
+
     // ---------------- 内部实现 ----------------
 
     /// <summary>
@@ -255,7 +425,7 @@ public static class RdpBridge
     /// 跨账户场景下目标文件是另一个账户创建的，ACL 常常不允许删除，
     /// 所以必须有兜底 —— 写不进去会让整个任务链路断掉，比"可能读到半截"严重得多。
     /// </summary>
-    private static bool WriteAtomic(string path, string content)
+    private bool WriteAtomic(string path, string content)
     {
         var directory = Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(directory))
@@ -315,7 +485,7 @@ public static class RdpBridge
     }
 
     /// <summary>兜底写入：直接覆写目标文件。失败时抛异常，由调用方记录 LastError。</summary>
-    private static bool OverwriteDirectly(string path, string content)
+    private bool OverwriteDirectly(string path, string content)
     {
         try
         {
@@ -392,23 +562,5 @@ public static class RdpBridge
         }
 
         return string.Empty;
-    }
-
-    /// <summary>在资源管理器里打开共享目录（排障用）。</summary>
-    public static void OpenBridgeFolder()
-    {
-        EnsureDirectory();
-        try
-        {
-            Process.Start(new ProcessStartInfo("explorer.exe")
-            {
-                Arguments = $"\"{BridgeDir}\"",
-                UseShellExecute = true,
-            });
-        }
-        catch
-        {
-            // 忽略
-        }
     }
 }

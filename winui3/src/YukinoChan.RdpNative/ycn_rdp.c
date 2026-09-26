@@ -42,7 +42,11 @@ EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 
 /* ---------------- 常量 ---------------- */
 
-#define YCN_MAX_SESSIONS 4
+/* 并发内嵌会话上限。
+ * 多会话通道并行需要同时挂多条连接；8 路对桌面/Server 场景都够用，
+ * 每路约 1 个事件循环线程 + 帧缓冲，再高没有实际收益。
+ * 改动此处必须同步 C# 侧 RdpNativeLimits.MaxSessions（Models/RdpChannelPlanner.cs）。 */
+#define YCN_MAX_SESSIONS 8
 #define YCN_ERRBUF_LEN   512
 #define TAG "ycn.rdpnative"
 

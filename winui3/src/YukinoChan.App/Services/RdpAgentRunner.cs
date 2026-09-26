@@ -39,11 +39,18 @@ public sealed class RdpAgentRunner
     private readonly FileLogger _logger;
     private readonly RuntimeStatsManager _stats;
 
+    /// <summary>本代理读写哪座桥 —— Agent 启动时由 --bridge:（或按账户名派生）确定，见 App.OnLaunched。</summary>
+    private readonly RdpBridge _bridge;
+
+    /// <summary>停止请求只处理一次（击键连点 / 多拍重复读到同一个请求时不要反复下发）。</summary>
+    private bool _stopHandled;
+
     public RdpAgentRunner(RdpCommand command)
     {
         _command = command;
         _logger = new FileLogger(AppPaths.LogDir);
         _stats = new RuntimeStatsManager(AppPaths.StatsDir);
+        _bridge = RdpBridge.Agent;
     }
 
     /// <summary>命令行里是否带了 --rdp-agent。</summary>
@@ -124,37 +131,43 @@ public sealed class RdpAgentRunner
             return status;
         });
 
-        runner.ElapsedChanged += (_, seconds) => Update(status =>
+        runner.ElapsedChanged += (_, seconds) =>
         {
-            // 任务切换时 ScriptRunner 会把计时归零（RaiseElapsed(0)），脉搏也要跟着重置，
-            // 否则新任务的脉搏要等很久才会出现。
-            if (seconds < lastPulseSecond)
+            // 每秒一拍：顺手看一眼主控端有没有请求停止（桥文件是两个会话之间唯一的通信手段）
+            CheckStopRequest(runner);
+
+            Update(status =>
             {
-                lastPulseSecond = 0;
-            }
+                // 任务切换时 ScriptRunner 会把计时归零（RaiseElapsed(0)），脉搏也要跟着重置，
+                // 否则新任务的脉搏要等很久才会出现。
+                if (seconds < lastPulseSecond)
+                {
+                    lastPulseSecond = 0;
+                }
 
-            status.ElapsedSeconds = seconds;
+                status.ElapsedSeconds = seconds;
 
-            // 【脉搏】任务运行期间每 60 秒回一条事件。
-            // 没有它的话，主控端在任务执行期间只能看到一个静止的"运行中" ——
-            // ScriptRunner 在任务跑的过程中只有日志、没有结构性事件，
-            // 事件列表会一直空着，用户根本判断不出任务是还在跑还是已经卡死。
-            if (seconds - lastPulseSecond >= PulseIntervalSeconds)
-            {
-                lastPulseSecond = seconds;
-                var name = string.IsNullOrEmpty(status.CurrentTask) ? "（未知任务）" : status.CurrentTask;
-                status.Events.Add(RdpBridge.MakeEvent(
-                    status,
-                    RdpEventKinds.Log,
-                    $"仍在运行，已耗时 {FormatHelper.FormatSeconds(seconds)}",
-                    name,
-                    status.Progress,
-                    status.Total,
-                    seconds));
-            }
+                // 【脉搏】任务运行期间每 60 秒回一条事件。
+                // 没有它的话，主控端在任务执行期间只能看到一个静止的"运行中" ——
+                // ScriptRunner 在任务跑的过程中只有日志、没有结构性事件，
+                // 事件列表会一直空着，用户根本判断不出任务是还在跑还是已经卡死。
+                if (seconds - lastPulseSecond >= PulseIntervalSeconds)
+                {
+                    lastPulseSecond = seconds;
+                    var name = string.IsNullOrEmpty(status.CurrentTask) ? "（未知任务）" : status.CurrentTask;
+                    status.Events.Add(RdpBridge.MakeEvent(
+                        status,
+                        RdpEventKinds.Log,
+                        $"仍在运行，已耗时 {FormatHelper.FormatSeconds(seconds)}",
+                        name,
+                        status.Progress,
+                        status.Total,
+                        seconds));
+                }
 
-            return status;
-        });
+                return status;
+            });
+        };
 
         runner.TaskStarted += (_, info) => Update(status =>
         {
@@ -279,7 +292,7 @@ public sealed class RdpAgentRunner
 
     private void Update(Func<RdpStatus, RdpStatus> mutator)
     {
-        RdpBridge.UpdateStatus(status =>
+        _bridge.UpdateStatus(status =>
         {
             status.CommandId = _command.Id;
             status.AgentUser = Environment.UserName;
@@ -288,7 +301,7 @@ public sealed class RdpAgentRunner
     }
 
     private void Append(string kind, string message, bool abnormal = false) =>
-        RdpBridge.UpdateStatus(status =>
+        _bridge.UpdateStatus(status =>
         {
             status.CommandId = _command.Id;
             status.AgentUser = Environment.UserName;
@@ -310,41 +323,42 @@ public sealed class RdpAgentRunner
         Logged?.Invoke(this, line);
     }
 
-    /// <summary>清掉上一条指令，避免 Agent 重启后重复执行。</summary>
-    public static void ClearCommand()
+    /// <summary>
+    /// 响应主控端的停止请求（stop.json）。
+    ///
+    /// 为什么必须由 Agent 主动查：任务跑在目标会话里，主控端点了「停止执行」之后
+    /// 没有任何办法直接去停那个进程 —— 两条会话之间只有桥文件能通信。
+    /// 这里挂在每秒的计时回调上，代价可以忽略。
+    /// </summary>
+    private void CheckStopRequest(ScriptRunner runner)
     {
-        var path = RdpBridge.CommandPath;
-
-        // 首选直接删掉。跨账户场景下删除可能会被 ACL 拦（指令文件是主控端账户创建的），
-        // 这时退化为清空内容 —— 效果一样，都不会被再次执行。
-        try
+        if (!_bridge.IsStopRequested(_command.Id, out var emergency))
         {
-            if (File.Exists(path))
-            {
-                File.Delete(path);
-                return;
-            }
-        }
-        catch (UnauthorizedAccessException)
-        {
-            // 落到下面清空内容
-        }
-        catch (IOException)
-        {
-            // 文件被占用等情况，同样清空内容
+            return;
         }
 
-        try
+        // 先把请求文件清掉：ScriptRunner 停止是异步收尾，还会再跑一会儿，
+        // 不清掉的话后面每一拍都会重复触发。
+        _bridge.ClearStop();
+
+        if (_stopHandled)
         {
-            if (File.Exists(path))
-            {
-                File.WriteAllText(path, string.Empty, new UTF8Encoding(false));
-            }
+            return;
         }
-        catch
+
+        _stopHandled = true;
+
+        var text = emergency ? "收到紧急停止请求，立即结束任务。" : "收到停止请求，正在收尾。";
+        Log(text);
+        Append(RdpEventKinds.Log, text);
+
+        if (emergency)
         {
-            // 彻底没辙就留着，但至少 ReadCommand 会因为内容为空而返回 false，
-            // 不会把同一批任务重复执行一遍。
+            runner.RequestEmergencyStop();
+        }
+        else
+        {
+            runner.RequestStop();
         }
     }
 }

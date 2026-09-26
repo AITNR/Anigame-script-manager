@@ -52,7 +52,7 @@
                 <NavigationViewItem Tag="tasks" Content="任务执行" Icon="List" />
                 <NavigationViewItem Tag="stats" Content="耗时统计" Icon="Clock" />
                 <NavigationViewItem Tag="logs" Content="运行日志" Icon="Document" />
-                <NavigationViewItem Tag="rdp" Content="远程会话" Icon="People" />
+                <NavigationViewItem Tag="channels" Content="会话通道" Icon="People" />
             </NavigationView.MenuItems>
 
             <NavigationView.FooterMenuItems>

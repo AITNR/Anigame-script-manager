@@ -24,6 +24,8 @@ public sealed class TaskConfig : ObservableObject, ICloneable
     private string _waitMode = WaitModes.DirectProcess;
     private string _waitProcessName = string.Empty;
     private int _confirmEnterDelaySeconds;
+    private string _channelId = string.Empty;
+    private string _channelDisplay = "本地执行";
     private string _concurrentGroup = string.Empty;
     private string _concurrentPolicy = ConcurrentPolicies.WaitAll;
     private bool _enableWatchdog;
@@ -108,6 +110,28 @@ public sealed class TaskConfig : ObservableObject, ICloneable
     {
         get => _confirmEnterDelaySeconds;
         set => SetProperty(ref _confirmEnterDelaySeconds, value);
+    }
+
+    /// <summary>
+    /// 执行通道：任务在哪个会话通道里跑。
+    /// 留空 = 本地执行（跑在主控端当前会话里，与改造前的行为一致）。
+    /// </summary>
+    [JsonPropertyName("channel_id")]
+    public string ChannelId
+    {
+        get => _channelId;
+        set => SetProperty(ref _channelId, (value ?? string.Empty).Trim());
+    }
+
+    /// <summary>
+    /// 通道的显示名（**运行期填充，不落盘**）：任务只存 <see cref="ChannelId"/>，
+    /// 列表上要给人看的是名字 —— 由 <c>MainViewModel.RefreshChannelChoices()</c> 从通道配置反查后写进来。
+    /// </summary>
+    [JsonIgnore]
+    public string ChannelDisplay
+    {
+        get => _channelDisplay;
+        set => SetProperty(ref _channelDisplay, value ?? string.Empty);
     }
 
     [JsonPropertyName("concurrent_group")]
@@ -225,6 +249,7 @@ public sealed class TaskConfig : ObservableObject, ICloneable
         TimeoutMinutes = Math.Max(0, TimeoutMinutes);
         ConfirmEnterDelaySeconds = Math.Max(0, ConfirmEnterDelaySeconds);
         Order = Math.Max(1, Order == 0 ? fallbackOrder : Order);
+        ChannelId = (ChannelId ?? string.Empty).Trim();
         ConcurrentGroup = (ConcurrentGroup ?? string.Empty).Trim();
         ProcessKeywords = KeywordHelper.Normalize(ProcessKeywords);
         WindowKeywords = KeywordHelper.Normalize(WindowKeywords);

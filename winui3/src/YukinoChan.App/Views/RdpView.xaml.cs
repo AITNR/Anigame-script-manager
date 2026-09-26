@@ -4,7 +4,7 @@
 // + 布局完成，GPU 组合器采样）。D3D 初始化失败自动回退 M2 SoftwareBitmap 路线。
 // D3D 采用**惰性初始化**：第一帧到达时按真实帧尺寸创建（Connect/AttachClient 两用）。
 //
-// 输入：指针/键盘事件经 RdpInputMapper 转发；全屏接管见 RdpPage 的 LL 钩子。
+// 输入：指针/键盘事件经 RdpInputMapper 转发；全屏接管见 ChannelsPage 的 LL 钩子。
 using System;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;

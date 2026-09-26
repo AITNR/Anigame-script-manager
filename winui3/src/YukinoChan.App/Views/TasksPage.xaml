@@ -53,6 +53,8 @@
                                     <TextBlock Text="{x:Bind DisplayName, Mode=OneWay}" TextTrimming="CharacterEllipsis" />
                                     <TextBlock Text="{x:Bind ScriptPath, Mode=OneWay}"
                                                FontSize="11" Opacity="0.55" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Text="{x:Bind ChannelDisplay, Mode=OneWay}"
+                                               FontSize="11" Opacity="0.45" TextTrimming="CharacterEllipsis" />
                                 </StackPanel>
 
                                 <ToggleSwitch Grid.Column="2"
@@ -88,6 +90,20 @@
                                     <TextBox Grid.Column="0" Header="脚本路径" Text="{Binding ScriptPath, Mode=TwoWay}" />
                                     <Button Grid.Column="1" Content="浏览" VerticalAlignment="Bottom" Click="OnBrowseScript" />
                                 </Grid>
+
+                                <!-- 执行通道（M4 / D6）：「本地执行」是显式第一项，也是新建任务的默认值，
+                                     免得"忘了选通道就悄悄跑远程"。留空 id 即本地执行。 -->
+                                <ComboBox x:Name="ChannelBox"
+                                          Header="执行通道"
+                                          HorizontalAlignment="Stretch"
+                                          ItemsSource="{x:Bind VM.ChannelChoices, Mode=OneWay}"
+                                          DisplayMemberPath="Name"
+                                          SelectedValuePath="Id"
+                                          SelectedValue="{Binding ChannelId, Mode=TwoWay}">
+                                    <ToolTipService.ToolTip>
+                                        <ToolTip Content="任务在哪个通道里跑。本地执行 = 当前会话；选了会话通道则下发到目标账户的会话，多条通道可并行执行。" />
+                                    </ToolTipService.ToolTip>
+                                </ComboBox>
 
                                 <Grid ColumnSpacing="12">
                                     <Grid.ColumnDefinitions>

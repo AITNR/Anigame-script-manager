@@ -90,11 +90,18 @@ public sealed class AppConfig : ObservableObject
     [JsonPropertyName("rdp")]
     public RdpConfig Rdp { get; set; } = new();
 
+    /// <summary>主窗口位置/尺寸，用于"记住上次窗口大小"。整段缺失时按默认尺寸启动。</summary>
+    [JsonPropertyName("window")]
+    public WindowConfig Window { get; set; } = new();
+
     /// <summary>规范化：主题兜底、按 order 排序并重写连续序号。</summary>
     public void Sanitize()
     {
         Rdp ??= new RdpConfig();
         Rdp.Sanitize();
+
+        Window ??= new WindowConfig();
+        Window.Sanitize();
 
         var theme = (Theme ?? string.Empty).ToLowerInvariant();
         var allowed = false;
@@ -117,6 +124,54 @@ public sealed class AppConfig : ObservableObject
             Tasks[i].Sanitize(i + 1);
             Tasks[i].Order = i + 1;
         }
+
+        MigrateLegacyChannel();
+    }
+
+    /// <summary>
+    /// 旧配置迁移：改造前只有一组全局 target_host / target_user，只能跑一路远程。
+    /// 这里把它变成一个「默认通道」，并把没指定通道的任务都指过去 —— 升级后行为不变。
+    ///
+    /// 幂等：已经有通道（用户自己建过）或从没配过目标账户时，什么都不做。
+    /// 注意只在 RDP 总开关打开时迁移：关掉开关时全部任务本来就跑本地，
+    /// 此时凭空多出一个通道只会让人困惑。
+    /// </summary>
+    private void MigrateLegacyChannel()
+    {
+        if (!Rdp.Enabled || Rdp.Channels.Count > 0)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(Rdp.TargetUser))
+        {
+            return;
+        }
+
+        var channel = new RdpChannel
+        {
+            Id = RdpChannel.LegacyDefaultId,
+            Name = Rdp.TargetUser,
+            Host = Rdp.TargetHost,
+            User = Rdp.TargetUser,
+            BridgePath = Rdp.BridgePath,
+            CredentialSaved = Rdp.CredentialSaved,
+            SessionFinish = Rdp.SessionFinish,
+            DesktopWidth = Rdp.DesktopWidth,
+            DesktopHeight = Rdp.DesktopHeight,
+            Enabled = true,
+        };
+
+        channel.Sanitize(1);
+        Rdp.Channels.Add(channel);
+
+        foreach (var task in Tasks)
+        {
+            if (string.IsNullOrWhiteSpace(task.ChannelId))
+            {
+                task.ChannelId = channel.Id;
+            }
+        }
     }
 
     public AppConfig CloneWithTasks(IEnumerable<TaskConfig> tasks) => new(tasks)
@@ -129,5 +184,6 @@ public sealed class AppConfig : ObservableObject
         WindowsStartup = WindowsStartup,
         EnableTimeoutScreenshot = EnableTimeoutScreenshot,
         Rdp = (RdpConfig)Rdp.Clone(),
+        Window = (WindowConfig)Window.Clone(),
     };
 }

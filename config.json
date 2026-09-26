@@ -19,6 +19,7 @@
       "wait_mode": "direct_process",
       "wait_process_name": "",
       "confirm_enter_delay_seconds": 0,
+      "channel_id": "default",
       "concurrent_group": "",
       "concurrent_policy": "wait_all",
       "enable_watchdog": false,
@@ -40,6 +41,7 @@
       "wait_mode": "window_title",
       "wait_process_name": "星穹铁道",
       "confirm_enter_delay_seconds": 0,
+      "channel_id": "default",
       "concurrent_group": "",
       "concurrent_policy": "wait_all",
       "enable_watchdog": false,
@@ -61,6 +63,7 @@
       "wait_mode": "process_name",
       "wait_process_name": "鸣潮",
       "confirm_enter_delay_seconds": 0,
+      "channel_id": "default",
       "concurrent_group": "",
       "concurrent_policy": "wait_all",
       "enable_watchdog": true,
@@ -84,6 +87,7 @@
       "wait_mode": "process_name",
       "wait_process_name": "BetterGI.exe",
       "confirm_enter_delay_seconds": 0,
+      "channel_id": "default",
       "concurrent_group": "",
       "concurrent_policy": "wait_all",
       "enable_watchdog": false,
@@ -107,6 +111,7 @@
       "wait_mode": "process_name",
       "wait_process_name": "MaaEnd.exe",
       "confirm_enter_delay_seconds": 0,
+      "channel_id": "default",
       "concurrent_group": "",
       "concurrent_policy": "wait_all",
       "enable_watchdog": true,
@@ -130,6 +135,7 @@
       "wait_mode": "process_name",
       "wait_process_name": "maa.exe",
       "confirm_enter_delay_seconds": 0,
+      "channel_id": "default",
       "concurrent_group": "",
       "concurrent_policy": "wait_all",
       "enable_watchdog": true,
@@ -153,6 +159,7 @@
       "wait_mode": "direct_process",
       "wait_process_name": "",
       "confirm_enter_delay_seconds": 0,
+      "channel_id": "default",
       "concurrent_group": "",
       "concurrent_policy": "wait_all",
       "enable_watchdog": true,
@@ -179,8 +186,29 @@
     "embed_remote_desktop": false,
     "client_mode": "embedded",
     "audio_enabled": true,
-    "gfx_enabled": false,
+    "gfx_enabled": true,
     "desktop_width": 1920,
-    "desktop_height": 1080
+    "desktop_height": 1080,
+    "channels": [
+      {
+        "id": "default",
+        "name": "zdh",
+        "host": "127.0.0.2",
+        "user": "zdh",
+        "bridge_path": "",
+        "credential_saved": true,
+        "session_finish": "keep",
+        "desktop_width": 1920,
+        "desktop_height": 1080,
+        "enabled": true
+      }
+    ]
+  },
+  "window": {
+    "x": 1260,
+    "y": 614,
+    "width": 2008,
+    "height": 860,
+    "maximized": false
   }
 }

@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 会话通道页（计划书 §8.2 / D3，多画面见 M6）：
+     左侧菜单里每一条「会话通道」对应一个本页面 —— 画面从原「远程会话」页搬到了这里。
+     页面展示**本通道**的进度 / 心跳 / 事件，画面区可在「单画面 / 多画面」之间切换：
+       单画面 = 只摆本通道一格（占满，可全屏）；
+       多画面 = 2×2 网格并列全部会话通道（每页最多 4 格，超过分页），每格可弹成独立窗口。
+
+     布局原则：**画面优先**。画面卡占窗口全部剩余空间，事件卡默认只占底部一条且可折叠 ——
+     之前事件卡写死 180px，窗口稍矮就把画面挤成一条横带（用户实测反馈）。 -->
+<Page
+    x:Class="YukinoChan.Views.RdpChannelPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:models="using:YukinoChan.Models"
+    xmlns:views="using:YukinoChan.Views">
+
+    <Grid Padding="16,12" RowSpacing="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" MinHeight="220" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- ===== 通道头：目标与快捷操作 ===== -->
+        <Border Grid.Row="0" Padding="14,10" Style="{StaticResource YukinoCardStyle}">
+            <Grid ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" Spacing="3">
+                    <TextBlock Text="{x:Bind ChannelName, Mode=OneWay}"
+                               Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock Text="{x:Bind TargetText, Mode=OneWay}"
+                               Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8"
+                            VerticalAlignment="Center">
+                    <ToggleButton x:Name="SingleViewButton" Content="单画面" Click="OnSingleViewClicked" />
+                    <ToggleButton x:Name="MultiViewButton" Content="多画面" Click="OnMultiViewClicked" />
+                    <Button Content="连接本通道" Click="OnConnectPreviewClicked" />
+                    <Button Content="打开桥目录" Click="OnOpenBridgeClicked" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- ===== 这条通道自己的进度 ===== -->
+        <Border Grid.Row="1" Padding="14,8" Style="{StaticResource YukinoCardStyle}">
+            <StackPanel Spacing="6">
+                <ProgressBar Value="{x:Bind ProgressValue, Mode=OneWay}"
+                             Maximum="{x:Bind ProgressMax, Mode=OneWay}" />
+
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="{x:Bind TaskText, Mode=OneWay}"
+                               TextTrimming="CharacterEllipsis" />
+                    <TextBlock Grid.Column="1" Text="{x:Bind ProgressText, Mode=OneWay}" Opacity="0.75" />
+                    <TextBlock Grid.Column="2" Text="{x:Bind ElapsedText, Mode=OneWay}" Opacity="0.75" />
+                </Grid>
+
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBlock Text="{x:Bind StatusText, Mode=OneWay}" TextWrapping="Wrap" />
+                    <TextBlock Text="·" Opacity="0.5" />
+                    <TextBlock Text="{x:Bind HeartbeatText, Mode=OneWay}" Opacity="0.7" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <!-- ===== 画面区：单画面一格 / 多画面 2×2 网格 ===== -->
+        <Border Grid.Row="2" Padding="0" Style="{StaticResource YukinoCardStyle}">
+            <Grid>
+                <Grid x:Name="SurfaceLayout" Padding="6" RowSpacing="6" ColumnSpacing="6">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+
+                    <views:RdpSurfaceCell x:Name="Cell0" Grid.Row="0" Grid.Column="0" />
+                    <views:RdpSurfaceCell x:Name="Cell1" Grid.Row="0" Grid.Column="1" />
+                    <views:RdpSurfaceCell x:Name="Cell2" Grid.Row="1" Grid.Column="0" />
+                    <views:RdpSurfaceCell x:Name="Cell3" Grid.Row="1" Grid.Column="1" />
+                </Grid>
+
+                <!-- 一路通道都没有时的空态 -->
+                <StackPanel x:Name="SurfaceEmptyHint"
+                            HorizontalAlignment="Center" VerticalAlignment="Center"
+                            Spacing="10" MaxWidth="460"
+                            Visibility="Collapsed">
+                    <TextBlock x:Name="SurfaceEmptyText"
+                               TextWrapping="Wrap" TextAlignment="Center" Opacity="0.75" />
+                </StackPanel>
+
+                <!-- 多画面分页（只有超过 4 条通道时才出现） -->
+                <StackPanel x:Name="PagerBar"
+                            Orientation="Horizontal" Spacing="8"
+                            HorizontalAlignment="Center" VerticalAlignment="Bottom"
+                            Margin="0,0,0,10"
+                            Visibility="Collapsed">
+                    <Button x:Name="PrevPageButton" Content="上一页" Click="OnPrevPageClicked" />
+                    <TextBlock x:Name="PageText" VerticalAlignment="Center" Opacity="0.8" />
+                    <Button x:Name="NextPageButton" Content="下一页" Click="OnNextPageClicked" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- ===== 这条通道的事件（可折叠，收起后画面更大） ===== -->
+        <Border Grid.Row="3" Padding="14,8" Style="{StaticResource YukinoCardStyle}">
+            <Grid RowSpacing="6">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <Grid Grid.Row="0">
+                    <TextBlock Text="通道事件" VerticalAlignment="Center"
+                               Style="{StaticResource BodyStrongTextBlockStyle}" />
+                    <HyperlinkButton x:Name="ToggleEventsButton" Content="收起"
+                                     HorizontalAlignment="Right" Click="OnToggleEventsClicked" />
+                </Grid>
+
+                <ListView x:Name="EventList" Grid.Row="1" Height="140"
+                          ItemsSource="{x:Bind Events, Mode=OneWay}"
+                          SelectionMode="None">
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="models:RdpTaskEvent">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <TextBlock Text="{x:Bind Time}" Opacity="0.55" FontSize="12" />
+                                <TextBlock Text="{x:Bind Headline}" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+            </Grid>
+        </Border>
+    </Grid>
+</Page>

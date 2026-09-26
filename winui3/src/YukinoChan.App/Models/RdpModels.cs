@@ -470,6 +470,7 @@ public sealed class RdpConfig : ObservableObject, ICloneable
     private bool _gfxEnabled;
     private int _desktopWidth;
     private int _desktopHeight;
+    private List<RdpChannel> _channels = new();
 
     /// <summary>是否在 RDP 会话中执行任务（关闭则仍在当前会话本地执行）。</summary>
     [JsonPropertyName("enabled")]
@@ -608,6 +609,18 @@ public sealed class RdpConfig : ObservableObject, ICloneable
     }
 
     /// <summary>
+    /// 会话通道列表：每个通道 = 主机 + 账户 + 桥目录 + 收尾策略，任务用 channel_id 指过来。
+    /// 上面的 target_* 一组是「旧配置迁移源 + 新建通道时的默认值」，
+    /// 单独跑一路的时代过去后它们不再是执行依据（Planner 只看通道）。
+    /// </summary>
+    [JsonPropertyName("channels")]
+    public List<RdpChannel> Channels
+    {
+        get => _channels;
+        set => SetProperty(ref _channels, value ?? new List<RdpChannel>());
+    }
+
+    /// <summary>
     /// 早期版本把这一节写成了 PascalCase（"TargetUser"、"SessionFinish"…）。
     /// 与项目其余配置的 snake_case 风格不一致，这里兜住旧键做一次性迁移。
     /// </summary>
@@ -625,6 +638,20 @@ public sealed class RdpConfig : ObservableObject, ICloneable
         ConnectTimeoutSeconds = Math.Clamp(ConnectTimeoutSeconds, 15, 600);
         DesktopWidth = RdpResolutions.Normalize(DesktopWidth, RdpResolutions.MinWidth, RdpResolutions.MaxWidth);
         DesktopHeight = RdpResolutions.Normalize(DesktopHeight, RdpResolutions.MinHeight, RdpResolutions.MaxHeight);
+
+        Channels ??= new List<RdpChannel>();
+        var seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < Channels.Count; i++)
+        {
+            var channel = Channels[i] ??= new RdpChannel();
+            channel.Sanitize(i + 1);
+
+            // id 撞车（手改配置 / 复制粘贴整段）→ 换一个，否则任务指向哪个通道就有歧义了
+            while (!seenIds.Add(channel.Id))
+            {
+                channel.Id = RdpChannel.NewId();
+            }
+        }
     }
 
     /// <summary>
@@ -717,7 +744,13 @@ public sealed class RdpConfig : ObservableObject, ICloneable
         ExtensionData = null;
     }
 
-    public object Clone() => (RdpConfig)MemberwiseClone();
+    public object Clone()
+    {
+        var copy = (RdpConfig)MemberwiseClone();
+        // 通道是可变对象，浅拷贝会让两份配置共享同一条通道 —— 必须逐个复制
+        copy._channels = _channels.Select(c => c.Clone()).ToList();
+        return copy;
+    }
 }
 
 /// <summary>主控端下发给目标会话 Agent 的执行指令。</summary>
@@ -738,6 +771,23 @@ public sealed class RdpCommand
 
     public bool NotifyOnTaskDone { get; set; } = true;
     public bool NotifyOnAllDone { get; set; } = true;
+}
+
+/// <summary>
+/// 主控端写进 stop.json 的停止请求（Agent 每秒检查一次）。
+///
+/// 为什么需要它：主控端点「停止执行」时，任务其实跑在目标会话的代理进程里，
+/// 两个会话之间没有别的通信手段 —— 只能靠桥文件把"停"这个意图传过去。
+/// 带 CommandId 是为了归属校验：桥里可能残留上一轮的请求，不校验会把新指令一起停掉。
+/// </summary>
+public sealed class RdpStopRequest
+{
+    public string CommandId { get; set; } = string.Empty;
+
+    /// <summary>true = 紧急停止（直接杀进程），false = 常规停止（收尾后退出）。</summary>
+    public bool Emergency { get; set; }
+
+    public string RequestedAt { get; set; } = DateTimeOffset.Now.ToString("o");
 }
 
 /// <summary>Agent 回写给主控端的一条事件（序号单调递增，主控端按序号去重）。</summary>

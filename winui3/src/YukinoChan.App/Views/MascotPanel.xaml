@@ -27,14 +27,14 @@
             </Grid.RowDefinitions>
 
             <TextBlock Grid.Row="0" Grid.Column="0" Text="状态" Style="{StaticResource StatusLabelStyle}" />
-            <TextBlock Grid.Row="0" Grid.Column="1" Text="{x:Bind VM.StatusText, Mode=OneWay}" Style="{StaticResource StatusValueStyle}" />
+            <TextBlock Grid.Row="0" Grid.Column="1" Text="{x:Bind VM.PanelStatusText, Mode=OneWay}" Style="{StaticResource StatusValueStyle}" />
             <TextBlock Grid.Row="0" Grid.Column="2" Text="耗时" Style="{StaticResource StatusLabelStyle}" />
-            <TextBlock Grid.Row="0" Grid.Column="3" Text="{x:Bind VM.ElapsedText, Mode=OneWay}" Style="{StaticResource StatusValueStyle}" />
+            <TextBlock Grid.Row="0" Grid.Column="3" Text="{x:Bind VM.PanelElapsedText, Mode=OneWay}" Style="{StaticResource StatusValueStyle}" />
 
             <TextBlock Grid.Row="1" Grid.Column="0" Text="当前" Style="{StaticResource StatusLabelStyle}" />
-            <TextBlock Grid.Row="1" Grid.Column="1" Margin="0,4,0,0" Text="{x:Bind VM.CurrentTaskName, Mode=OneWay}" Style="{StaticResource StatusValueStyle}" />
+            <TextBlock Grid.Row="1" Grid.Column="1" Margin="0,4,0,0" Text="{x:Bind VM.PanelCurrentTask, Mode=OneWay}" Style="{StaticResource StatusValueStyle}" />
             <TextBlock Grid.Row="1" Grid.Column="2" Text="进度" Style="{StaticResource StatusLabelStyle}" />
-            <TextBlock Grid.Row="1" Grid.Column="3" Margin="0,4,0,0" Text="{x:Bind VM.ProgressText, Mode=OneWay}" Style="{StaticResource StatusValueStyle}" />
+            <TextBlock Grid.Row="1" Grid.Column="3" Margin="0,4,0,0" Text="{x:Bind VM.PanelProgressText, Mode=OneWay}" Style="{StaticResource StatusValueStyle}" />
         </Grid>
 
         <!-- 发言气泡（引导态可点击切换下一条） -->

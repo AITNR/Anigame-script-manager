@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.Text;
 using System.Threading;
 using Microsoft.Win32;
@@ -105,15 +106,15 @@ public static class RdpSessionService
     /// </summary>
     public static string? PendingPassword { get; set; }
 
-    /// <summary>取连接用的密码：先看内存里刚存的，再回落到凭据管理器。</summary>
-    public static string? ResolvePassword(string? targetHost)
+    /// <summary>取连接用的密码：先看内存里刚存的，再回落到凭据管理器（按主机 + 账户查）。</summary>
+    public static string? ResolvePassword(string? targetHost, string? targetUser = null)
     {
         if (!string.IsNullOrEmpty(PendingPassword))
         {
             return PendingPassword;
         }
 
-        return TryLoadPassword(targetHost);
+        return TryLoadPassword(targetHost, targetUser);
     }
 
     // ---------------- 会话查询（WTS API） ----------------
@@ -413,16 +414,20 @@ public static class RdpSessionService
     /// <summary>
     /// 删除目标账户凭据。清完后再探一次，确认真的删干净了。
     /// </summary>
-    public static void DeleteCredential(string? targetHost)
+    public static void DeleteCredential(string? targetHost, string? targetUser = null)
     {
         var host = RdpTargets.Normalize(targetHost);
+
+        // cmdkey 那两条是给 mstsc 用的（按主机存，多账户会互相覆盖，只有单通道调试才走这条路）
         RunHidden("cmdkey", $"/delete:{host}");
         RunHidden("cmdkey", $"/delete:TERMSRV/{host}");
-        RdpCredentialStore.Delete(host);
+
+        RdpCredentialStore.Delete(host, targetUser);
     }
 
-    /// <summary>取出之前保存的目标账户密码，交给内嵌控件用；没有就返回 null。</summary>
-    public static string? TryLoadPassword(string? targetHost) => RdpCredentialStore.Read(RdpTargets.Normalize(targetHost));
+    /// <summary>取出之前保存的目标账户密码，交给内嵌客户端用；没有就返回 null。</summary>
+    public static string? TryLoadPassword(string? targetHost, string? targetUser = null) =>
+        RdpCredentialStore.Read(RdpTargets.Normalize(targetHost), targetUser);
 
     /// <summary>
     /// 凭据是否已保存。
@@ -431,9 +436,9 @@ public static class RdpSessionService
     /// cmdkey 那条是给 mstsc 兜底用的，删掉之后它可能残留，拿它判断会出现
     /// "界面说已保存、实际连不上" 的假阳性，所以这里不用它。
     /// </summary>
-    public static bool HasCredential(string? targetHost)
+    public static bool HasCredential(string? targetHost, string? targetUser = null)
     {
-        return RdpCredentialStore.Exists(RdpTargets.Normalize(targetHost));
+        return RdpCredentialStore.Exists(RdpTargets.Normalize(targetHost), targetUser);
     }
 
     private static bool CmdKey(params string[] arguments)
@@ -476,10 +481,35 @@ public static class RdpSessionService
     /// 临时生成的 .rdp 文件放在这里，每次连接覆盖写。
     /// 放 LocalAppData 而不是 ProgramData：写这里不需要管理员权限。
     /// </summary>
-    private static string SessionFilePath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "YukinoChan",
-        "session.rdp");
+    private static string SessionFilePath => SessionFilePathFor(null);
+
+    /// <summary>
+    /// 某条通道（或默认）的 .rdp 文件路径。
+    ///
+    /// 多通道并行时每条通道必须各用一份文件名 —— 共用一个 session.rdp 会互相覆盖：
+    /// 后连接的通道会把前一条的分辨率 / 主机写花，而 mstsc 是在**启动那一刻**读文件的，
+    /// 于是先开的窗口可能拿到别人的设置。
+    /// </summary>
+    internal static string SessionFilePathFor(string? sessionKey)
+    {
+        var name = string.IsNullOrWhiteSpace(sessionKey) ? "session" : $"session-{SanitizeKey(sessionKey)}";
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "YukinoChan",
+            name + ".rdp");
+    }
+
+    /// <summary>把通道 id 收敛成安全的文件名片段（只保留字母数字与 -_，其余替换为 _）。</summary>
+    private static string SanitizeKey(string key)
+    {
+        var builder = new StringBuilder(key.Length);
+        foreach (var ch in key)
+        {
+            builder.Append(char.IsLetterOrDigit(ch) || ch is '-' or '_' ? ch : '_');
+        }
+
+        return builder.Length == 0 ? "channel" : builder.ToString();
+    }
 
     /// <summary>
     /// 启动 mstsc 连接目标主机；凭据由凭据管理器自动提供。
@@ -490,7 +520,9 @@ public static class RdpSessionService
     /// <param name="message">结果说明。</param>
     /// <param name="width">窗口宽度，0 = 用 mstsc 默认。</param>
     /// <param name="height">窗口高度，0 = 用 mstsc 默认。</param>
-    public static bool Connect(string? targetHost, out string message, int width = 0, int height = 0)
+    /// <param name="sessionKey">通道 id；多通道并行时用来分隔各自的 .rdp 文件。</param>
+    public static bool Connect(
+        string? targetHost, out string message, int width = 0, int height = 0, string? sessionKey = null)
     {
         message = string.Empty;
         var host = RdpTargets.Normalize(targetHost);
@@ -503,7 +535,7 @@ public static class RdpSessionService
             string? sessionFile = null;
             if (width > 0 && height > 0)
             {
-                sessionFile = WriteSessionFile(address, port, width, height, out var writeError);
+                sessionFile = WriteSessionFile(address, port, width, height, sessionKey, out var writeError);
                 if (sessionFile is null)
                 {
                     message = writeError;
@@ -642,13 +674,14 @@ public static class RdpSessionService
     /// 把 .rdp 配置写到临时文件。
     /// 返回 null 表示写失败，错误原因在 error 里。
     /// </summary>
+    /// <param name="sessionKey">通道 id；多通道并行时各自一份文件，避免互相覆盖。</param>
     internal static string? WriteSessionFile(
-        string address, int port, int width, int height, out string error)
+        string address, int port, int width, int height, string? sessionKey, out string error)
     {
         error = string.Empty;
         try
         {
-            var path = SessionFilePath;
+            var path = SessionFilePathFor(sessionKey);
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllText(path, BuildSessionContent(address, port, width, height), new UTF8Encoding(false));
             return path;
@@ -708,24 +741,55 @@ public static class RdpSessionService
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup), StartupShortcutName);
 
     /// <summary>
-    /// Agent 程序副本所在的公共目录。
-    /// 必须放在这里而不是直接指向主控端的 exe：主控端 exe 通常在 C:\Users\&lt;主控账户&gt;\ 下，
-    /// 目标账户对那个目录没有读权限，快捷方式会被拒绝启动。
+    /// 代理程序副本的公共根目录。目标账户必须读得到，所以放 ProgramData ——
+    /// 不能直接指向主控端的 exe：那个通常躺在 C:\Users\&lt;主控账户&gt;\ 下，
+    /// 目标账户读不到，快捷方式会被拒绝启动。
     /// </summary>
-    public static string AgentProgramDir => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "YukinoChan", "agent");
+    public static string AgentPayloadRoot => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "YukinoChan");
+
+    /// <summary>首选副本目录。</summary>
+    public static string AgentProgramDir => Path.Combine(AgentPayloadRoot, "agent");
+
+    /// <summary>
+    /// 备用副本目录。首选那份被运行中的代理锁着、又送不走它时改用它，
+    /// 详见 <see cref="EnsureAgentPayload"/> 的说明。
+    /// </summary>
+    public static string AgentProgramDirSpare => Path.Combine(AgentPayloadRoot, "agent_b");
 
     public static string AgentProgramPath => Path.Combine(AgentProgramDir, "YukinoChan.exe");
+
+    /// <summary>副本候选目录，按优先级排列（internal 供冒烟断言"两槽不同"）。</summary>
+    internal static string[] PayloadSlotDirs() => new[] { AgentProgramDir, AgentProgramDirSpare };
 
     public static bool IsAgentDeployed() => File.Exists(AgentShortcutPath);
 
     /// <summary>
-    /// 把主程序连同依赖复制到所有用户都能读的公共目录。
-    /// 已经是最新的就跳过，避免每次都搬 140MB。
+    /// 铺好代理程序副本，返回真正生效的那份主程序路径。
+    /// 副本已经不比源旧就跳过，省掉一次 140MB 的搬运。
+    ///
+    /// 这里要绕的坎：会话代理是**常驻进程**（登录后一直活着等指令），它把副本目录里的
+    /// CoreMessagingXP.dll 之类的依赖持有着。此时 <c>File.Copy(overwrite: true)</c> 会抛
+    /// 「The process cannot access the file ... because it is being used by another process」。
+    /// 而且**连把整个目录改名都做不到** —— 实测只要目录内有文件被持有句柄，
+    /// MoveFile 就返回 Access denied，无论对方用的是哪种共享模式（None / Read /
+    /// Read+Delete / ReadWrite+Delete 全试过）。所以「先挪开旧目录再重建」这条路是死的。
+    ///
+    /// 可行的两步：
+    ///   ① 先把旧代理送走（仅当它空闲），然后原地覆盖 —— 路径不变，最干净；
+    ///   ② 送不走（跨会话杀不掉、或它正在跑任务）就改用备用目录 agent_b：
+    ///      旧代理继续用它那份，新副本落在新路径，快捷方式改指新路径。
     /// </summary>
-    private static bool EnsureAgentPayload(string sourceExe, out string targetExe, out string error)
+    /// <param name="sourceExe">主控端正在运行的主程序。</param>
+    /// <param name="targetUser">目标账户，用于判断代理是不是正在执行任务。</param>
+    /// <param name="targetExe">最终生效的代理主程序完整路径。</param>
+    /// <param name="error">失败原因。</param>
+    /// <param name="note">过程说明（送走了旧代理 / 改用了备用目录）。</param>
+    private static bool EnsureAgentPayload(
+        string sourceExe, string? targetUser, out string targetExe, out string error, out string note)
     {
         error = string.Empty;
+        note = string.Empty;
         targetExe = AgentProgramPath;
 
         var sourceDir = Path.GetDirectoryName(sourceExe);
@@ -735,49 +799,259 @@ public static class RdpSessionService
             return false;
         }
 
-        // 主程序已经在公共目录里（比如用户把整个程序装在那里），就不用复制
-        if (string.Equals(
-                Path.GetFullPath(sourceDir).TrimEnd('\\'),
-                Path.GetFullPath(AgentProgramDir).TrimEnd('\\'),
-                StringComparison.OrdinalIgnoreCase))
+        // 主控端本身就是从公共副本目录跑起来的（整个程序装在那里）→ 不用复制
+        if (IsUnder(sourceDir, AgentPayloadRoot))
         {
             return true;
         }
 
-        var targetDir = AgentProgramDir;
-        if (!Directory.Exists(targetDir))
+        var sourceTime = File.GetLastWriteTimeUtc(sourceExe);
+        var tried = new List<string>();
+        var notes = new List<string>();
+        var failure = string.Empty;
+        var refusal = string.Empty;
+        string? chosen = null;
+        var agentStopped = false;
+
+        foreach (var slot in PayloadSlotDirs())
         {
-            Directory.CreateDirectory(targetDir);
+            var exe = Path.Combine(slot, "YukinoChan.exe");
+
+            // ① 已有现成且不比源旧的副本 → 直接用
+            if (File.Exists(exe) && File.GetLastWriteTimeUtc(exe) >= sourceTime)
+            {
+                chosen = slot;
+                break;
+            }
+
+            // ② 空槽 → 直接铺一份
+            if (!Directory.Exists(slot))
+            {
+                if (CopyPayload(sourceDir, slot, out var createError))
+                {
+                    chosen = slot;
+                    notes.Add(DescribeSlot(slot));
+                    break;
+                }
+
+                failure = createError;
+                tried.Add(slot);
+                continue;
+            }
+
+            // ③ 有旧副本、要更新。先看是不是被运行中的代理锁着。
+            if (IsPayloadLocked(slot))
+            {
+                if (!agentStopped)
+                {
+                    agentStopped = true;
+                    if (!StopAgentProcess(targetUser, out var stopNote, out refusal))
+                    {
+                        // 代理正在执行任务：不硬来，让用户自己决定什么时候部署
+                        break;
+                    }
+
+                    if (stopNote.Length > 0)
+                    {
+                        notes.Add(stopNote);
+                    }
+                }
+
+                // 还是锁着（多半是跨会话杀不掉）→ 退到下一个槽
+                if (IsPayloadLocked(slot))
+                {
+                    tried.Add(slot);
+                    continue;
+                }
+            }
+
+            // ④ 没被锁 → 原地覆盖
+            if (CopyPayload(sourceDir, slot, out var copyError))
+            {
+                chosen = slot;
+                notes.Add(DescribeSlot(slot));
+                break;
+            }
+
+            failure = copyError;
+            tried.Add(slot);
         }
 
-        // 源比副本新，或副本缺主程序，才重新复制
-        if (File.Exists(targetExe))
+        note = JoinNotes(notes);
+
+        if (chosen is not null)
         {
-            var sourceTime = File.GetLastWriteTimeUtc(sourceExe);
-            var targetTime = File.GetLastWriteTimeUtc(targetExe);
-            if (targetTime >= sourceTime)
+            targetExe = Path.Combine(chosen, "YukinoChan.exe");
+            return true;
+        }
+
+        if (refusal.Length > 0)
+        {
+            error = refusal;
+            return false;
+        }
+
+        error = $"部署代理程序副本失败。已尝试：{string.Join("、", tried)}"
+            + (failure.Length > 0 ? $"；最后一次报错：{failure}" : string.Empty)
+            + "。若提示文件被占用，注销目标账户（其中的会话代理会随之结束）或重启后再试。";
+        return false;
+    }
+
+    /// <summary>把若干说明拼成一句话（跳过空项）。</summary>
+    private static string JoinNotes(List<string> notes)
+    {
+        var cleaned = new List<string>();
+        foreach (var item in notes)
+        {
+            if (item.Length > 0)
             {
-                return true;
+                cleaned.Add(item);
             }
+        }
+
+        return string.Join("；", cleaned);
+    }
+
+    /// <summary>用了备用目录就说一声，免得用户看到快捷方式指向 agent_b 犯嘀咕。</summary>
+    private static string DescribeSlot(string slot) =>
+        string.Equals(slot, AgentProgramDir, StringComparison.OrdinalIgnoreCase)
+            ? string.Empty
+            : $"首选副本目录被运行中的代理占用，已改用备用目录 {slot}";
+
+    /// <summary>把主程序连同依赖铺到一个副本目录里。</summary>
+    private static bool CopyPayload(string sourceDir, string targetDir, out string error)
+    {
+        error = string.Empty;
+
+        try
+        {
+            Directory.CreateDirectory(targetDir);
+            CopyDirectory(sourceDir, targetDir);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 副本目录是不是被运行中的进程锁着（能不能覆盖）。
+    ///
+    /// 只看主程序一个文件就够：代理进程一跑起来，它的 exe 映像必然被持有，
+    /// 而这个文件覆盖不了，整个部署就没有意义。只探一个也把对运行中代理的
+    /// 干扰降到最低（探测要拿一次独占写句柄）。
+    /// </summary>
+    internal static bool IsPayloadLocked(string dir)
+    {
+        var exe = Path.Combine(dir, "YukinoChan.exe");
+        if (!File.Exists(exe))
+        {
+            return false;
         }
 
         try
         {
-            CopyDirectory(sourceDir, targetDir);
-        }
-        catch (Exception ex)
-        {
-            error = $"复制会话代理程序失败：{ex.Message}";
+            using var probe = new FileStream(exe, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
             return false;
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// 把常驻的旧代理送走，好让它占着的程序文件能被覆盖。
+    ///
+    /// 只在它空闲时动手：**正在执行任务就直接拒绝部署**（返回 false + 原因），
+    /// 免得把用户跑了一半的活打断。跨会话 / 权限不足导致杀不掉不算错误 ——
+    /// 调用方会退到备用副本目录，照样能部署成功。
+    /// </summary>
+    /// <param name="targetUser">目标账户，用于读它那路桥的状态。</param>
+    /// <param name="note">成功时的说明（结束了几个进程）。</param>
+    /// <param name="refusal">拒绝部署的原因。</param>
+    private static bool StopAgentProcess(string? targetUser, out string note, out string refusal)
+    {
+        note = string.Empty;
+        refusal = string.Empty;
+
+        // 代理正在跑任务就别动它。它那路桥的目录按目标账户派生（见 RdpChannelPaths）。
+        var status = RdpBridge.For(RdpChannelPaths.Resolve(null, targetUser)).TryReadStatus();
+        if (status is not null && status.Phase == "running")
+        {
+            // 光看 "running" 三个字不够：注销目标账户会把代理一起杀掉，而 status.json
+            // 会永远停在最后一帧的 running（见 RdpModels 里那段说明）。要是就这么拦着，
+            // 用户以后再也部署不了 —— 所以要求心跳也是新鲜的，才算真在跑任务。
+            var heartbeat = RdpHeartbeat.Evaluate(status.UpdatedAt, status.Phase, DateTimeOffset.Now);
+            if (heartbeat.Parsed && !heartbeat.IsStale)
+            {
+                var who = string.IsNullOrWhiteSpace(targetUser) ? "目标账户" : targetUser;
+                refusal = $"{who} 的会话代理正在执行任务，现在部署会打断它。"
+                    + "请等任务结束、或先点「停止执行」，然后再部署。";
+                return false;
+            }
         }
 
-        if (!File.Exists(targetExe))
+        var killed = 0;
+        foreach (var process in Process.GetProcessesByName("YukinoChan"))
         {
-            error = $"复制完成但目标主程序不存在：{targetExe}";
-            return false;
+            try
+            {
+                using (process)
+                {
+                    if (process.Id == Environment.ProcessId || !IsAgentProcess(process))
+                    {
+                        continue;
+                    }
+
+                    process.Kill();
+                    process.WaitForExit(3000);
+                    killed++;
+                }
+            }
+            catch
+            {
+                // 单个进程杀不掉不影响整体：剩下的占用由备用目录兜住
+            }
+        }
+
+        if (killed > 0)
+        {
+            note = $"已结束 {killed} 个正在运行的旧会话代理";
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// 这个进程是不是从代理副本目录里跑起来的。
+    /// 加这道判断是为了别误杀用户另外开着的主控端窗口。
+    /// </summary>
+    private static bool IsAgentProcess(Process process)
+    {
+        try
+        {
+            var path = process.MainModule?.FileName;
+            return !string.IsNullOrEmpty(path)
+                && path.StartsWith(AgentPayloadRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            // 读不到模块路径（跨会话且权限不足）时不敢乱杀，交给备用目录方案兜底
+            return false;
+        }
+    }
+
+    /// <summary>path 是否落在 root 目录之下（含等于）。</summary>
+    private static bool IsUnder(string path, string root)
+    {
+        var full = Path.GetFullPath(path).TrimEnd('\\');
+        var fullRoot = Path.GetFullPath(root).TrimEnd('\\');
+
+        return full.Equals(fullRoot, StringComparison.OrdinalIgnoreCase)
+            || full.StartsWith(fullRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>递归复制目录，跳过日志/配置这类运行时产物，避免把主控端的状态带过去。</summary>
@@ -815,11 +1089,12 @@ public static class RdpSessionService
 
     /// <summary>
     /// 把 Agent 放到所有用户共享的启动目录，目标账户登录后会自动以 --rdp-agent 拉起雪乃酱。
-    /// 需要管理员权限（写 ProgramData）。
+    /// 要管理员权限的只有公共启动目录那一处（ProgramData 下的副本目录普通用户也写得进）。
     /// </summary>
     /// <param name="message">结果说明。</param>
     /// <param name="bridgePath">桥目录；填了会写进快捷方式参数，让 Agent 与主控端读写同一位置。</param>
-    public static bool DeployAgent(out string message, string? bridgePath = null)
+    /// <param name="targetUser">目标账户，用于判断它的代理是不是正在执行任务。</param>
+    public static bool DeployAgent(out string message, string? bridgePath = null, string? targetUser = null)
     {
         message = string.Empty;
         var sourceExe = Environment.ProcessPath;
@@ -837,7 +1112,7 @@ public static class RdpSessionService
         // 关键一步：先把程序复制到所有用户都能读的公共目录。
         // 之前直接指向主控端 exe，目标账户没权限读那个目录，快捷方式静默失败，
         // 表现为"连上了但任务不执行"。
-        if (!EnsureAgentPayload(sourceExe, out var exe, out var copyError))
+        if (!EnsureAgentPayload(sourceExe, targetUser, out var exe, out var copyError, out var payloadNote))
         {
             message = copyError;
             return false;
@@ -847,7 +1122,17 @@ public static class RdpSessionService
         var directory = Path.GetDirectoryName(shortcut);
         if (!string.IsNullOrEmpty(directory))
         {
-            Directory.CreateDirectory(directory);
+            // 公共启动目录只有管理员能写。这里必须自己接住异常，
+            // 否则会以未处理异常的形式冒到 UI 线程之外（以前就是这样，失败了还看不出原因）。
+            try
+            {
+                Directory.CreateDirectory(directory);
+            }
+            catch (Exception ex)
+            {
+                message = $"无法写入公共启动目录：{directory}\n{ex.Message}";
+                return false;
+            }
         }
 
         var arguments = RdpTargets.BuildAgentArguments(bridgePath);
@@ -862,40 +1147,128 @@ public static class RdpSessionService
             .AppendLine("$sc.Save()")
             .ToString();
 
-        if (!RunPowerShell(script))
+        if (!RunPowerShell(script, out var shellError))
         {
-            message = "创建启动项失败，请以管理员身份运行雪乃酱后重试。";
+            // 只有「写不进公共启动目录」才和权限有关。以前这里不分青红皂白地
+            // 回一句「请以管理员身份运行雪乃酱后重试」，把文件占用之类的失败
+            // 全说成权限问题，排查方向直接跑偏。现在原样带出真实报错。
+            var hint = IsElevated
+                ? "当前进程已经是管理员，因此这不是权限问题，请对照上面的具体报错。"
+                : "当前进程不是管理员：写公共启动目录需要管理员权限，请以管理员身份重新启动雪乃酱。";
+
+            message = $"创建启动项失败：{(shellError.Length > 0 ? shellError : "PowerShell 未给出错误信息")}\n"
+                + $"启动项路径：{shortcut}\n{hint}";
             return false;
         }
 
-        message = $"已部署到所有用户共享启动目录：{shortcut}（程序副本：{AgentProgramDir}）";
+        var notes = new StringBuilder();
+        notes.Append($"已部署到所有用户共享启动目录：{shortcut}（程序副本：{Path.GetDirectoryName(exe)}）");
+
+        if (payloadNote.Length > 0)
+        {
+            notes.Append("；").Append(payloadNote);
+        }
+
+        if (IsOtherInstanceRunning())
+        {
+            notes.Append("；检测到还有其他雪乃酱进程在跑（多半是目标账户里那个常驻代理），"
+                + "要让它换成新程序，需注销目标账户后重新连接");
+        }
+
+        message = notes.ToString();
         return true;
+    }
+
+    /// <summary>当前进程是否以管理员身份运行（写公共启动目录、放行防火墙都需要）。</summary>
+    public static bool IsElevated
+    {
+        get
+        {
+            try
+            {
+                using var identity = WindowsIdentity.GetCurrent();
+                return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 除本进程外，是否还有别的雪乃酱进程在跑 —— 通常是目标账户里那个常驻的会话代理。
+    /// 部署完新副本后，这个旧进程仍然是旧程序（文件已加载进内存），只有注销重登才会换新。
+    /// </summary>
+    public static bool IsOtherInstanceRunning()
+    {
+        try
+        {
+            foreach (var process in Process.GetProcessesByName("YukinoChan"))
+            {
+                using (process)
+                {
+                    if (process.Id != Environment.ProcessId)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // 查不到就算了，这只是给用户的提示信息
+        }
+
+        return false;
     }
 
     public static bool RemoveAgent(out string message)
     {
-        message = string.Empty;
+        var problems = new List<string>();
+
         try
         {
             if (File.Exists(AgentShortcutPath))
             {
                 File.Delete(AgentShortcutPath);
             }
-
-            // 顺手清掉程序副本，避免公共目录里留一份 140MB 的旧文件
-            if (Directory.Exists(AgentProgramDir))
-            {
-                Directory.Delete(AgentProgramDir, recursive: true);
-            }
-
-            message = "已移除 RDP 会话代理启动项与程序副本。";
-            return true;
         }
         catch (Exception ex)
         {
-            message = $"移除失败：{ex.Message}";
-            return false;
+            problems.Add($"删除启动项失败：{ex.Message}");
         }
+
+        // 顺手清掉程序副本（可能有首选 + 备用两份），
+        // 免得公共目录里留着 140MB 的旧文件
+        foreach (var slot in PayloadSlotDirs())
+        {
+            if (!Directory.Exists(slot))
+            {
+                continue;
+            }
+
+            try
+            {
+                Directory.Delete(slot, recursive: true);
+            }
+            catch (Exception ex)
+            {
+                // 代理还常驻着就会这样：文件被占用，删不掉。
+                // 这次先留着（注销目标账户后就能删），不算致命。
+                problems.Add($"{slot} 正被运行的进程占用，未能删除：{ex.Message}");
+            }
+        }
+
+        if (problems.Count == 0)
+        {
+            message = "已移除 RDP 会话代理启动项与程序副本。";
+            return true;
+        }
+
+        message = "启动项已处理；" + string.Join("；", problems)
+            + "。注销目标账户后重试一次即可清干净。";
+        return false;
     }
 
     // ---------------- 预检汇总 ----------------
@@ -908,6 +1281,10 @@ public static class RdpSessionService
 
         var readiness = new RdpReadiness { IsLocal = isLocal };
 
+        // 这座桥对应「目标主机 + 目标账户」这一路会话：目录按账户名派生，
+        // 与目标会话里代理自己算出来的目录一致（见 RdpChannelPaths）
+        var bridge = RdpBridge.For(RdpChannelPaths.Resolve(bridgePath, targetUser));
+
         // 本机只是客户端时才受"家庭版不能当服务端"限制；连别人不受影响
         if (isLocal)
         {
@@ -918,7 +1295,7 @@ public static class RdpSessionService
 
             // "已部署"（快捷方式在不在）与"在线"（代理此刻在不在跑）是两回事，分别给出：
             // 前者决定要不要去部署，后者决定要不要注销目标账户后重新连接。
-            readiness.AgentOnline = IsAgentOnline(RdpBridge.TryReadStatus(), targetUser, DateTimeOffset.Now);
+            readiness.AgentOnline = IsAgentOnline(bridge.TryReadStatus(), targetUser, DateTimeOffset.Now);
         }
         else
         {
@@ -937,7 +1314,7 @@ public static class RdpSessionService
             }
         }
 
-        readiness.CredentialSaved = credentialSaved && HasCredential(host);
+        readiness.CredentialSaved = credentialSaved && HasCredential(host, targetUser);
 
         if (string.IsNullOrWhiteSpace(targetUser))
         {
@@ -1016,8 +1393,10 @@ public static class RdpSessionService
     ///   若目标账户本来就登录着（登录启动项不会重跑），代理自然不在线 ——
     ///   这时只能引导用户注销后重新连接，让登录动作把代理带起来。
     /// </summary>
-    public static bool WaitForAgentOnline(string? targetUser, int timeoutSeconds, CancellationToken token)
+    public static bool WaitForAgentOnline(
+        string? targetUser, string? bridgePath, int timeoutSeconds, CancellationToken token)
     {
+        var bridge = RdpBridge.For(RdpChannelPaths.Resolve(bridgePath, targetUser));
         var deadline = DateTime.UtcNow.AddSeconds(Math.Max(1, timeoutSeconds));
 
         while (DateTime.UtcNow < deadline)
@@ -1027,7 +1406,7 @@ public static class RdpSessionService
                 return false;
             }
 
-            if (IsAgentOnline(RdpBridge.TryReadStatus(), targetUser, DateTimeOffset.Now))
+            if (IsAgentOnline(bridge.TryReadStatus(), targetUser, DateTimeOffset.Now))
             {
                 return true;
             }
@@ -1035,7 +1414,7 @@ public static class RdpSessionService
             Thread.Sleep(1000);
         }
 
-        return IsAgentOnline(RdpBridge.TryReadStatus(), targetUser, DateTimeOffset.Now);
+        return IsAgentOnline(bridge.TryReadStatus(), targetUser, DateTimeOffset.Now);
     }
 
     /// <summary>
@@ -1158,8 +1537,15 @@ public static class RdpSessionService
         return process.ExitCode == 0;
     }
 
-    private static bool RunPowerShell(string script)
+    /// <summary>
+    /// 跑一段 PowerShell 脚本（目前只用于生成启动项快捷方式）。
+    /// 失败时把 stderr / 退出码原样带出来 —— 以前这里无声地返回 false，
+    /// 上层只好编一句「请以管理员身份运行」，真实原因全丢，排查直接跑偏。
+    /// </summary>
+    private static bool RunPowerShell(string script, out string detail)
     {
+        detail = string.Empty;
+
         try
         {
             var startInfo = new ProcessStartInfo("powershell")
@@ -1174,20 +1560,75 @@ public static class RdpSessionService
             startInfo.ArgumentList.Add("Bypass");
             startInfo.ArgumentList.Add("-Command");
             startInfo.ArgumentList.Add(script);
+            startInfo.StandardOutputEncoding = ConsoleOutputEncoding();
+            startInfo.StandardErrorEncoding = ConsoleOutputEncoding();
 
             using var process = Process.Start(startInfo);
             if (process is null)
             {
+                detail = "无法启动 PowerShell 进程。";
                 return false;
             }
 
-            process.StandardOutput.ReadToEnd();
-            process.StandardError.ReadToEnd();
-            return process.WaitForExit(15000) && process.ExitCode == 0;
-        }
-        catch
-        {
+            // 先异步收完输出再等退出，避免管道写满造成死锁
+            var stdoutTask = process.StandardOutput.ReadToEndAsync();
+            var stderrTask = process.StandardError.ReadToEndAsync();
+
+            if (!process.WaitForExit(20000))
+            {
+                try { process.Kill(true); } catch { }
+                detail = "PowerShell 执行超时（20 秒）。";
+                return false;
+            }
+
+            var stdout = stdoutTask.GetAwaiter().GetResult();
+            var stderr = stderrTask.GetAwaiter().GetResult();
+
+            if (process.ExitCode == 0)
+            {
+                return true;
+            }
+
+            var picked = FirstLines(stderr, 4);
+            if (picked.Length == 0)
+            {
+                picked = FirstLines(stdout, 4);
+            }
+
+            detail = $"PowerShell 退出码 {process.ExitCode}"
+                + (picked.Length > 0 ? $"：{picked}" : "（无输出）");
             return false;
         }
+        catch (Exception ex)
+        {
+            detail = ex.Message;
+            return false;
+        }
+    }
+
+    /// <summary>取前几行拼成一行，避免把一整段堆进对话框。</summary>
+    private static string FirstLines(string text, int count)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return string.Empty;
+        }
+
+        var picked = new List<string>();
+        foreach (var raw in text.Split('\n'))
+        {
+            if (picked.Count >= count)
+            {
+                break;
+            }
+
+            var line = raw.Trim();
+            if (line.Length > 0)
+            {
+                picked.Add(line);
+            }
+        }
+
+        return string.Join(" / ", picked);
     }
 }

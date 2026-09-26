@@ -45,8 +45,9 @@ public partial class App : Application
         if (RdpAgentRunner.IsAgentInvocation(args0))
         {
             IsAgentMode = true;
-            // 远程场景下桥目录由 --bridge: 指定，必须在使用 RdpBridge 之前生效
-            RdpBridge.Configure(RdpAgentRunner.ExtractBridgePath(args0));
+            // 确定代理该读写哪座桥：远程场景由 --bridge: 指定，
+            // 本机多账户场景则按"自己登录的是哪个账户"自动派生（与主控端算出的目录一致）
+            RdpBridge.ConfigureAgent(RdpAgentRunner.ExtractBridgePath(args0));
             LaunchAgentMode();
             return;
         }
@@ -103,15 +104,16 @@ public partial class App : Application
     private async Task RunAgentLoopAsync()
     {
         var bridgeFailures = 0;
+        var bridge = RdpBridge.Agent;
 
         while (true)
         {
-            if (RdpBridge.TryReadCommand(out var command) && command is not null)
+            if (bridge.TryReadCommand(out var command) && command is not null)
             {
                 bridgeFailures = 0;
 
                 // 立刻删掉指令，防止代理被再次拉起时重复执行同一批任务
-                RdpAgentRunner.ClearCommand();
+                bridge.ConsumeCommand();
 
                 // 注意：这里【不挂】Completed → ExitAgent。
                 // 常驻代理执行完必须回到等待状态继续待命，而不是退出。
@@ -122,7 +124,7 @@ public partial class App : Application
 
             // 没有指令：写一条 idle 心跳，证明"代理在线，等待指令"。
             // 任务在跑时不会走到这里，因此不会覆盖 Runner 的任务状态。
-            var alive = RdpBridge.UpdateStatus(status =>
+            var alive = bridge.UpdateStatus(status =>
             {
                 status.Phase = "idle";
                 status.StatusText = "代理在线，等待指令。";
@@ -142,7 +144,7 @@ public partial class App : Application
                 if (bridgeFailures >= AgentBridgeFailureLimit)
                 {
                     AppPaths.WriteStartupError(new IOException(
-                        $"会话代理无法写入指令桥目录 {RdpBridge.BridgeDir}：{RdpBridge.LastError}"));
+                        $"会话代理无法写入指令桥目录 {bridge.BridgeDir}：{bridge.LastError}"));
                     ExitAgent();
                     return;
                 }
