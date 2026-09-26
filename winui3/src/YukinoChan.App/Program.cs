@@ -26,6 +26,12 @@ public static class Program
     /// <summary>agent 模式下把启动上下文写进该文件，便于排查「进程秒退」。</summary>
     private const string AgentBootLogName = "agent_boot.log";
 
+    /// <summary>M4 自检通道：--embed-auto <host> <user> <password> 启动时自动连接内嵌预览。
+    /// 状态全走 VM.AppendLog（日志文件），供外部无人值守验收。</summary>
+    /// <summary>M5/M6 自检：--embed-vm host user password 走正式 VM 连接路径（client_mode=embedded）。</summary>
+    public static string[]? EmbedVmArgs { get; private set; }
+    public static bool EmbedNoKeys { get; private set; }
+
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr GetStdHandle(int nStdHandle);
 
@@ -70,6 +76,17 @@ public static class Program
         if (isAgent)
         {
             WriteAgentBootLog(args);
+        }
+
+        // M5/M6 自检：--embed-vm host user password [--embed-nokeys]
+        for (var i = 0; i < args.Length - 3; i++)
+        {
+            if (args[i] == "--embed-vm")
+            {
+                EmbedVmArgs = new[] { args[i + 1], args[i + 2], args[i + 3] };
+                EmbedNoKeys = Array.Exists(args, a => a == "--embed-nokeys");
+                break;
+            }
         }
 
         try

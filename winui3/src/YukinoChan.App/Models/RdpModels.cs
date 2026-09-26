@@ -8,13 +8,35 @@ using YukinoChan.Helpers;
 
 namespace YukinoChan.Models;
 
+/// <summary>
+/// 远程桌面连接方式（计划书 §5.6 client_mode）：
+/// mstsc = 系统自带远程桌面独立窗口（默认，永久回退路径）；
+/// embedded = FreeRDP 内嵌画面（画面与输入嵌进雪乃酱窗口）。
+/// </summary>
+public static class ClientModes
+{
+    public const string Mstsc = "mstsc";
+    public const string Embedded = "embedded";
+
+    public static readonly IReadOnlyList<KeyValuePair<string, string>> Items =
+        new List<KeyValuePair<string, string>>
+        {
+            new(Mstsc, "独立远程桌面窗口（mstsc，稳定）"),
+            new(Embedded, "内嵌到雪乃酱窗口（实验性）"),
+        };
+
+    public static string Normalize(string? value)
+    {
+        var text = (value ?? string.Empty).Trim().ToLowerInvariant();
+        return text == Embedded ? Embedded : Mstsc;
+    }
+}
+
 /// <summary>RDP 会话在任务全部结束后的处理方式。</summary>
 public static class SessionFinishModes
-{
-    public const string Keep = "keep";
+{    public const string Keep = "keep";
     public const string Disconnect = "disconnect";
     public const string Logoff = "logoff";
-
     public static readonly IReadOnlyList<KeyValuePair<string, string>> Items =
         new List<KeyValuePair<string, string>>
         {
@@ -443,6 +465,9 @@ public sealed class RdpConfig : ObservableObject, ICloneable
     private int _connectTimeoutSeconds = 120;
     private bool _credentialSaved;
     private bool _embedRemoteDesktop;
+    private string _clientMode = ClientModes.Mstsc;
+    private bool _audioEnabled = true;
+    private bool _gfxEnabled;
     private int _desktopWidth;
     private int _desktopHeight;
 
@@ -542,6 +567,30 @@ public sealed class RdpConfig : ObservableObject, ICloneable
         set => SetProperty(ref _embedRemoteDesktop, value);
     }
 
+    /// <summary>连接方式：mstsc 独立窗口（默认）或 FreeRDP 内嵌画面（client_mode，计划书 §5.6）。</summary>
+    [JsonPropertyName("client_mode")]
+    public string ClientMode
+    {
+        get => _clientMode;
+        set => SetProperty(ref _clientMode, ClientModes.Normalize(value));
+    }
+
+    /// <summary>内嵌连接时是否在本机播放远端声音（audio_enabled，仅 embedded 生效）。</summary>
+    [JsonPropertyName("audio_enabled")]
+    public bool AudioEnabled
+    {
+        get => _audioEnabled;
+        set => SetProperty(ref _audioEnabled, value);
+    }
+
+    /// <summary>内嵌 GFX 全帧管线（gfx_enabled，实验性；撕裂根治，自动协商 progressive）。</summary>
+    [JsonPropertyName("gfx_enabled")]
+    public bool GfxEnabled
+    {
+        get => _gfxEnabled;
+        set => SetProperty(ref _gfxEnabled, value);
+    }
+
     /// <summary>远程桌面宽度，0 表示自适应（跟随画面区域）。</summary>
     [JsonPropertyName("desktop_width")]
     public int DesktopWidth
@@ -572,6 +621,7 @@ public sealed class RdpConfig : ObservableObject, ICloneable
         BridgePath = (BridgePath ?? string.Empty).Trim();
         TargetUser = (TargetUser ?? string.Empty).Trim();
         SessionFinish = SessionFinishModes.Normalize(SessionFinish);
+        ClientMode = ClientModes.Normalize(ClientMode);
         ConnectTimeoutSeconds = Math.Clamp(ConnectTimeoutSeconds, 15, 600);
         DesktopWidth = RdpResolutions.Normalize(DesktopWidth, RdpResolutions.MinWidth, RdpResolutions.MaxWidth);
         DesktopHeight = RdpResolutions.Normalize(DesktopHeight, RdpResolutions.MinHeight, RdpResolutions.MaxHeight);

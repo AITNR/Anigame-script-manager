@@ -1154,6 +1154,33 @@ public sealed class MainViewModel : ObservableObject
 
         try
         {
+            // 内嵌模式：不管会话是否已存在都直接连 —— FreeRDP 重连会接回同一会话，
+            // 画面嵌进雪乃酱窗口。mstsc 的「避免重复连接接管桌面」短路在这里没有意义：
+            // 不连上就看不到画面。
+            if (IsEmbeddedMode)
+            {
+                // 已有内嵌连接：直接复用（页面切换回来时点「连接预览」走到这里，不重复连）
+                if (_embedClient is not null)
+                {
+                    RdpStatusText = "内嵌画面已连接（复用现有连接）";
+                    AppendLog("[内嵌] 已有内嵌连接，直接复用。");
+                    RefreshRdpReadiness();
+                    return;
+                }
+
+                RdpStatusText = "内嵌连接中…";
+                if (TryStartEmbeddedConnect(host, out var embedMessage))
+                {
+                    AppendLog("内嵌模式下画面显示在下方「内嵌画面」卡片里，不需要打开独立远程桌面窗口。");
+                    RefreshRdpReadiness();
+                    return;
+                }
+                RdpStatusText = "连接失败";
+                AppendLog($"[内嵌] {embedMessage}");
+                _ = DialogHelper.ShowMessageAsync("连接失败", embedMessage);
+                return;
+            }
+
             // 已经登录着就不用再连了 —— 客户端版再连一次只会把那个桌面接管过来，
             // 当前桌面反而被锁定。这里直接当成"已连接"处理。
             if (isLocal && RdpSessionService.TryGetReusableSession(RdpSettings.TargetUser, out var existing))
@@ -1189,6 +1216,22 @@ public sealed class MainViewModel : ObservableObject
     /// <summary>断开目标会话（任务与收尾设置不受影响）。</summary>
     public void DisconnectSurface()
     {
+        // 内嵌模式：断开 = ycn_rdp_disconnect（目标会话保留，语义 = mstsc「断开连接」）
+        if (IsEmbeddedMode)
+        {
+            if (_embedClient is null)
+            {
+                _ = DialogHelper.ShowMessageAsync("提示", "当前没有内嵌连接。");
+                return;
+            }
+            _embedUserDisconnect = true; // 用户主动断开：抑制自动重连
+            RdpStatusText = "正在断开内嵌连接…";
+            DisposeEmbedClient();
+            RdpStatusText = "内嵌连接已断开（目标会话保留）";
+            RefreshRdpReadiness();
+            return;
+        }
+
         if (!RdpTargets.IsLocal(RdpSettings.TargetHost))
         {
             _ = DialogHelper.ShowMessageAsync("提示",
@@ -1231,6 +1274,276 @@ public sealed class MainViewModel : ObservableObject
         var height = RdpResolutions.Normalize(
             RdpSettings.DesktopHeight, RdpResolutions.MinHeight, RdpResolutions.MaxHeight);
         return (width, height);
+    }
+
+    // ---- M5：内嵌连接通道（client_mode = embedded，计划书 §5.6）----
+
+    private RdpEmbeddedClient? _embedClient;
+    private string _embedLastHost = string.Empty;
+    private int _embedRetryCount;
+    private int _embedAutoReconnects;      // 意外掉线自动重连计数（M6）
+    private bool _embedUserDisconnect;     // 用户/流程主动断开（抑制自动重连）
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _embedWatchdog;
+
+    /// <summary>连接方式下拉框数据源。</summary>
+    public IReadOnlyList<KeyValuePair<string, string>> ClientModeItems => ClientModes.Items;
+
+    /// <summary>当前是否为内嵌连接模式（client_mode = embedded）。</summary>
+    public bool IsEmbeddedMode => ClientModes.Normalize(RdpSettings.ClientMode) == ClientModes.Embedded;
+
+    /// <summary>当前内嵌连接实例（null = 无）。画面控件经 <see cref="EmbedClientChanged"/> 接管。</summary>
+    public RdpEmbeddedClient? ActiveEmbedClient => _embedClient;
+
+    /// <summary>
+    /// 内嵌连接实例变化（发起连接 / 释放）。可能在任意线程触发，订阅方自行调度到 UI 线程。
+    /// </summary>
+    public event Action? EmbedClientChanged;
+
+    /// <summary>
+    /// 发起内嵌连接。同步发起、异步回调；凭据取自 Windows 凭据管理器。
+    /// <para>黑屏自愈（M5 实测）：重连**同分辨率**会话时服务器不重绘桌面（RestoreRect 被无视），
+    /// 画面永远黑屏。对策：请求宽按重试次数 +2（保持偶数不被服务器取整），必然与会话当前
+    /// 分辨率不同 → 强制 resize → 服务器全量重绘；连接 6 秒后画面仍黑则宽再 +2 重连（最多 3 次）。</para>
+    /// </summary>
+    private bool TryStartEmbeddedConnect(string host, out string message)
+    {
+        message = string.Empty;
+        var normalized = RdpTargets.Normalize(host);
+        var password = RdpCredentialStore.Read(normalized);
+        if (password is null)
+        {
+            message = "该主机还没有保存凭据，请先在远程会话页点「保存凭据」。";
+            return false;
+        }
+
+        // 账户名允许 "DOMAIN\user" 写法
+        var user = RdpSettings.TargetUser.Trim();
+        string? domain = null;
+        var backslash = user.IndexOf('\\');
+        if (backslash > 0)
+        {
+            domain = user[..backslash];
+            user = user[(backslash + 1)..];
+        }
+
+        DisposeEmbedClient(); // 幂等清理旧实例（不重置重试计数）
+        _embedLastHost = normalized;
+        _embedUserDisconnect = false; // 主动连接：解除自动重连抑制
+
+        var client = new RdpEmbeddedClient();
+        client.Connected += OnEmbedConnected;
+        client.FrameArrived += OnEmbedFrameArrived;
+        client.Disconnected += OnEmbedDisconnected;
+        _embedClient = client;
+        EmbedClientChanged?.Invoke();
+
+        var (cfgWidth, cfgHeight) = RdpResolutionSize();
+        var (address, port) = RdpSessionService.SplitHostPort(normalized);
+        var started = client.Connect(new RdpConnectInfo
+        {
+            Host = address,
+            Port = (ushort)(port > 0 ? port : 3389),
+            Username = user,
+            Domain = domain,
+            Password = password,
+            DesktopWidth = (uint)((cfgWidth > 0 ? cfgWidth : 1280) + 2 * _embedRetryCount),
+            DesktopHeight = (uint)(cfgHeight > 0 ? cfgHeight : 720),
+            AllowSelfsigned = true,
+            EnableAudio = RdpSettings.AudioEnabled,
+            UseGfx = RdpSettings.GfxEnabled,
+        });
+        if (!started)
+        {
+            AppendLog("[内嵌] 连接发起失败（详见上方错误）。");
+            DisposeEmbedClient();
+            message = "内嵌连接发起失败，详见运行日志。";
+            return false;
+        }
+
+        AppendLog(_embedRetryCount > 0
+            ? $"[内嵌] 黑屏自愈重试 #{_embedRetryCount}：请求 {normalized} @ {(cfgWidth > 0 ? cfgWidth : 1280) + 2 * _embedRetryCount}×{(cfgHeight > 0 ? cfgHeight : 720)}（宽 +{2 * _embedRetryCount} 强制会话刷新）"
+            : $"[内嵌] 正在连接 {normalized}（client_mode=embedded，音频={(RdpSettings.AudioEnabled ? "开" : "关")}）…");
+        StartEmbedWatchdog();
+        return true;
+    }
+
+    private void OnEmbedFrameArrived(object? sender, RdpFrameEventArgs e)
+    {
+        // 第一帧到达 = 画面在流；停掉黑屏看门狗并复位重试计数（原生线程 → 编组）
+        if (_embedWatchdog is not null)
+        {
+            Post(StopEmbedWatchdog);
+        }
+    }
+
+    /// <summary>
+    /// 黑屏看门狗：连接后每 6 秒采样一帧亮度。全黑（&lt;20）→ 宽 +2 自动重连（最多 3 次）；
+    /// 有内容 → 复位。会话重连服务器不重绘时的唯一自愈手段（M5 实测）。
+    /// </summary>
+    private void StartEmbedWatchdog()
+    {
+        _embedWatchdog?.Stop();
+        var timer = _dispatcher.CreateTimer();
+        timer.Interval = TimeSpan.FromSeconds(6);
+        var ticks = 0;
+        timer.Tick += (_, _) =>
+        {
+            ticks++;
+            var client = _embedClient;
+            if (client is null)
+            {
+                timer.Stop();
+                _embedWatchdog = null;
+                return;
+            }
+            if (client.State != RdpClientState.Connected)
+            {
+                return; // 仍在连接中，下一拍再看
+            }
+            if (!client.TryCopyFrame(out var w, out var h, out var st, out var px))
+            {
+                if (ticks <= 10)
+                {
+                    return; // 还没有任何帧：下一拍再看（最多等 60 秒）
+                }
+                AppendLog("[内嵌] 60 秒未收到任何画面帧；请断开后重连，或改用 mstsc 连接方式。");
+                timer.Stop();
+                _embedWatchdog = null;
+                return;
+            }
+
+            long sum = 0;
+            var samples = 0;
+            for (var i = 0; i + 2 < px.Length; i += 4096 * 4)
+            {
+                sum += px[i] + px[i + 1] + px[i + 2];
+                samples += 3;
+            }
+            var brightness = samples > 0 ? sum / samples : 0;
+            if (brightness > 20)
+            {
+                // 画面有内容：自愈完成
+                timer.Stop();
+                _embedWatchdog = null;
+                _embedRetryCount = 0;
+                AppendLog($"[内嵌] 画面正常（{w}×{h}）。点击画面可获得焦点并直接操作。");
+                return;
+            }
+
+            if (_embedRetryCount >= 3)
+            {
+                AppendLog("[内嵌] 多次重试仍黑屏；请点「断开目标会话」后重新连接，或在连接方式里改回 mstsc。");
+                timer.Stop();
+                _embedWatchdog = null;
+                return;
+            }
+
+            _embedRetryCount++;
+            AppendLog($"[内嵌] 检测到静止黑屏（亮度 {brightness}），自动重连第 {_embedRetryCount}/3 次…");
+            _ = TryStartEmbeddedConnect(_embedLastHost, out _);
+        };
+        timer.Start();
+        _embedWatchdog = timer;
+    }
+
+    private void StopEmbedWatchdog()
+    {
+        _embedWatchdog?.Stop();
+        _embedWatchdog = null;
+        _embedRetryCount = 0;
+    }
+
+    private void OnEmbedConnected(object? sender, (int Session, uint Width, uint Height) e)
+    {
+        // 原生事件循环线程回调：AppendLog 自带编组；UI 属性必须 Post 到 UI 线程
+        // （直接设 RdpStatusText 会触发 x:Bind 跨线程 set_Text → RPC_E_WRONG_THREAD 崩溃）
+        AppendLog($"[内嵌] 连接建立：桌面 {e.Width}×{e.Height}，画面已嵌入窗口。");
+        _embedAutoReconnects = 0; // 连接成功：清零自动重连计数
+        Post(() =>
+        {
+            if (RdpStatusText.Contains("内嵌连接中", StringComparison.Ordinal) ||
+                RdpStatusText.Contains("自动重连", StringComparison.Ordinal))
+            {
+                RdpStatusText = "内嵌画面已连接";
+            }
+        });
+    }
+
+    private void OnEmbedDisconnected(object? sender, (int Session, int Reason, string Detail) e)
+    {
+        // 可能在原生线程触发：AppendLog 线程安全；状态更新走 Post
+        AppendLog($"[内嵌] 连接断开：{e.Detail}（目标会话保留，可重新连接）。");
+        Post(() => RdpStatusText = "内嵌连接已断开（目标会话保留）");
+
+        // M6 自动重连：仅服务器/网络侧意外断开（环回解锁/网络闪断）。
+        // LOCAL = 本端主动（用户断开/看门狗自愈链/窗口关闭）不重连；
+        // ERROR = 协议错误，重连多半还错，避免风暴不重连。
+        if (e.Reason == 2 && !_embedUserDisconnect && _embedRetryCount == 0)
+        {
+            ScheduleEmbedAutoReconnect();
+        }
+        DisposeEmbedClient();
+    }
+
+    /// <summary>
+    /// 意外掉线自动重连（M6）：指数退避 1/2/4/8/16 秒，最多 5 次。
+    /// 覆盖 §5.5 环回解锁场景（锁屏结束后内嵌画面自动恢复）。
+    /// </summary>
+    private void ScheduleEmbedAutoReconnect()
+    {
+        if (_embedAutoReconnects >= 5)
+        {
+            AppendLog("[内嵌] 自动重连已达上限（5 次）；请手动重连或改用 mstsc 连接方式。");
+            return;
+        }
+        _embedAutoReconnects++;
+        var delay = Math.Min(1 << (_embedAutoReconnects - 1), 16);
+        AppendLog($"[内嵌] {delay} 秒后自动重连（第 {_embedAutoReconnects}/5 次）…");
+        Post(() =>
+        {
+            var timer = _dispatcher.CreateTimer();
+            timer.Interval = TimeSpan.FromSeconds(delay);
+            timer.Tick += (_, _) =>
+            {
+                timer.Stop();
+                // 等待期间已手动连接/断开则放弃
+                if (_embedClient is not null || _embedUserDisconnect)
+                {
+                    return;
+                }
+                _ = TryStartEmbeddedConnect(_embedLastHost, out _);
+            };
+            timer.Start();
+        });
+    }
+
+    /// <summary>
+    /// 释放内嵌连接实例（ycn_rdp_disconnect：目标会话保留）。幂等，可在任意线程调用。
+    /// 注意：不重置黑屏重试计数——自动重连链路依赖它跨连接保持。
+    /// </summary>
+    public void DisposeEmbedClient()
+    {
+        if (_embedClient is null)
+        {
+            return;
+        }
+        var client = _embedClient;
+        _embedClient = null;
+        client.Connected -= OnEmbedConnected;
+        client.FrameArrived -= OnEmbedFrameArrived;
+        client.Disconnected -= OnEmbedDisconnected;
+        try
+        {
+            client.Dispose();
+        }
+        catch
+        {
+            // 释放失败不阻断 UI（原生侧自有兜底）
+        }
+        _embedWatchdog?.Stop();
+        _embedWatchdog = null;
+        AppendLog("[内嵌] 内嵌连接已断开（目标会话保留中）。");
+        EmbedClientChanged?.Invoke();
     }
 
     public ObservableCollection<RdpTaskEvent> RdpEvents { get; } = new();
@@ -1734,12 +2047,14 @@ public sealed class MainViewModel : ObservableObject
 
         AppendLog($"已下发远程执行指令 {command.Id}，共 {enabled.Count} 个任务，目标：{host} / {RdpSettings.TargetUser}。");
 
-        // 目标账户已经登录着就不再新建连接。
+        // 目标账户已经登录着就不再新建连接（仅 mstsc 模式）。
         // Windows 客户端版同时只允许一个交互式会话，重复连接会把目标账户
         // 正在用的那个桌面接管过来（当前桌面则被踢到锁屏），
         // 而这对"把任务跑起来"毫无帮助 —— 代理直接在那个已有会话里跑就行。
+        // 内嵌模式例外：画面要嵌进窗口就必须真正建立连接（重连会接回同一会话，无副作用）。
         RdpSessionInfo? reusableSession = null;
-        var hasReusableSession = isLocal
+        var hasReusableSession = !IsEmbeddedMode
+            && isLocal
             && RdpSessionService.TryGetReusableSession(RdpSettings.TargetUser, out reusableSession);
 
         if (hasReusableSession)
@@ -1747,6 +2062,19 @@ public sealed class MainViewModel : ObservableObject
             AppendLog(
                 $"检测到账户「{RdpSettings.TargetUser}」已经登录（会话 {reusableSession!.Id}，{reusableSession.StateText}），" +
                 "直接复用它，本次不再新建远程桌面连接。");
+        }
+        else if (IsEmbeddedMode)
+        {
+            // 内嵌模式：FreeRDP 连接，画面嵌入窗口；会话建立后代理照常接管（桥/心跳零改动）
+            if (!TryStartEmbeddedConnect(host, out var embedMessage))
+            {
+                _ = DialogHelper.ShowMessageAsync("连接失败", embedMessage);
+                RdpStatusText = "连接失败";
+                return;
+            }
+
+            AppendLog("内嵌模式下任务画面显示在「内嵌画面」卡片里；也可以随时点全屏接管键盘操作。");
+            AppendLog("提示：任务跑在目标会话里，断开内嵌连接等于「断开连接」——会话与进程保留，任务继续跑。");
         }
         else
         {

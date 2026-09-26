@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- RDP 内嵌画面控件（计划书 §6 M2：SoftwareBitmap 原型渲染；M4 升级 SwapChainPanel） -->
+<UserControl
+    x:Class="YukinoChan.Views.RdpView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    MinHeight="240">
+
+    <Grid Background="{ThemeResource SolidBackgroundFillColorBaseBrush}">
+        <!-- M4 生产渲染：D3D11 交换链面板（初始化失败回退 SoftwareBitmap 路线）。
+             Viewbox(Uniform) 负责等比缩放+居中：面板 DIP 尺寸 = 远端分辨率，
+             框架自动维护 CompositionScale（手动 COM 设置会被布局重置为 1，导致画面 1:1 裁切） -->
+        <Viewbox x:Name="PartViewbox"
+                 Stretch="Uniform"
+                 Visibility="Collapsed">
+            <SwapChainPanel x:Name="PartPanel" />
+        </Viewbox>
+
+        <Image x:Name="PartFrame"
+               Stretch="Uniform"
+               Visibility="Collapsed" />
+
+        <StackPanel x:Name="PartOverlay"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Spacing="8"
+                    Visibility="Visible">
+            <ProgressRing x:Name="PartProgress"
+                          IsActive="True"
+                          Width="36"
+                          Height="36" />
+            <TextBlock x:Name="PartStatusText"
+                       HorizontalAlignment="Center"
+                       Text="未连接"
+                       Opacity="0.75" />
+        </StackPanel>
+    </Grid>
+</UserControl>

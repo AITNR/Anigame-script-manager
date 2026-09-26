@@ -33,6 +33,8 @@
     <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
     <!-- .NET 8 默认不含 GBK(936) 等代码页编码，读 netsh / cmdkey 等原生工具的 GBK 输出要靠它提供的 CodePagesEncodingProvider -->
     <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
   </ItemGroup>
 
   <ItemGroup>
@@ -44,5 +46,16 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
+
+  <!-- RdpNative：ycn_rdp.dll + FreeRDP 运行时（仅 x64；构建前置 = 先 build YukinoChan.RdpNative） -->
+  <ItemGroup Condition="'$(Platform)'=='x64'">
+    <None Include="..\YukinoChan.RdpNative\build\Release\ycn_rdp.dll" Link="ycn_rdp.dll" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+  <Target Name="CopyRdpRuntimeDlls" AfterTargets="Build" Condition="'$(Platform)'=='x64'">
+    <ItemGroup>
+      <RdpRuntimeDll Include="..\YukinoChan.RdpNative\build\Release\*.dll" Exclude="..\YukinoChan.RdpNative\build\Release\ycn_rdp.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(RdpRuntimeDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>

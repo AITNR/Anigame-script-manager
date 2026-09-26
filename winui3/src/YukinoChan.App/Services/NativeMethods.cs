@@ -148,28 +148,4 @@ internal static class NativeMethods
         IntPtr hServer,
         uint sessionId,
         [MarshalAs(UnmanagedType.Bool)] bool bWait);
-
-    [DllImport("kernel32.dll")]
-    public static extern uint WTSGetActiveConsoleSessionId();
-
-    // ---------------- 内嵌远程桌面：窗口挂载 ----------------
-
-    public const uint RdpSwHide = 0;
-    public const uint RdpSwShow = 5;
-
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool MoveWindow(
-        IntPtr hWnd, int x, int y, int cx, int cy, [MarshalAs(UnmanagedType.Bool)] bool repaint);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool ShowWindow(IntPtr hWnd, uint nCmdShow);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool IsWindow(IntPtr hWnd);
 }

@@ -2,7 +2,7 @@
 using System;
 using System.Globalization;
 
-namespace YukinoChan.RdpHost;
+namespace YukinoChan.Models;
 
 /// <summary>把 RDP ActiveX 的错误码翻成人话。</summary>
 public static class RdpErrorText

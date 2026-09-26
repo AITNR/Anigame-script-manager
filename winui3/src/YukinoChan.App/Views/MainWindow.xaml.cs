@@ -40,6 +40,10 @@ public sealed partial class MainWindow : Window
         VM.ShutdownPromptRequested += OnShutdownPromptRequested;
         VM.RequestNavigation += (_, tag) => NavigateTo(tag);
 
+        // M5：窗口关闭时释放内嵌连接（ycn_rdp_disconnect 语义 = 会话保留；原生事件循环线程须退出，
+        // 否则非后台线程会拖住进程退出）
+        Closed += (_, _) => VM.DisposeEmbedClient();
+
         // 激活态跟踪 + 错过通知的补发：本地多用户 RDP 接管期间主控端会话被锁，
         // 锁定会话不弹 Toast 横幅（通知只进操作中心）。
         // 完成时 MainViewModel 会把通知落盘（PendingNotificationStore），
@@ -52,6 +56,14 @@ public sealed partial class MainWindow : Window
         }
 
         NavigateTo("home");
+
+        // M5/M6 自检通道：自动导航到 RdpPage（页面 Loaded 里自动连接）
+        if (Program.EmbedVmArgs is not null)
+        {
+            DispatcherQueue.TryEnqueue(
+                Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+                () => NavigateTo("rdp"));
+        }
     }
 
     public MainViewModel VM => App.ViewModel;

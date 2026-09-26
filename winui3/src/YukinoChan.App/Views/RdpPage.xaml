@@ -197,15 +197,38 @@
                                FontSize="12"
                                TextWrapping="Wrap" />
 
+                    <ComboBox x:Name="ClientModeBox"
+                              Header="连接方式"
+                              ItemsSource="{x:Bind VM.ClientModeItems}"
+                              DisplayMemberPath="Value"
+                              SelectedValuePath="Key"
+                              SelectedValue="{x:Bind VM.RdpSettings.ClientMode, Mode=TwoWay}"
+                              HorizontalAlignment="Stretch" />
+
+                    <CheckBox x:Name="EmbedAudioSettingCheck"
+                              Content="内嵌模式下在本机播放远端声音"
+                              IsChecked="{x:Bind VM.RdpSettings.AudioEnabled, Mode=TwoWay}" />
+
+                    <CheckBox x:Name="EmbedGfxSettingCheck"
+                              Content="GFX 全帧管线（实验性：撕裂根治，需重连生效）"
+                              IsChecked="{x:Bind VM.RdpSettings.GfxEnabled, Mode=TwoWay}"
+                              ToolTipService.ToolTip="走 RDP 图形管道协商 progressive 全帧，远端快速变化时不再撕裂；默认关闭" />
+
+                    <TextBlock Text="选「内嵌」时画面直接显示在本页下方的「内嵌画面」卡片里，鼠标键盘可直接操作；选「独立窗口」时用系统 mstsc 开窗口（稳定，永久可用）。改连接方式后下次连接生效。"
+                               Opacity="0.65"
+                               FontSize="12"
+                               TextWrapping="Wrap" />
+
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <Button Content="连接目标账户" Click="OnConnectSurface"
                                 Style="{StaticResource AccentButtonStyle}"
-                                ToolTipService.ToolTip="用系统远程桌面打开独立窗口连到目标账户，不下发任务" />
+                                ToolTipService.ToolTip="按上方连接方式连接目标账户，不下发任务" />
                         <Button Content="断开目标会话" Click="OnDisconnectSurface"
-                                ToolTipService.ToolTip="断开目标账户的会话（任务收尾方式仍遵循上面的设置）" />
+                                ToolTipService.ToolTip="断开目标账户的连接（内嵌=断开画面保留会话；会话收尾方式仍遵循上面的设置）" />
                     </StackPanel>
 
-                    <TextBlock Text="连接后本机当前桌面会被锁定，任务在目标账户里执行。任务进度会持续回传到这里，每个任务完成都会发系统通知。"
+                    <TextBlock x:Name="EmbedModeHint"
+                               Text="连接后本机当前桌面会被锁定，任务在目标账户里执行。任务进度会持续回传到这里，每个任务完成都会发系统通知。"
                                Opacity="0.65"
                                FontSize="12"
                                TextWrapping="Wrap" />
@@ -337,6 +360,34 @@
                                 </DataTemplate>
                             </ListView.ItemTemplate>
                         </ListView>
+                    </Border>
+                </StackPanel>
+            </Border>
+
+            <!-- M2 调试入口：内嵌画面预览（FreeRDP 路线；M5 会替换为 client_mode 正式接线） -->
+            <Border x:Name="EmbedCard"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    Padding="14">
+                <StackPanel Spacing="10">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBlock x:Name="EmbedCardTitle" Text="内嵌画面（实验性）" FontWeight="SemiBold" VerticalAlignment="Center" />
+                        <TextBlock Text="连接方式选「内嵌」时，任务与「连接目标账户」的画面都会显示在这里；也可用下方按钮独立预览。"
+                                   Opacity="0.6" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap" />
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="EmbedConnectButton" Content="连接预览" Click="OnEmbedConnect" Style="{StaticResource AccentButtonStyle}" />
+                        <Button x:Name="EmbedDisconnectButton" Content="断开" Click="OnEmbedDisconnect" IsEnabled="False" />
+                        <Button x:Name="EmbedFullScreenButton" Content="全屏" Click="OnEmbedFullScreenToggle" IsEnabled="False" />
+                        <CheckBox x:Name="EmbedAudioCheck" Content="播放远端声音" IsChecked="True" VerticalAlignment="Center" />
+                        <TextBlock x:Name="EmbedStatusText" VerticalAlignment="Center" Opacity="0.7" FontSize="12" />
+                    </StackPanel>
+                    <TextBlock FontSize="12" Opacity="0.6" TextWrapping="Wrap"
+                               Text="输入提示：点击画面获得焦点后，鼠标与键盘直接作用于远端。全屏时 Win 键、Alt+Tab 等系统组合键全部转投远端（F11 退出全屏）；Ctrl+Alt+Del 是系统安全序列任何客户端都无法转发，远端任务管理器请用 Ctrl+Shift+Esc。" />
+                    <Border x:Name="EmbedHostBorder" Height="360">
+                        <views:RdpView x:Name="EmbedView" />
                     </Border>
                 </StackPanel>
             </Border>
