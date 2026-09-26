@@ -35,7 +35,7 @@
       "order": 2,
       "timeout_minutes": 10,
       "timeout_action": "kill_and_continue",
-      "use_args": false,
+      "use_args": true,
       "args": "main -e",
       "wait_mode": "window_title",
       "wait_process_name": "星穹铁道",
@@ -177,6 +177,9 @@
     "notify_local_task_done": false,
     "connect_timeout_seconds": 120,
     "embed_remote_desktop": false,
+    "client_mode": "embedded",
+    "audio_enabled": true,
+    "gfx_enabled": false,
     "desktop_width": 1920,
     "desktop_height": 1080
   }
