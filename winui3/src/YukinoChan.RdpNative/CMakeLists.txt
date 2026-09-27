@@ -5,18 +5,30 @@
 #   cmake --build build --config Release
 # 产物：build/Release/ycn_rdp.dll（+ 运行时 DLL 全量拷贝）
 #
-# 依赖：vcpkg FreeRDP 3.32.0（默认 C:\Users\AITNR\WorkBuddy\_tools\vcpkg，纯 ASCII 路径）
-#       可用 -DVCPKG_INST=<路径> 覆盖
+# 依赖：vcpkg FreeRDP 3.32.0（本机默认 <仓库>/../_tools/vcpkg，纯 ASCII 路径）
+#       可用 -DVCPKG_INST=<路径> 覆盖（CI 就是这么用的）
+#
+# ⚠️ 覆盖必须先判空再取默认值：`get_filename_component` 会**无条件**覆盖同名变量，
+#    早先那种直接赋值写法会把 -DVCPKG_INST 悄悄吃掉，于是 CI 上永远去啃那条本机路径
+#    （D:/a/_tools/vcpkg/...）并报「找不到 freerdp3.lib」。
 
 cmake_minimum_required(VERSION 3.20)
 project(YukinoChan.RdpNative C)
 
-get_filename_component(VCPKG_INST
-  "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../_tools/vcpkg/installed/x64-windows"
-  ABSOLUTE)
+if(NOT DEFINED VCPKG_INST OR "${VCPKG_INST}" STREQUAL "")
+  get_filename_component(VCPKG_INST
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../_tools/vcpkg/installed/x64-windows"
+    ABSOLUTE)
+else()
+  # 归一化：CI 传进来的可能是 Windows 反斜杠路径
+  file(TO_CMAKE_PATH "${VCPKG_INST}" VCPKG_INST)
+  get_filename_component(VCPKG_INST "${VCPKG_INST}" ABSOLUTE)
+endif()
+
+message(STATUS "VCPKG_INST = ${VCPKG_INST}")
 
 if(NOT EXISTS "${VCPKG_INST}/lib/freerdp3.lib")
-  message(FATAL_ERROR "找不到 ${VCPKG_INST}/lib/freerdp3.lib —— 先在 _tools/vcpkg 里安装 freerdp[client]:x64-windows")
+  message(FATAL_ERROR "找不到 ${VCPKG_INST}/lib/freerdp3.lib —— 先在 vcpkg 里安装 freerdp[client]:x64-windows，或用 -DVCPKG_INST 指到已装好的 installed/x64-windows")
 endif()
 
 add_library(ycn_rdp SHARED ycn_rdp.c)

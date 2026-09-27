@@ -174,7 +174,8 @@ jobs:
           }
 
           Write-Host "使用生成器：$gen"
-          $inst = (Resolve-Path '.vcpkg/installed/x64-windows').Path
+          # 正斜杠交给 cmake（CMakeLists 侧还有 file(TO_CMAKE_PATH) 兜一层）
+          $inst = (Resolve-Path '.vcpkg/installed/x64-windows').Path.Replace('\', '/')
           cmake -S winui3/src/YukinoChan.RdpNative -B .native-build -G $gen -A x64 "-DVCPKG_INST=$inst"
           cmake --build .native-build --config Release --parallel
 
