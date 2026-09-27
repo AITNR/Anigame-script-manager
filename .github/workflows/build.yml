@@ -276,6 +276,10 @@ jobs:
       - name: 打包（补齐 .pri / XBF / FreeRDP 运行库 / 看板娘素材 + 自检）
         id: pack
         shell: pwsh
+        env:
+          # Windows runner 的 Python 默认按 cp1252 输出，打印中文会 UnicodeEncodeError
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: '1'
         run: |
           $name = "YukinoChan-winui3-${{ steps.ver.outputs.version }}-x64"
           $argv = @(

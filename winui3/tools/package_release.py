@@ -33,6 +33,21 @@ import sys
 import zipfile
 from pathlib import Path
 
+
+def _force_utf8_stdio() -> None:
+    """把标准输出/错误强制成 UTF-8。
+
+    Windows 上 Python 的 stdout 跟着控制台代码页走：本机是 cp936 尚可，
+    而 GitHub Actions 的 Windows runner 是 **cp1252** —— 一打印中文就
+    UnicodeEncodeError 直接把打包打断（CI 真实踩过一轮）。
+    这里统一重设，并允许个别字符降级成 ?，保证日志不因编码问题中断。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):  # 老版本 / 被重定向的流
+            pass
+
 # ---------------------------------------------------------------- 文件筛选
 
 # build 输出里的"构建过程垃圾"：不进发布包
@@ -181,6 +196,8 @@ def _write_help(app_dir: Path, version: str, package_kind: str, built_at: str) -
 # ---------------------------------------------------------------- 主流程
 
 def main(argv: list[str] | None = None) -> int:
+    _force_utf8_stdio()
+
     parser = argparse.ArgumentParser(description="收拢 WinUI 3 发布包")
     parser.add_argument("--build-dir", required=True, help="dotnet build 的输出目录")
     parser.add_argument("--publish-dir", help="dotnet publish 的输出目录（自包含时给）")
