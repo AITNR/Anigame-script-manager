@@ -32,7 +32,7 @@
       "game_process": ""
     },
     {
-      "enabled": true,
+      "enabled": false,
       "name": "BetterGI.exe",
       "script_path": "C:/Program Files/BetterGI/BetterGI.exe",
       "order": 2,
@@ -56,11 +56,11 @@
       "game_process": ""
     },
     {
-      "enabled": false,
+      "enabled": true,
       "name": "MaaEnd.exe",
-      "script_path": "",
+      "script_path": "D:\\Program Files\\MaaEnd\\MaaEnd.exe",
       "order": 3,
-      "timeout_minutes": 20,
+      "timeout_minutes": 300,
       "timeout_action": "kill_and_continue",
       "use_args": false,
       "args": "",
@@ -150,7 +150,7 @@
       "game_process": ""
     },
     {
-      "enabled": false,
+      "enabled": true,
       "name": "March7th Assistant.exe",
       "script_path": "C:\\Program Files\\March7thAssistant_v2.7.0\\March7th Launcher.exe",
       "order": 7,
