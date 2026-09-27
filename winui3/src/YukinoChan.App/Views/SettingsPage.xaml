@@ -49,6 +49,12 @@
                               DisplayMemberPath="Value"
                               SelectedValuePath="Key"
                               SelectionChanged="OnThemeChanged" />
+                    <!-- 切换反馈走页内文字，不用 ContentDialog：改根部 RequestedTheme 会重建 XamlRoot
+                         的内容树，和正在显示的对话框抢输入层（详见 SettingsPage.xaml.cs 的注释） -->
+                    <TextBlock x:Name="ThemeHintText"
+                               Visibility="Collapsed"
+                               TextWrapping="Wrap"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </StackPanel>
             </Border>
 

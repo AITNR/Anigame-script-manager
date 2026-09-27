@@ -1,6 +1,8 @@
 // -*- coding: utf-8 -*-
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using YukinoChan.Helpers;
@@ -13,10 +15,14 @@ namespace YukinoChan.Views;
 public sealed partial class SettingsPage : Page
 {
     private bool _syncing;
+    private CancellationTokenSource? _themeHintCts;
 
     public SettingsPage()
     {
         InitializeComponent();
+
+        // 离开页面就别再往回写提示控件了
+        Unloaded += (_, __) => _themeHintCts?.Cancel();
 
         _syncing = true;
         try
@@ -61,17 +67,71 @@ public sealed partial class SettingsPage : Page
         VM.Config.ShutdownDelaySeconds = (int)Math.Round(double.IsNaN(args.NewValue) ? 60 : args.NewValue);
     }
 
-    private async void OnThemeChanged(object sender, SelectionChangedEventArgs e)
+    /// <summary>
+    /// ⚠️ 这里**不能**用 ContentDialog 报"已切换"。
+    /// 改窗口根元素的 <c>RequestedTheme</c> 会让 ComboBox 重新模板化，SelectionChanged 会再触发一次；
+    /// 于是同一个交互里连着两次 ShowAsync —— 第二次必抛 COMException 0x80000019
+    /// （"Only a single ContentDialog can be open at any time"）。调用方若是 <c>_ = …</c> 的
+    /// fire-and-forget 写法，未观察异常直接掀掉进程：实测表现就是"知道了"点不动，过一会儿窗口崩掉。
+    /// 切换效果本来就肉眼可见，反馈改成页面内的一行文字，几秒后自动收起。
+    /// </summary>
+    private void OnThemeChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_syncing || ThemeBox.SelectedItem is not KeyValuePair<string, string> item)
         {
             return;
         }
 
-        VM.Config.Theme = item.Key;
-        ApplyTheme(item.Key);
-        VM.SaveConfig();
-        await DialogHelper.ShowMessageAsync("主题", $"已切换到「{item.Value}」。");
+        // 值没变 = 程序性重设（改 RequestedTheme 会让 ComboBox 重新模板化，进而再触发一次
+        // SelectionChanged），别当成用户操作 —— 否则会重复落盘 + 重复提示。
+        if (VM.Config.Theme == item.Key)
+        {
+            return;
+        }
+
+        _syncing = true;
+        try
+        {
+            VM.Config.Theme = item.Key;
+            ApplyTheme(item.Key);
+            VM.SaveConfig();
+
+            ShowThemeHint($"已切换到「{item.Value}」。");
+        }
+        finally
+        {
+            _syncing = false;
+        }
+    }
+
+    private void ShowThemeHint(string text)
+    {
+        ThemeHintText.Text = text;
+        ThemeHintText.Visibility = Visibility.Visible;
+
+        // 连点下拉框时只留最后一次的计时
+        _themeHintCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _themeHintCts = cts;
+
+        _ = HideThemeHintLaterAsync(cts);
+    }
+
+    private async Task HideThemeHintLaterAsync(CancellationTokenSource cts)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(4), cts.Token);
+
+            if (!cts.IsCancellationRequested)
+            {
+                ThemeHintText.Visibility = Visibility.Collapsed;
+            }
+        }
+        catch (TaskCanceledException)
+        {
+            // 已被下一次切换取代
+        }
     }
 
     private static void ApplyTheme(string theme)
