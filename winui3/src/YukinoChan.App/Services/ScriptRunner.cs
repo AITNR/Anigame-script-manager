@@ -68,6 +68,12 @@ public sealed class ScriptRunner
     private const double MonitorAbsentGraceSeconds = 15.0;
     private const double MonitorDetectDeadlineSeconds = 180.0;
     private const double LaunchConfirmSeconds = 2.0;
+
+    /// <summary>
+    /// 直接进程秒退后确认"是否由新进程接力"的最长等待（秒）。
+    /// 提权重启要过 UAC、新实例要初始化，给 10 秒足够；太长会把真崩溃的判定拖慢。
+    /// </summary>
+    private const double LaunchRelayGraceSeconds = 10.0;
     private const int ErrorLockBaseSeconds = 15;
 
     private readonly List<TaskConfig> _tasks;
@@ -315,11 +321,7 @@ public sealed class ScriptRunner
                 Log("未启用自动关机。");
             }
 
-            var paths = _stats.SaveSession();
-            if (paths.Count > 0)
-            {
-                Log($"本次运行耗时统计已保存：{paths[0]}");
-            }
+            SaveStatsQuietly("本次运行");
 
             RaiseFinished(HadTaskError);
         }
@@ -329,11 +331,7 @@ public sealed class ScriptRunner
             Log($"执行器发生异常：{ex.Message}");
             MarkTaskError($"执行器发生异常：{ex.Message}");
             SaveAbnormalReport();
-            var paths = _stats.SaveSession();
-            if (paths.Count > 0)
-            {
-                Log($"异常前耗时统计已保存：{paths[0]}");
-            }
+            SaveStatsQuietly("异常前");
 
             RaiseFinished(true);
         }
@@ -719,6 +717,14 @@ public sealed class ScriptRunner
                     return true;
                 }
 
+                // 直接进程秒退 ≠ 启动失败：提权重启（BetterGI 未以管理员运行时会 runas 重启自己并
+                // 用退出码 553 退出）、单实例转发都会让原进程立刻退出、由新进程接手。
+                // 给它一个短窗口确认是否真的被"接力"起来了。
+                if (TryConfirmRelayLaunch(task, name, stopwatch, monitorSpec))
+                {
+                    return true;
+                }
+
                 var message = $"工作出现了问题！！！任务「{name}」运行出现问题或者提前退出了，退出码：{exitCode}。";
                 Log(message);
                 MarkTaskError(message, name);
@@ -730,6 +736,68 @@ public sealed class ScriptRunner
 
         Log($"任务「{name}」启动确认通过：进程稳定运行超过 {(int)LaunchConfirmSeconds} 秒。");
         return true;
+    }
+
+    /// <summary>
+    /// 接力判定：直接进程已退出、监控目标还没出现时，等一小会儿看真正的程序有没有被"接力"起来。
+    ///
+    /// 典型场景：BetterGI 检测到自己不是管理员就用 runas 提权重启，原进程带着退出码 553 秒退，
+    /// 提权后的新实例才是我要等的那个（它起来后才会拉起原神窗口，监控目标短期内本就不该出现）。
+    /// 单实例程序同理：新实例把参数转给已在运行的实例后就退出。
+    ///
+    /// 命中条件（任一）：① 监控目标出现；② 与脚本/任务登记同名的进程又在跑。
+    /// 命中即判启动成功 —— 后续由主循环继续按监控目标等待完成。
+    /// 纯"等待直接进程"模式没有接力可言（退出就是结束），直接返回 false。
+    /// </summary>
+    private bool TryConfirmRelayLaunch(
+        TaskConfig task,
+        string name,
+        Stopwatch stopwatch,
+        MonitorSpec monitorSpec)
+    {
+        if (monitorSpec.Kind == MonitorKinds.Direct)
+        {
+            return false;
+        }
+
+        var relayNames = ProcessNamesForTask(task, task.ScriptPath);
+        if (relayNames.Count == 0)
+        {
+            var fallback = Path.GetFileNameWithoutExtension(task.ScriptPath.Trim());
+            if (fallback.Length > 0)
+            {
+                relayNames.Add(fallback);
+            }
+        }
+
+        while (stopwatch.Elapsed.TotalSeconds < LaunchRelayGraceSeconds)
+        {
+            WaitIfPaused();
+            if (_stopRequested)
+            {
+                return false;
+            }
+
+            var (present, matchedKeyword) = IsMonitorPresent(monitorSpec);
+            if (present)
+            {
+                Log($"任务「{name}」直接进程已退出，但已检测到{monitorSpec.Label}「{matchedKeyword}」，判定为提权/单实例接力成功。");
+                return true;
+            }
+
+            foreach (var candidate in relayNames)
+            {
+                if (ProcessHelper.IsProcessNameRunning(candidate))
+                {
+                    Log($"任务「{name}」直接进程已退出，但检测到同名进程「{candidate}」在运行，判定为提权/单实例接力成功。");
+                    return true;
+                }
+            }
+
+            Thread.Sleep(300);
+        }
+
+        return false;
     }
 
     private RunOutcome HandleTimeout(TaskConfig task, IMonitoredProcess process, string name)
@@ -1283,6 +1351,28 @@ public sealed class ScriptRunner
         catch (Exception ex)
         {
             Log($"保存异常报告失败：{ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 保存本次运行的耗时统计。
+    ///
+    /// 统计只是"锦上添花"：写失败（多账户共用副本时目录权限不够、文件名撞车都可能）
+    /// 绝不该把整轮任务判成异常 —— 所以这里吞掉异常，只留一条日志。
+    /// </summary>
+    private void SaveStatsQuietly(string label)
+    {
+        try
+        {
+            var paths = _stats.SaveSession();
+            if (paths.Count > 0)
+            {
+                Log($"{label}耗时统计已保存：{paths[0]}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"{label}耗时统计保存失败（不影响任务结果）：{ex.Message}");
         }
     }
 

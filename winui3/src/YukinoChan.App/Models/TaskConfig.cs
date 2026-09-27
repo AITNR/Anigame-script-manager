@@ -34,6 +34,7 @@ public sealed class TaskConfig : ObservableObject, ICloneable
     private string _launcherProcess = string.Empty;
     private string _mainProcess = string.Empty;
     private string _gameProcess = string.Empty;
+    private int _scopeOrder;
 
     [JsonPropertyName("enabled")]
     public bool Enabled
@@ -219,6 +220,28 @@ public sealed class TaskConfig : ObservableObject, ICloneable
             }
         }
     }
+
+    /// <summary>
+    /// **通道内**的显示序号（1..N）—— 由 <c>TaskScopePlanner.RenumberScope</c> 在刷新视图时写入。
+    /// 落盘的 <see cref="Order"/> 仍是全局唯一整数（执行顺序的排序键），两者不是一回事：
+    /// 界面上要给人看"这条通道里的第几个"，执行侧要的是全局次序。
+    /// </summary>
+    [JsonIgnore]
+    public int ScopeOrder
+    {
+        get => _scopeOrder;
+        set
+        {
+            if (SetProperty(ref _scopeOrder, value))
+            {
+                OnPropertyChanged(nameof(ScopeOrderText));
+            }
+        }
+    }
+
+    /// <summary>序号的文本形态 —— x:Bind 不会替你把 int 转成 string，直接绑整数编译不过。</summary>
+    [JsonIgnore]
+    public string ScopeOrderText => _scopeOrder.ToString();
 
     [JsonIgnore]
     public string DisplayName => string.IsNullOrWhiteSpace(Name) ? $"任务{Order}" : Name;

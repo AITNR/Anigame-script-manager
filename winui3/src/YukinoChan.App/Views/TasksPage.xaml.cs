@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -12,6 +13,13 @@ using YukinoChan.ViewModels;
 
 namespace YukinoChan.Views;
 
+/// <summary>
+/// 任务执行页 —— **按执行通道编排任务**（计划书 <c>docs/tasks-by-channel-plan.md</c>）。
+///
+/// 页面只做三件事：把 VM 的「通道 / 通道内任务」视图显示出来、把按钮转发给 VM、同步选中态。
+/// 排序、改归属、重编序号这些逻辑全在 <see cref="TaskScopePlanner"/>（纯函数，可脱离 WinUI 测）——
+/// 塞进页面里就没法写冒烟了。
+/// </summary>
 public sealed partial class TasksPage : Page
 {
     private bool _syncing;
@@ -26,49 +34,134 @@ public sealed partial class TasksPage : Page
 
         VM.PropertyChanged += (_, args) =>
         {
-            if (args.PropertyName == nameof(MainViewModel.SelectedTask))
+            switch (args.PropertyName)
             {
-                SyncForm();
+                case nameof(MainViewModel.SelectedTask):
+                    SyncTaskSelection();
+                    SyncForm();
+                    break;
+
+                case nameof(MainViewModel.SelectedScope):
+                    SyncScopeSelection();
+                    SyncTaskSelection();
+                    SyncForm();
+                    break;
+
+                // 任务视图被重建（增删 / 排序 / 改派）后要把列表选中态对回去
+                case nameof(MainViewModel.ScopeTasks):
+                    SyncTaskSelection();
+                    break;
             }
         };
 
+        SyncScopeSelection();
+        SyncTaskSelection();
         SyncForm();
     }
 
     public MainViewModel VM => App.ViewModel;
 
-    // ---------------- 列表操作 ----------------
+    // ---------------- 左：执行通道 ----------------
 
-    private void OnAddTask(object sender, RoutedEventArgs e)
+    private void OnScopeSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        VM.AddTask();
-        TaskList.SelectedItem = VM.SelectedTask;
+        if (_syncing || ScopeList.SelectedItem is not ChannelScope scope)
+        {
+            return;
+        }
+
+        VM.SelectedScope = scope;
+
+        // 切通道后默认看这条通道的第一个任务 —— 沿用上一条通道的选中项会指向别的通道，看着像串台
+        VM.SelectedTask = VM.ScopeTasks.FirstOrDefault();
     }
 
-    private void OnDeleteTask(object sender, RoutedEventArgs e)
-    {
-        VM.DeleteSelectedTask();
-        TaskList.SelectedItem = VM.SelectedTask;
-    }
+    private void OnOpenChannels(object sender, RoutedEventArgs e) => VM.Navigate("channels");
 
-    private void OnMoveUp(object sender, RoutedEventArgs e)
-    {
-        VM.MoveSelectedUp();
-        TaskList.SelectedItem = VM.SelectedTask;
-    }
+    // ---------------- 中：通道内的任务 ----------------
 
-    private void OnMoveDown(object sender, RoutedEventArgs e)
-    {
-        VM.MoveSelectedDown();
-        TaskList.SelectedItem = VM.SelectedTask;
-    }
+    private void OnAddTask(object sender, RoutedEventArgs e) => VM.AddTaskToScope();
+
+    private void OnDeleteTask(object sender, RoutedEventArgs e) => VM.DeleteSelectedTask();
+
+    private void OnMoveUp(object sender, RoutedEventArgs e) => VM.MoveSelectedTaskInScope(-1);
+
+    private void OnMoveDown(object sender, RoutedEventArgs e) => VM.MoveSelectedTaskInScope(1);
 
     private void OnSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (_syncing)
+        {
+            return;
+        }
+
         VM.SelectedTask = TaskList.SelectedItem as TaskConfig;
     }
 
-    // ---------------- 表单同步 ----------------
+    // ---------------- 右：任务详情 ----------------
+
+    /// <summary>
+    /// 「移到通道…」菜单：点击时现填 —— 通道随时可能被增删改，写死必然过期。
+    ///
+    /// 顺带说明为什么它是**代码里 new** 的而不是写在 XAML 里：放在 <c>Page.Resources</c> 并带
+    /// x:Name 时，XAML 生成的 <c>Connect()</c> 会把具名资源的连接序号与后面控件的序号错位，
+    /// 页面一构造就抛 <c>InvalidCastException</c>（把 Flyout 当 Button 转型）—— 页面根本进不去。
+    /// </summary>
+    private void OnMoveToChannelClick(object sender, RoutedEventArgs e)
+    {
+        var flyout = new MenuFlyout();
+
+        foreach (var scope in VM.ChannelScopes)
+        {
+            if (VM.SelectedScope is not null &&
+                string.Equals(scope.Id, VM.SelectedScope.Id, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var id = scope.Id;
+            var item = new MenuFlyoutItem { Text = scope.Name };
+            item.Click += (_, _) => VM.MoveSelectedTaskToScope(id);
+            flyout.Items.Add(item);
+        }
+
+        if (flyout.Items.Count == 0)
+        {
+            flyout.Items.Add(new MenuFlyoutItem { Text = "没有别的通道", IsEnabled = false });
+        }
+
+        flyout.ShowAt((FrameworkElement)sender);
+    }
+
+    // ---------------- 选中态同步 ----------------
+
+    private void SyncScopeSelection()
+    {
+        _syncing = true;
+        try
+        {
+            ScopeList.SelectedItem = VM.SelectedScope;
+        }
+        finally
+        {
+            _syncing = false;
+        }
+    }
+
+    private void SyncTaskSelection()
+    {
+        _syncing = true;
+        try
+        {
+            TaskList.SelectedItem = VM.SelectedTask;
+        }
+        finally
+        {
+            _syncing = false;
+        }
+
+        ScopeEmptyState.Visibility = VM.ScopeTasks.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
 
     private void SyncForm()
     {
@@ -81,6 +174,7 @@ public sealed partial class TasksPage : Page
             var hasSelection = task is not null;
             FormHost.Visibility = hasSelection ? Visibility.Visible : Visibility.Collapsed;
             EmptyState.Visibility = hasSelection ? Visibility.Collapsed : Visibility.Visible;
+            OwnerBar.Visibility = hasSelection ? Visibility.Visible : Visibility.Collapsed;
 
             if (task is null)
             {

@@ -16,9 +16,45 @@ public static class AppPaths
 
     public static string BaseDir { get; } = ResolveBaseDir();
 
+    /// <summary>
+    /// 代理模式标记（<c>--rdp-agent</c> 启动时由 App.OnLaunched 置位）。
+    ///
+    /// 为什么要分家：所有目标账户共用同一份代理副本，如果日志和统计都落在副本目录下，
+    /// 固定文件名（last_abnormal_report.json / runtime_history.json）和整秒生成的
+    /// session 文件名会被别的账户先占用（CREATOR OWNER 机制下别人改不了），
+    /// 结果是"任务跑完了却因为写不了统计被判异常"。所以代理模式下按账户各自分开。
+    /// </summary>
+    public static bool AgentMode { get; set; }
+
+    /// <summary>代理模式下的数据子目录名（当前账户名，去掉路径非法字符）。</summary>
+    private static string AccountTag
+    {
+        get
+        {
+            var raw = Environment.UserName?.Trim() ?? string.Empty;
+            var invalid = Path.GetInvalidFileNameChars();
+            var builder = new StringBuilder();
+            foreach (var ch in raw)
+            {
+                builder.Append(Array.IndexOf(invalid, ch) >= 0 ? '_' : ch);
+            }
+
+            var tag = builder.ToString().Trim().TrimEnd('.');
+            return tag.Length == 0 ? "agent" : tag;
+        }
+    }
+
     public static string ConfigPath => Path.Combine(BaseDir, ConfigFileName);
-    public static string LogDir => Path.Combine(BaseDir, LogDirName);
-    public static string StatsDir => Path.Combine(BaseDir, "runtime_stats");
+
+    /// <summary>日志目录。代理模式下落到 <c>logs/&lt;账户名&gt;</c>，主控端不受影响。</summary>
+    public static string LogDir => AgentMode
+        ? Path.Combine(BaseDir, LogDirName, AccountTag)
+        : Path.Combine(BaseDir, LogDirName);
+
+    /// <summary>耗时统计目录。代理模式下同样按账户分家。</summary>
+    public static string StatsDir => AgentMode
+        ? Path.Combine(BaseDir, "runtime_stats", AccountTag)
+        : Path.Combine(BaseDir, "runtime_stats");
     public static string AssetsDir => Path.Combine(BaseDir, "assets");
     public static string MascotDir => Path.Combine(AssetsDir, "mascot");
 

@@ -273,6 +273,9 @@ public sealed partial class ChannelsPage : Page
         VM.Navigate("ch:" + channelId);
     }
 
+    /// <summary>跳到任务执行页 —— 那边才是"哪条通道跑哪些任务"的地方（本页只管配通道）。</summary>
+    private void OnOpenTasks(object sender, RoutedEventArgs e) => VM.Navigate("tasks");
+
     // ---------------- 内嵌画面（正常折叠；自检模式与全屏时用到） ----------------
 
     private void OnEmbedClientChanged()

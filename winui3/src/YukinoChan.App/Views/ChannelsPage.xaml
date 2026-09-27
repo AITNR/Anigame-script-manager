@@ -19,7 +19,15 @@
             <StackPanel Spacing="4">
                 <TextBlock Text="会话通道" Style="{StaticResource SubtitleTextBlockStyle}" />
                 <TextBlock TextWrapping="Wrap" Opacity="0.7"
-                           Text="一条通道 = 一个目标账户 + 它自己的凭据和指令桥目录。任务在「任务执行」页各自选走哪条通道；开始执行后通道之间并行，通道内部仍按顺序跑。没选通道的任务在主控端当前会话里执行（本地执行）。" />
+                           Text="一条通道 = 一个目标账户 + 它自己的凭据和指令桥目录。任务在「任务执行」页**按通道编排**（先选通道，再往这条通道里加任务）；开始执行后通道之间并行，通道内部仍按顺序跑。没分配通道的任务归「本地执行」，在主控端当前会话里跑。" />
+
+                <Button HorizontalAlignment="Left"
+                        Content="去任务页编排任务"
+                        Click="OnOpenTasks">
+                    <ToolTipService.ToolTip>
+                        <ToolTip Content="打开「任务执行」页：左边选通道，中间给这条通道排任务。" />
+                    </ToolTipService.ToolTip>
+                </Button>
             </StackPanel>
 
             <Border BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"

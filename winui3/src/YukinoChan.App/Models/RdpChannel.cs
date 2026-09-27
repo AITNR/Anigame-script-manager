@@ -6,22 +6,6 @@ using YukinoChan.Helpers;
 namespace YukinoChan.Models;
 
 /// <summary>
-/// 任务页「执行通道」下拉的一项。
-///
-/// 第一项固定是 <c>Id = ""</c> 的「本地执行」（D6：它是**显式选项**，不是"漏填时的兜底"）——
-/// 新建任务的默认值也是它，免得"忘了选通道就悄悄跑远程"。
-/// </summary>
-public sealed class ChannelChoice
-{
-    /// <summary>空串表示本地执行（<c>TaskConfig.ChannelId</c> 的语义）。</summary>
-    public string Id { get; init; } = string.Empty;
-
-    public string Name { get; init; } = string.Empty;
-
-    public override string ToString() => Name;
-}
-
-/// <summary>
 /// 会话通道：一条「主控端 ↔ 目标会话」的完整通道 —— 目标主机 + 目标账户 + 指令桥目录 + 收尾策略。
 ///
 /// 为什么要有它：原来全局只有一组 target_host / target_user，只能跑一路远程；

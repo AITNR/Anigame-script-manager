@@ -10,6 +10,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Input;
 using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media.Imaging;
 using YukinoChan.Helpers;
 using YukinoChan.Models;
@@ -224,7 +226,7 @@ public sealed class MainViewModel : ObservableObject
         SetMascotState(MascotStates.Idle, force: true);
         RefreshStats();
         ReloadChannels(refreshReadiness: false);
-        SelectedTask = Tasks.Count > 0 ? Tasks[0] : null;
+        SelectedTask = ScopeTasks.FirstOrDefault();
 
         if (!HasUsableTaskConfig())
         {
@@ -246,25 +248,33 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
-    // ---------------- 任务编辑 ----------------
+    // ---------------- 任务编辑（在选中的执行通道内编排） ----------------
 
-    public void AddTask()
+    /// <summary>在当前执行通道下新建一个任务（默认「本地执行」，免得忘了选通道就悄悄跑远程）。</summary>
+    public void AddTaskToScope()
     {
-        var nextOrder = Tasks.Count + 1;
+        var scope = _selectedScope;
+        if (scope is null || !scope.CanAddTask)
+        {
+            return;
+        }
+
         var task = new TaskConfig
         {
             Enabled = true,
-            Name = $"新任务{nextOrder}",
+            Name = $"新任务{Tasks.Count + 1}",
             ScriptPath = string.Empty,
-            Order = nextOrder,
+            Order = Tasks.Count + 1,
             TimeoutMinutes = 30,
             TimeoutAction = TimeoutActions.KillAndContinue,
             WaitMode = WaitModes.DirectProcess,
             ConcurrentPolicy = ConcurrentPolicies.WaitAll,
+            ChannelId = scope.Id,
         };
 
         Tasks.Add(task);
-        NormalizeOrders();
+        TaskScopePlanner.NormalizeOrdersByChannel(Tasks, Config.Rdp.Channels);
+        RefreshChannelScopes();
         SelectedTask = task;
     }
 
@@ -275,53 +285,57 @@ public sealed class MainViewModel : ObservableObject
             return;
         }
 
-        var index = Tasks.IndexOf(SelectedTask);
+        var scopeId = TaskScopePlanner.NormalizeId(SelectedTask.ChannelId);
+        var index = TaskScopePlanner.TasksForScope(Tasks, scopeId).IndexOf(SelectedTask);
+
         Tasks.Remove(SelectedTask);
-        NormalizeOrders();
-        SelectedTask = Tasks.Count == 0
+        TaskScopePlanner.NormalizeOrdersByChannel(Tasks, Config.Rdp.Channels);
+
+        // 选中同通道里的下一个（没有就上一个）：跨通道选中会让表单看起来"跳到别处"
+        var remaining = TaskScopePlanner.TasksForScope(Tasks, scopeId);
+        SelectedTask = remaining.Count == 0
             ? null
-            : Tasks[Math.Min(index, Tasks.Count - 1)];
+            : remaining[Math.Min(Math.Max(index, 0), remaining.Count - 1)];
+
+        RefreshChannelScopes();
     }
 
-    public void MoveSelectedUp()
+    /// <summary>通道内上移 / 下移（delta = -1 / +1）—— 只与同通道内相邻的一项交换，别的通道不受影响。</summary>
+    public void MoveSelectedTaskInScope(int delta)
     {
         if (SelectedTask is null)
         {
             return;
         }
 
-        var index = Tasks.IndexOf(SelectedTask);
-        if (index <= 0)
+        if (!TaskScopePlanner.TryMoveInScope(Tasks, SelectedTask, delta, Config.Rdp.Channels))
         {
             return;
         }
 
-        Tasks.Move(index, index - 1);
-        NormalizeOrders();
+        RefreshScopeTasks();
     }
 
-    public void MoveSelectedDown()
+    /// <summary>
+    /// 把选中任务改派到另一条执行通道（含「本地执行」），落到目标通道末尾。
+    /// 改完自动切到目标通道 —— 否则任务会从当前列表里凭空消失，看着像被删了。
+    /// </summary>
+    public void MoveSelectedTaskToScope(string targetScopeId)
     {
         if (SelectedTask is null)
         {
             return;
         }
 
-        var index = Tasks.IndexOf(SelectedTask);
-        if (index < 0 || index >= Tasks.Count - 1)
-        {
-            return;
-        }
+        var id = TaskScopePlanner.NormalizeId(targetScopeId);
+        TaskScopePlanner.MoveToScope(Tasks, SelectedTask, id, Config.Rdp.Channels);
 
-        Tasks.Move(index, index + 1);
-        NormalizeOrders();
-    }
+        RefreshChannelScopes();
 
-    private void NormalizeOrders()
-    {
-        for (var i = 0; i < Tasks.Count; i++)
+        var target = ChannelScopes.FirstOrDefault(s => string.Equals(s.Id, id, StringComparison.Ordinal));
+        if (target is not null)
         {
-            Tasks[i].Order = i + 1;
+            SelectedScope = target;
         }
     }
 
@@ -342,7 +356,8 @@ public sealed class MainViewModel : ObservableObject
 
     public void SaveConfig()
     {
-        NormalizeOrders();
+        // 按通道重编 order，保证落盘的序号连续唯一且分组有序（执行侧只看 order）
+        TaskScopePlanner.NormalizeOrdersByChannel(Tasks, Config.Rdp.Channels);
         Config.Tasks = new List<TaskConfig>(Tasks);
         WindowsStartupService.Apply(Config.WindowsStartup);
 
@@ -410,7 +425,7 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task ExportConfigAsync()
     {
-        NormalizeOrders();
+        TaskScopePlanner.NormalizeOrdersByChannel(Tasks, Config.Rdp.Channels);
 
         // 分享配置不携带开机自启动，避免导入者误开。
         var export = new AppConfig(new List<TaskConfig>(Tasks))
@@ -482,8 +497,9 @@ public sealed class MainViewModel : ObservableObject
                 Tasks.Add(task);
             }
 
-            NormalizeOrders();
-            SelectedTask = Tasks.Count > 0 ? Tasks[0] : null;
+            TaskScopePlanner.NormalizeOrdersByChannel(Tasks, Config.Rdp.Channels);
+            RefreshChannelScopes();
+            SelectedTask = ScopeTasks.FirstOrDefault();
             SaveConfig();
 
             AppendLog($"配置已导入并保存：{path}");
@@ -544,6 +560,13 @@ public sealed class MainViewModel : ObservableObject
         foreach (var skipped in plan.Skipped)
         {
             AppendLog("⚠ " + skipped.Describe());
+        }
+
+        // 并发组只在通道内生效（ScriptRunner 只扫本通道那一批任务）—— 跨通道同名组不会并在一起。
+        // 说一句，免得用户以为"起了同一个组名就会一起跑"。
+        foreach (var group in TaskScopePlanner.CrossChannelGroups(Tasks))
+        {
+            AppendLog($"⚠ 并发组「{group}」跨了多个执行通道：并发组只在同一个通道内生效，各通道仍会各跑各的。");
         }
 
         // 并发上限单独再点一次名：这是唯一一种"看起来该跑、其实没跑"的截断，
@@ -1403,9 +1426,6 @@ public sealed class MainViewModel : ObservableObject
 
     // ---------------- 会话通道（多通道并行） ----------------
 
-    /// <summary>任务页「执行通道」下拉的选项（首项固定是本地执行）。</summary>
-    public ObservableCollection<ChannelChoice> ChannelChoices { get; } = new();
-
     /// <summary>
     /// 本轮会话集合发生变化 —— 主窗口据此重建左侧菜单里的通道项。
     ///
@@ -1414,21 +1434,99 @@ public sealed class MainViewModel : ObservableObject
     /// </summary>
     public event EventHandler? SessionsChanged;
 
-    /// <summary>
-    /// 刷新任务页下拉选项与任务列表上的通道名。
-    /// 通道配置增删改之后要调一次。
-    /// </summary>
-    public void RefreshChannelChoices()
-    {
-        ChannelChoices.Clear();
-        ChannelChoices.Add(new ChannelChoice { Id = string.Empty, Name = "本地执行（当前会话）" });
+    // ================= 任务编排：按执行通道（docs/tasks-by-channel-plan.md） =================
 
-        foreach (var channel in Config.Rdp.Channels)
+    /// <summary>
+    /// 左侧「执行通道」列表：本地执行（恒第一项）→ 各会话通道（配置顺序）→ 未知通道（孤儿）。
+    /// 由 <see cref="TaskScopePlanner.BuildScopes"/> 从「任务 + 通道配置」现算，不做第二份数据源。
+    /// </summary>
+    public ObservableCollection<ChannelScope> ChannelScopes { get; } = new();
+
+    private ChannelScope? _selectedScope;
+
+    /// <summary>当前正在编排的通道。</summary>
+    public ChannelScope? SelectedScope
+    {
+        get => _selectedScope;
+        set
         {
-            ChannelChoices.Add(new ChannelChoice { Id = channel.Id, Name = channel.DisplayName });
+            if (SetProperty(ref _selectedScope, value))
+            {
+                OnPropertyChanged(nameof(HasScopeSelection));
+                OnPropertyChanged(nameof(ScopeOwnerText));
+                OnPropertyChanged(nameof(CanAddTaskToScope));
+                RefreshScopeTasks();
+            }
+        }
+    }
+
+    public bool HasScopeSelection => SelectedScope is not null;
+
+    /// <summary>详情卡顶部那行"所属：X"。x:Bind 走不了 null 属性链，所以在 VM 里算好。</summary>
+    public string ScopeOwnerText => SelectedScope is null ? "－" : SelectedScope.Name;
+
+    public bool CanAddTaskToScope => SelectedScope is { CanAddTask: true };
+
+    /// <summary>
+    /// 当前通道的任务 —— 是 <see cref="Tasks"/> 的**派生视图**。
+    /// 写操作一律走 <see cref="TaskScopePlanner"/>，改完调 <see cref="RefreshScopeTasks"/> 重算。
+    /// </summary>
+    public ObservableCollection<TaskConfig> ScopeTasks { get; } = new();
+
+    /// <summary>通道增删改 / 任务增删 / 导入配置之后都要调一次。</summary>
+    public void RefreshChannelScopes()
+    {
+        RefreshTaskChannelDisplay();
+
+        var keepId = _selectedScope?.Id;
+
+        ChannelScopes.Clear();
+        foreach (var scope in TaskScopePlanner.BuildScopes(Tasks, Config.Rdp.Channels, RdpSettings.Enabled))
+        {
+            ChannelScopes.Add(scope);
         }
 
-        // 任务本身只存 channel_id，列表上要显示的名字得从配置反查（含"指向已删除通道"的情形）
+        // 选中项按 id 复原：集合被整体重建后旧引用已失效，直接赋旧引用会选不上
+        _selectedScope = ChannelScopes.FirstOrDefault(s => string.Equals(s.Id, keepId, StringComparison.Ordinal))
+                         ?? ChannelScopes.FirstOrDefault();
+
+        OnPropertyChanged(nameof(SelectedScope));
+        OnPropertyChanged(nameof(HasScopeSelection));
+        OnPropertyChanged(nameof(ScopeOwnerText));
+        OnPropertyChanged(nameof(CanAddTaskToScope));
+        RefreshScopeTasks();
+    }
+
+    /// <summary>按当前通道重算任务视图 + 通道内序号，并刷新各通道的任务数。</summary>
+    public void RefreshScopeTasks()
+    {
+        ScopeTasks.Clear();
+
+        var scope = _selectedScope;
+        if (scope is not null)
+        {
+            var list = TaskScopePlanner.TasksForScope(Tasks, scope.Id);
+            TaskScopePlanner.RenumberScope(list);
+            foreach (var task in list)
+            {
+                ScopeTasks.Add(task);
+            }
+        }
+
+        foreach (var item in ChannelScopes)
+        {
+            item.TaskCount = TaskScopePlanner.CountForScope(Tasks, item.Id);
+        }
+
+        OnPropertyChanged(nameof(ScopeTasks));
+    }
+
+    /// <summary>
+    /// 反查 <see cref="TaskConfig.ChannelDisplay"/>：任务只存 channel_id，
+    /// 给人看的名字得从通道配置里查（含"指向已删除通道"的情形）。
+    /// </summary>
+    private void RefreshTaskChannelDisplay()
+    {
         var byId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var channel in Config.Rdp.Channels)
         {
@@ -1437,13 +1535,11 @@ public sealed class MainViewModel : ObservableObject
 
         foreach (var task in Tasks)
         {
-            var id = (task.ChannelId ?? string.Empty).Trim();
+            var id = TaskScopePlanner.NormalizeId(task.ChannelId);
             task.ChannelDisplay = id.Length == 0
                 ? "本地执行"
                 : byId.TryGetValue(id, out var name) ? name : $"未知通道（{id}）";
         }
-
-        OnPropertyChanged(nameof(ChannelChoices));
     }
 
     private void RaiseSessionsChanged()
@@ -1473,7 +1569,7 @@ public sealed class MainViewModel : ObservableObject
 
     private RelayCommand? _addChannelCommand;
     private RelayCommand? _duplicateChannelCommand;
-    private RelayCommand? _removeChannelCommand;
+    private AsyncRelayCommand? _removeChannelCommand;
     private RelayCommand? _refreshChannelCommand;
     private RelayCommand? _clearChannelCredentialCommand;
     private RelayCommand? _deployChannelAgentCommand;
@@ -1611,7 +1707,7 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(ChannelBridgeDir));
         OnPropertyChanged(nameof(Channels));
 
-        RefreshChannelChoices();
+        RefreshChannelScopes();
 
         if (refreshReadiness)
         {
@@ -1716,8 +1812,11 @@ public sealed class MainViewModel : ObservableObject
 
     public ICommand DuplicateChannelCommand => _duplicateChannelCommand ??= new RelayCommand(DuplicateChannel);
 
-    /// <summary>删除通道。<c>CommandParameter</c> 是 <see cref="RdpChannel"/>，不传则删选中的那条。</summary>
-    public ICommand RemoveChannelCommand => _removeChannelCommand ??= new RelayCommand(RemoveChannel);
+    /// <summary>
+    /// 删除通道。<c>CommandParameter</c> 是 <see cref="RdpChannel"/>，不传则删选中的那条。
+    /// 里面有任务时会先弹框问归属（计划书 D5），所以是异步命令。
+    /// </summary>
+    public ICommand RemoveChannelCommand => _removeChannelCommand ??= new AsyncRelayCommand(RemoveChannelAsync);
 
     public ICommand RefreshChannelCommand => _refreshChannelCommand ??= new RelayCommand(RefreshChannelReadiness);
 
@@ -1773,7 +1872,7 @@ public sealed class MainViewModel : ObservableObject
         AppendLog($"[会话通道] 复制出通道「{copy.DisplayName}」，记得补账户与凭据。");
     }
 
-    private void RemoveChannel(object? parameter)
+    private async Task RemoveChannelAsync(object? parameter)
     {
         var channel = parameter as RdpChannel ?? _selectedChannel;
         if (channel is null)
@@ -1783,24 +1882,130 @@ public sealed class MainViewModel : ObservableObject
 
         if (IsRunning || IsRdpBusy)
         {
-            _ = DialogHelper.ShowMessageAsync("提示", "正在执行任务，先停止执行再改通道。");
+            await DialogHelper.ShowMessageAsync("提示", "正在执行任务，先停止执行再改通道。");
             return;
         }
 
-        var users = Tasks.Count(t => string.Equals((t.ChannelId ?? string.Empty).Trim(), channel.Id, StringComparison.OrdinalIgnoreCase));
+        var affected = TaskScopePlanner.TasksForScope(Tasks, channel.Id);
+
+        // 有任务指向它就先问清归属 —— 删完不管，那些任务会变成"未知通道"被静默跳过，
+        // 而且在任务页里还找不到它们（计划书 D5/D6）。
+        var reassignTo = TaskScopePlanner.LocalScopeId;
+        if (affected.Count > 0)
+        {
+            var picked = await PromptReassignAsync(channel, affected);
+            if (picked is null)
+            {
+                return;   // 取消删除
+            }
+
+            reassignTo = picked;
+
+            if (!string.Equals(picked, TaskScopePlanner.KeepOrphan, StringComparison.Ordinal))
+            {
+                foreach (var task in affected)
+                {
+                    task.ChannelId = TaskScopePlanner.NormalizeId(picked);
+                }
+
+                TaskScopePlanner.NormalizeOrdersByChannel(Tasks, Config.Rdp.Channels);
+            }
+        }
 
         Config.Rdp.Channels.Remove(channel);
         SaveConfig();
-
-        // 引用它的任务不会静默改跑本地：留空 channel_id 会变成"本地执行"，
-        // 那是另一回事 —— 这里只把话讲清楚，让用户在任务页自己决定改派给谁。
         ReloadChannels();
-        RefreshChannelChoices();
 
-        var tail = users == 0
+        var tail = affected.Count == 0
             ? string.Empty
-            : $"，有 {users} 个任务正指向它（那些任务会显示「未知通道」，需要到任务页重新选）";
+            : string.Equals(reassignTo, TaskScopePlanner.KeepOrphan, StringComparison.Ordinal)
+                ? $"，{affected.Count} 个任务仍指向它（会显示为「未知通道」，本轮不执行）"
+                : $"，{affected.Count} 个任务已改派到「{DescribeScope(reassignTo)}」";
         AppendLog($"[会话通道] 已删除通道「{channel.DisplayName}」{tail}。");
+    }
+
+    /// <summary>把 scope id 说成人话（日志用）。</summary>
+    private string DescribeScope(string scopeId)
+    {
+        if (TaskScopePlanner.NormalizeId(scopeId).Length == 0)
+        {
+            return "本地执行";
+        }
+
+        var scope = ChannelScopes.FirstOrDefault(s => string.Equals(s.Id, scopeId, StringComparison.OrdinalIgnoreCase));
+        return scope?.Name ?? scopeId;
+    }
+
+    /// <summary>
+    /// 删除通道时问"里面的任务交给谁"。
+    /// 返回目标 scope id（空串 = 本地执行）或 <see cref="TaskScopePlanner.KeepOrphan"/>；**null = 取消删除**。
+    /// </summary>
+    private async Task<string?> PromptReassignAsync(RdpChannel channel, IReadOnlyList<TaskConfig> affected)
+    {
+        if (App.MainWindow?.Content.XamlRoot is null)
+        {
+            // 没有窗口（例如冒烟/无人值守）时按推荐默认值走：移回本地执行
+            return TaskScopePlanner.LocalScopeId;
+        }
+
+        var names = string.Join("、", affected.Take(5).Select(t => t.DisplayName));
+        if (affected.Count > 5)
+        {
+            names += $" 等 {affected.Count} 个";
+        }
+
+        var box = new ComboBox
+        {
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            MinWidth = 280,
+            DisplayMemberPath = "Value",
+            SelectedValuePath = "Key",
+        };
+
+        box.Items.Add(new KeyValuePair<string, string>(TaskScopePlanner.LocalScopeId, "本地执行（当前会话）"));
+
+        foreach (var scope in ChannelScopes)
+        {
+            // 排除正要删的那条，以及"未知通道"组（改派过去等于没解决）
+            if (scope.IsMissing || string.Equals(scope.Id, channel.Id, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            box.Items.Add(new KeyValuePair<string, string>(scope.Id, scope.Name));
+        }
+
+        box.Items.Add(new KeyValuePair<string, string>(TaskScopePlanner.KeepOrphan, "保持未知（这些任务本轮不执行）"));
+        box.SelectedIndex = 0;
+
+        var panel = new StackPanel { Spacing = 8 };
+        panel.Children.Add(new TextBlock
+        {
+            Text = $"通道「{channel.DisplayName}」下有 {affected.Count} 个任务：{names}",
+            TextWrapping = TextWrapping.Wrap,
+        });
+        panel.Children.Add(new TextBlock
+        {
+            Text = "删掉通道后，这些任务交给谁？",
+            TextWrapping = TextWrapping.Wrap,
+            Opacity = 0.7,
+        });
+        panel.Children.Add(box);
+
+        var dialog = new ContentDialog
+        {
+            Title = "删除通道",
+            Content = panel,
+            PrimaryButtonText = "确定",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = App.MainWindow.Content.XamlRoot,
+        };
+
+        var result = await dialog.ShowAsync();
+        return result == ContentDialogResult.Primary
+            ? box.SelectedValue as string ?? TaskScopePlanner.LocalScopeId
+            : null;
     }
 
     /// <summary>保存选中通道的凭据到 Windows 凭据管理器（按 host|user 一条，通道之间互不覆盖）。</summary>
@@ -1938,7 +2143,7 @@ public sealed class MainViewModel : ObservableObject
         }
 
         SaveConfig();
-        RefreshChannelChoices();
+        RefreshChannelScopes();
         OnPropertyChanged(nameof(Channels));
     }
 

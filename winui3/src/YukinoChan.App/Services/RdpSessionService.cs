@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
 using System.Threading;
@@ -882,6 +883,7 @@ public static class RdpSessionService
         if (chosen is not null)
         {
             targetExe = Path.Combine(chosen, "YukinoChan.exe");
+            OpenAgentDataDirs(chosen);
             return true;
         }
 
@@ -895,6 +897,41 @@ public static class RdpSessionService
             + (failure.Length > 0 ? $"；最后一次报错：{failure}" : string.Empty)
             + "。若提示文件被占用，注销目标账户（其中的会话代理会随之结束）或重启后再试。";
         return false;
+    }
+
+    /// <summary>
+    /// 给代理运行期数据目录（logs / runtime_stats）放开 BUILTIN\Users 完全控制，并让新建内容继承。
+    ///
+    /// 为什么需要：ProgramData 默认 ACL 只给了 Users「读 + 建新文件」，而文件归创建者所有
+    /// （CREATOR OWNER）。多个账户共用同一份代理副本时，A 账户建的 last_abnormal_report.json
+    /// 之类固定名文件，B 账户改不动 → 写统计抛 UnauthorizedAccessException。
+    /// 代理本身还会按账户再分子目录（AppPaths.AgentMode），这里只是兜底，失败也不阻断部署。
+    /// </summary>
+    internal static void OpenAgentDataDirs(string agentDir)
+    {
+        foreach (var name in new[] { "logs", "runtime_stats" })
+        {
+            var dir = Path.Combine(agentDir, name);
+            try
+            {
+                Directory.CreateDirectory(dir);
+
+                var security = new DirectorySecurity();
+                security.SetAccessRuleProtection(isProtected: false, preserveInheritance: true);
+                security.AddAccessRule(new FileSystemAccessRule(
+                    new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+                    FileSystemRights.FullControl,
+                    InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                    PropagationFlags.None,
+                    AccessControlType.Allow));
+
+                new DirectoryInfo(dir).SetAccessControl(security);
+            }
+            catch
+            {
+                // 权限设置失败不阻断部署：按账户分家后通常已经够用
+            }
+        }
     }
 
     /// <summary>把若干说明拼成一句话（跳过空项）。</summary>

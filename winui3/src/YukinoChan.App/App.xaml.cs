@@ -45,6 +45,8 @@ public partial class App : Application
         if (RdpAgentRunner.IsAgentInvocation(args0))
         {
             IsAgentMode = true;
+            // 多账户共用同一份代理副本，日志/统计必须按账户分家（见 AppPaths.AgentMode 说明）
+            AppPaths.AgentMode = true;
             // 确定代理该读写哪座桥：远程场景由 --bridge: 指定，
             // 本机多账户场景则按"自己登录的是哪个账户"自动派生（与主控端算出的目录一致）
             RdpBridge.ConfigureAgent(RdpAgentRunner.ExtractBridgePath(args0));
