@@ -45,14 +45,29 @@
                         IsSettingsVisible="False"
                         PaneDisplayMode="Left"
                         OpenPaneLength="196"
-                        SelectionChanged="OnNavigationSelectionChanged">
+                        SelectionChanged="OnNavigationSelectionChanged"
+                        ItemInvoked="OnNavigationItemInvoked">
 
             <NavigationView.MenuItems>
                 <NavigationViewItem Tag="home" Content="总览" Icon="Home" />
                 <NavigationViewItem Tag="tasks" Content="任务执行" Icon="List" />
                 <NavigationViewItem Tag="stats" Content="耗时统计" Icon="Clock" />
                 <NavigationViewItem Tag="logs" Content="运行日志" Icon="Document" />
-                <NavigationViewItem Tag="channels" Content="会话通道" Icon="People" />
+
+                <!-- 「会话通道」= 父项：点它本身 = 多画面（全部通道网格）；
+                     它下面的子菜单才是各条通道单独的画面 + 通道管理。
+                     子项由 MainWindow.RebuildChannelMenuItems() 按已配置/在跑的通道重建，
+                     这里留一个「通道管理…」兜底，保证它一上来就是「带子项的父项」形态。 -->
+                <NavigationViewItem x:Name="ChannelsNavItem"
+                                    Tag="channels"
+                                    Content="会话通道"
+                                    Icon="People"
+                                    IsExpanded="True">
+                    <!-- 子项必须放进 MenuItems 属性元素：直接写成子元素会被当成 Content（WMC0035） -->
+                    <NavigationViewItem.MenuItems>
+                        <NavigationViewItem Tag="channel-mgmt" Content="通道管理…" Icon="Setting" />
+                    </NavigationViewItem.MenuItems>
+                </NavigationViewItem>
             </NavigationView.MenuItems>
 
             <NavigationView.FooterMenuItems>

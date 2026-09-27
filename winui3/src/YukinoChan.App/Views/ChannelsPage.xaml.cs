@@ -11,13 +11,15 @@ using YukinoChan.ViewModels;
 namespace YukinoChan.Views;
 
 /// <summary>
-/// 会话通道 · 管理 / 预检页（计划书 §8.3 / D4，由原 <c>RdpPage</c> 改造）。
+/// 通道管理 · 配置 / 预检页（计划书 §8.3 / D4；菜单位置见 docs/channel-menu-multiview-plan.md，
+/// 由原 <c>RdpPage</c> 改造）。
 ///
 /// 本页负责<b>配</b>：通道增删改、凭据、部署代理、环境预检、全局执行与通知设置；
-/// 每条通道的<b>画面</b>在左侧菜单对应的通道页里（<see cref="RdpChannelPage"/>）。
+/// 每条通道的<b>画面</b>在多画面页（<see cref="RdpMultiViewPage"/>）与各通道子页
+/// （<see cref="RdpChannelPage"/>）里。
 ///
 /// 画面控件仍然留在这里（折叠状态）：一是自检模式 <c>--embed-vm</c> 要用，
-/// 二是全屏 / 键盘接管那套逻辑与它绑在一起，等 M6 做多画面时统一收口。
+/// 二是全屏 / 键盘接管那套逻辑与它绑在一起。
 /// </summary>
 public sealed partial class ChannelsPage : Page
 {
@@ -244,9 +246,12 @@ public sealed partial class ChannelsPage : Page
         SyncChannelChrome();
     }
 
+    /// <summary>跳到多画面页（左侧菜单「会话通道」父项）—— 全部通道的网格。</summary>
+    private void OnOpenMultiView(object sender, RoutedEventArgs e) => VM.Navigate("channels");
+
     /// <summary>
-    /// 「打开当前通道画面」：跳到本轮对应的通道页面。
-    /// 优先跳"当前有内嵌画面的那条"，否则跳本轮第一条会话通道。
+    /// 「打开当前通道画面」：跳到某一条通道的子页。
+    /// 优先跳"当前有内嵌画面的那条"，否则跳本轮第一条会话通道，再否则跳配置里启用的第一条。
     /// </summary>
     private void OnOpenActiveChannelPage(object sender, RoutedEventArgs e)
     {
@@ -265,8 +270,13 @@ public sealed partial class ChannelsPage : Page
 
         if (string.IsNullOrEmpty(channelId))
         {
+            channelId = VM.Config.Rdp.Channels.FirstOrDefault(c => c.Enabled)?.Id ?? string.Empty;
+        }
+
+        if (string.IsNullOrEmpty(channelId))
+        {
             _ = DialogHelper.ShowMessageAsync("还没有会话通道",
-                "开始执行后左侧菜单会出现各条会话通道；也可以先在本页新建通道。");
+                "点上面的「新建通道」加一条，填上目标主机与账户 —— 之后它就会出现在左侧菜单「会话通道」下面。");
             return;
         }
 

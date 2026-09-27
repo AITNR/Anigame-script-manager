@@ -1,9 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 会话通道页（计划书 §8.2 / D3，多画面见 M6）：
-     左侧菜单里每一条「会话通道」对应一个本页面 —— 画面从原「远程会话」页搬到了这里。
-     页面展示**本通道**的进度 / 心跳 / 事件，画面区可在「单画面 / 多画面」之间切换：
-       单画面 = 只摆本通道一格（占满，可全屏）；
-       多画面 = 2×2 网格并列全部会话通道（每页最多 4 格，超过分页），每格可弹成独立窗口。
+<!-- 会话通道页（计划书 §8.2 / D3；多画面已搬到 RdpMultiViewPage，见
+     docs/channel-menu-multiview-plan.md）：
+     左侧菜单「会话通道」下面的每一条子项对应一个本页面 —— 这里只显示**本通道**的画面、
+     进度、心跳与事件；"一眼看到全部通道"是父项（会话通道）那页的事。
 
      布局原则：**画面优先**。画面卡占窗口全部剩余空间，事件卡默认只占底部一条且可折叠 ——
      之前事件卡写死 180px，窗口稍矮就把画面挤成一条横带（用户实测反馈）。 -->
@@ -39,8 +38,6 @@
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8"
                             VerticalAlignment="Center">
-                    <ToggleButton x:Name="SingleViewButton" Content="单画面" Click="OnSingleViewClicked" />
-                    <ToggleButton x:Name="MultiViewButton" Content="多画面" Click="OnMultiViewClicked" />
                     <Button Content="连接本通道" Click="OnConnectPreviewClicked" />
                     <Button Content="打开桥目录" Click="OnOpenBridgeClicked" />
                 </StackPanel>
@@ -73,43 +70,18 @@
             </StackPanel>
         </Border>
 
-        <!-- ===== 画面区：单画面一格 / 多画面 2×2 网格 ===== -->
+        <!-- ===== 画面区：本通道一格（占满整块，可全屏） ===== -->
         <Border Grid.Row="2" Padding="0" Style="{StaticResource YukinoCardStyle}">
             <Grid>
-                <Grid x:Name="SurfaceLayout" Padding="6" RowSpacing="6" ColumnSpacing="6">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="*" />
-                        <RowDefinition Height="*" />
-                    </Grid.RowDefinitions>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
+                <views:RdpSurfaceCell x:Name="Cell0" Margin="6" />
 
-                    <views:RdpSurfaceCell x:Name="Cell0" Grid.Row="0" Grid.Column="0" />
-                    <views:RdpSurfaceCell x:Name="Cell1" Grid.Row="0" Grid.Column="1" />
-                    <views:RdpSurfaceCell x:Name="Cell2" Grid.Row="1" Grid.Column="0" />
-                    <views:RdpSurfaceCell x:Name="Cell3" Grid.Row="1" Grid.Column="1" />
-                </Grid>
-
-                <!-- 一路通道都没有时的空态 -->
+                <!-- 通道不存在 / 已从配置删除时的空态 -->
                 <StackPanel x:Name="SurfaceEmptyHint"
                             HorizontalAlignment="Center" VerticalAlignment="Center"
                             Spacing="10" MaxWidth="460"
                             Visibility="Collapsed">
                     <TextBlock x:Name="SurfaceEmptyText"
                                TextWrapping="Wrap" TextAlignment="Center" Opacity="0.75" />
-                </StackPanel>
-
-                <!-- 多画面分页（只有超过 4 条通道时才出现） -->
-                <StackPanel x:Name="PagerBar"
-                            Orientation="Horizontal" Spacing="8"
-                            HorizontalAlignment="Center" VerticalAlignment="Bottom"
-                            Margin="0,0,0,10"
-                            Visibility="Collapsed">
-                    <Button x:Name="PrevPageButton" Content="上一页" Click="OnPrevPageClicked" />
-                    <TextBlock x:Name="PageText" VerticalAlignment="Center" Opacity="0.8" />
-                    <Button x:Name="NextPageButton" Content="下一页" Click="OnNextPageClicked" />
                 </StackPanel>
             </Grid>
         </Border>

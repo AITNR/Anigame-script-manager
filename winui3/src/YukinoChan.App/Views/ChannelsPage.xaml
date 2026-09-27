@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 会话通道 · 管理 / 预检页（计划书 §8.3 / D4 —— 原 RdpPage 改造而成）。
+<!-- 通道管理 · 配置 / 预检页（计划书 §8.3 / D4；菜单位置见 docs/channel-menu-multiview-plan.md）。
 
      职能分家：
-       本页   = 通道配置（增删改）+ 凭据 + 部署代理 + 环境预检 + 全局执行/通知设置；
-       通道页 = 该通道的画面、进度、心跳、事件（左侧菜单里每条通道一项）。
-     所以内嵌画面卡在这里是【折叠保留】的 —— 画面归通道页，本页只在自检模式下自己挂一下。 -->
+       本页     = 通道配置（增删改）+ 凭据 + 部署代理 + 环境预检 + 全局执行/通知设置；
+       多画面页 = 左侧菜单「会话通道」父项：全部通道的网格（RdpMultiViewPage）；
+       通道页   = 该通道的画面、进度、心跳、事件（父项下每条通道一个子项）。
+     所以内嵌画面卡在这里是【折叠保留】的 —— 画面归多画面页与通道页，本页只在自检模式下自己挂一下。 -->
 <Page
     x:Class="YukinoChan.Views.ChannelsPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -17,7 +18,7 @@
 
             <!-- 标题与总开关 -->
             <StackPanel Spacing="4">
-                <TextBlock Text="会话通道" Style="{StaticResource SubtitleTextBlockStyle}" />
+                <TextBlock Text="通道管理" Style="{StaticResource SubtitleTextBlockStyle}" />
                 <TextBlock TextWrapping="Wrap" Opacity="0.7"
                            Text="一条通道 = 一个目标账户 + 它自己的凭据和指令桥目录。任务在「任务执行」页**按通道编排**（先选通道，再往这条通道里加任务）；开始执行后通道之间并行，通道内部仍按顺序跑。没分配通道的任务归「本地执行」，在主控端当前会话里跑。" />
 
@@ -266,6 +267,12 @@
                         <Button Content="移除代理" Click="OnRemoveAgent" />
                         <Button Content="重新检查" Click="OnRefreshChannelReadiness" />
                     </StackPanel>
+
+                    <!-- 这几个按钮的即时结果原先只落在 RdpStatusText 上，而本页从不显示它 ——
+                         点了「部署会话代理」页面纹丝不动，只能靠弹窗或日志才看得出成没成。 -->
+                    <TextBlock Text="{x:Bind VM.RdpStatusText, Mode=OneWay}"
+                               TextWrapping="Wrap"
+                               Opacity="0.75" />
                 </StackPanel>
             </Border>
 
@@ -293,7 +300,7 @@
                               ToolTipService.ToolTip="走 RDP 图形管道协商 progressive 全帧，远端快速变化时不再撕裂；默认关闭" />
 
                     <TextBlock TextWrapping="Wrap" Opacity="0.65" FontSize="12"
-                               Text="选「内嵌」时画面显示在各会话通道页面里，鼠标键盘可直接操作；选「独立窗口」时用系统 mstsc 开窗口（稳定，永久可用）。改连接方式后下次连接生效。" />
+                               Text="选「内嵌」时画面显示在「会话通道」的多画面页与各通道子页里，鼠标键盘可直接操作；选「独立窗口」时用系统 mstsc 开窗口（稳定，永久可用）。改连接方式后下次连接生效。" />
 
                     <NumberBox Header="等待目标会话建立的超时（秒）"
                                Minimum="15"
@@ -417,13 +424,18 @@
                 </StackPanel>
             </Border>
 
-            <!-- 画面已搬到通道页（计划书 §8.2 / D3）—— 本页只做配置与预检。 -->
+            <!-- 画面已搬到「会话通道」父项（多画面）与各通道子页（计划书 §8.2 / D3，
+                 docs/channel-menu-multiview-plan.md）—— 本页只做配置与预检。 -->
             <Border Padding="14" Style="{StaticResource YukinoCardStyle}">
                 <StackPanel Spacing="8">
-                    <TextBlock Text="画面在「会话通道」页面里" FontWeight="SemiBold" />
+                    <TextBlock Text="画面在「会话通道」里" FontWeight="SemiBold" />
                     <TextBlock TextWrapping="Wrap" Opacity="0.75" FontSize="12"
-                               Text="开始执行后，左侧菜单会在本项下面列出本轮每条会话通道；点进去就能看到该通道自己的画面、进度、心跳与事件。" />
-                    <Button Content="打开当前通道画面" Click="OnOpenActiveChannelPage" />
+                               Text="左侧菜单点「会话通道」= 全部通道的多画面网格；它下面的子菜单才是各条通道单独的画面（每页还能全屏或弹成独立窗口）。" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="打开多画面" Click="OnOpenMultiView"
+                                Style="{StaticResource AccentButtonStyle}" />
+                        <Button Content="打开当前通道画面" Click="OnOpenActiveChannelPage" />
+                    </StackPanel>
                 </StackPanel>
             </Border>
 
@@ -439,7 +451,7 @@
                 <StackPanel Spacing="10">
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <TextBlock x:Name="EmbedCardTitle" Text="内嵌画面（实验性）" FontWeight="SemiBold" VerticalAlignment="Center" />
-                        <TextBlock Text="连接方式选「内嵌」时，画面显示在各会话通道页面里；这里只在自检模式下使用。"
+                        <TextBlock Text="连接方式选「内嵌」时，画面显示在多画面页与各通道子页里；这里只在自检模式下使用。"
                                    Opacity="0.6" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap" />
                     </StackPanel>
                     <StackPanel Orientation="Horizontal" Spacing="8">

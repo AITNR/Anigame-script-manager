@@ -60,9 +60,15 @@ public sealed partial class MainWindow : Window
         VM.ShutdownPromptRequested += OnShutdownPromptRequested;
         VM.RequestNavigation += (_, tag) => NavigateTo(tag);
 
-        // 会话通道（M4 / 计划书 §8.1）：开始执行后左侧菜单动态插入每个通道一项，
-        // 结束后保留（还能切回去看画面与事件），只有新一轮执行重建时才整体换掉。
+        // 会话通道（M4 / 计划书 §8.1）：「会话通道」是**父项**，下面挂子菜单 ——
+        //   父项本身        = 多画面页（全部通道的网格）；
+        //   子项「多画面」  = 同一个页面（给一个确定能点的入口）；
+        //   子项「通道名」  = 该通道单独的画面页；
+        //   子项「通道管理…」= 配置 / 凭据 / 部署代理 / 预检。
+        // 子项按「配置里启用的通道 + 本轮在跑的通道」重建，配置一改就跟着变。
         VM.SessionsChanged += (_, _) => RebuildChannelMenuItems();
+        VM.PropertyChanged += OnViewModelPropertyChanged;
+        VM.Channels.CollectionChanged += (_, _) => RebuildChannelMenuItems();
 
         // M5：窗口关闭时释放内嵌连接（ycn_rdp_disconnect 语义 = 会话保留；原生事件循环线程须退出，
         // 否则非后台线程会拖住进程退出）
@@ -87,12 +93,15 @@ public sealed partial class MainWindow : Window
 
         NavigateTo("home");
 
-        // M5/M6 自检通道：自动导航到「会话通道」页（页面 Loaded 里自动连接、画面挂在本页）
+        // 子菜单先按当前配置铺一遍（配置里已启用的通道一启动就该出现在「会话通道」下面）
+        RebuildChannelMenuItems();
+
+        // M5/M6 自检通道：自动导航到「通道管理」页（页面 Loaded 里自动连接、画面挂在本页）
         if (Program.EmbedVmArgs is not null)
         {
             DispatcherQueue.TryEnqueue(
                 Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
-                () => NavigateTo("channels"));
+                () => NavigateTo(ChannelMgmtTag));
         }
     }
 
@@ -211,88 +220,136 @@ public sealed partial class MainWindow : Window
 
     private string _currentTag = string.Empty;
 
-    /// <summary>左侧菜单里「会话通道」分组与各项用的 tag 前缀（M4）。</summary>
+    /// <summary>左侧菜单里各条通道项用的 tag 前缀（M4）。</summary>
     private const string ChannelTagPrefix = "ch:";
 
     /// <summary>
-    /// 本轮各通道所在分组的标题。
-    /// 刻意不叫「会话通道」—— 那是上面那个静态管理项的文案，两个同名会让人以为点错了。
+    /// 「通道管理…」子项 tag —— 配置 / 凭据 / 部署代理 / 预检（<see cref="Views.ChannelsPage"/>）。
+    /// 刻意不再叫 "channels"：那个 tag 现在是「会话通道」父项（多画面）的。
     /// </summary>
-    private const string ChannelMenuHeaderText = "执行中的通道";
+    private const string ChannelMgmtTag = "channel-mgmt";
 
     /// <summary>
-    /// 按本轮会话重建左侧菜单里的通道项。
+    /// 「多画面」子项 tag。与父项同一个页面，但**标签不同** ——
+    /// 父项点击能否触发导航取决于 NavigationView 的内部处理（带子项时通常只展开），
+    /// 留一个确定能点、且选中态回显不会和父项打架的入口。
+    /// </summary>
+    private const string MultiViewTag = "multiview";
+
+    private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        // 通道配置整体换过（ReloadChannels 会 raise Channels）→ 子菜单跟着重建
+        if (e.PropertyName == nameof(MainViewModel.Channels))
+        {
+            RebuildChannelMenuItems();
+        }
+    }
+
+    /// <summary>
+    /// 重建「会话通道」父项下的子菜单。
     ///
-    /// 为什么不在 XAML 里绑集合：菜单项要"插到指定位置 + 带分组标题 + 结束后保留"，
+    /// 为什么不在 XAML 里绑集合：子项要先列配置通道、再补在跑的通道、末尾还要钉一个「通道管理…」，
     /// 由窗口统一重建比双向同步可靠得多，也避开 NavigationView 选中态与集合变更的竞态。
     /// </summary>
     private void RebuildChannelMenuItems()
     {
-        RemoveChannelMenuItems();
-
-        var channels = VM.Sessions.Where(s => s.IsRemote).ToList();
-        if (channels.Count == 0)
+        // 可能来自后台线程（会话集合变化）——碰控件一律回 UI 线程
+        if (!DispatcherQueue.HasThreadAccess)
         {
+            DispatcherQueue.TryEnqueue(RebuildChannelMenuItems);
             return;
         }
 
-        // 紧跟在「会话通道」（管理/预检页）后面：那里已经从画面页变成了通道配置页
-        var anchor = -1;
-        for (var i = 0; i < NavView.MenuItems.Count; i++)
+        var parent = ChannelsNavItem;
+
+        parent.MenuItems.Clear();
+        parent.MenuItems.Add(new NavigationViewItem
         {
-            if (NavView.MenuItems[i] is NavigationViewItem item
-                && item.Tag is string tag
-                && tag == "channels")
-            {
-                anchor = i;
-                break;
-            }
-        }
+            Tag = MultiViewTag,
+            Content = "多画面（全部通道）",
+            Icon = new SymbolIcon(Symbol.ViewAll),
+        });
 
-        var insertAt = anchor >= 0 ? anchor + 1 : NavView.MenuItems.Count;
-
-        NavView.MenuItems.Insert(insertAt, new NavigationViewItemHeader { Content = ChannelMenuHeaderText });
-        insertAt++;
-
-        foreach (var session in channels)
+        foreach (var (id, name, tooltip) in EnumerateChannelMenuEntries())
         {
             var item = new NavigationViewItem
             {
-                Tag = ChannelTagPrefix + session.ChannelId,
-                Content = session.DisplayName,
+                Tag = ChannelTagPrefix + id,
+                Content = name,
                 Icon = new SymbolIcon(Symbol.Link),
             };
 
-            ToolTipService.SetToolTip(item, $"{session.TargetHost} / {session.TargetUser}");
-            NavView.MenuItems.Insert(insertAt, item);
-            insertAt++;
+            ToolTipService.SetToolTip(item, tooltip);
+            parent.MenuItems.Add(item);
+        }
+
+        parent.MenuItems.Add(new NavigationViewItemSeparator());
+        parent.MenuItems.Add(new NavigationViewItem
+        {
+            Tag = ChannelMgmtTag,
+            Content = "通道管理…",
+            Icon = new SymbolIcon(Symbol.Setting),
+        });
+
+        // 重建会把原来的项对象整体换掉 → 选中态需按 tag 复原，
+        // 否则用户正停在某条通道页时，菜单会"莫名其妙没选中任何一项"。
+        if (_currentTag.Length > 0)
+        {
+            SyncNavigationSelection(_currentTag);
         }
     }
 
-    private void RemoveChannelMenuItems()
+    /// <summary>
+    /// 菜子里该列哪些通道：① 配置里启用中的通道（不跑任务也能点进去手动连画面看）；
+    /// ② 本轮在跑的通道（含配置里已删 / 已停用的 —— 在跑就必须看得见）。
+    /// </summary>
+    private List<(string Id, string Name, string Tooltip)> EnumerateChannelMenuEntries()
     {
-        for (var i = NavView.MenuItems.Count - 1; i >= 0; i--)
+        var entries = new List<(string, string, string)>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var channel in VM.Config.Rdp.Channels)
         {
-            var item = NavView.MenuItems[i];
-
-            var isChannelItem = item is NavigationViewItem nav
-                && nav.Tag is string tag
-                && tag.StartsWith(ChannelTagPrefix, StringComparison.Ordinal);
-
-            var isHeader = item is NavigationViewItemHeader header
-                && header.Content is string text
-                && text == ChannelMenuHeaderText;
-
-            if (isChannelItem || isHeader)
+            if (!channel.Enabled || string.IsNullOrWhiteSpace(channel.Id) || !seen.Add(channel.Id))
             {
-                NavView.MenuItems.RemoveAt(i);
+                continue;
             }
+
+            entries.Add((channel.Id, channel.DisplayName, $"{channel.Host} / {channel.User}"));
         }
+
+        foreach (var session in VM.Sessions.Where(s => s.IsRemote))
+        {
+            if (!seen.Add(session.ChannelId))
+            {
+                continue;
+            }
+
+            entries.Add((
+                session.ChannelId,
+                session.DisplayName,
+                $"{session.TargetHost} / {session.TargetUser} · {session.StatusText}"));
+        }
+
+        return entries;
     }
 
     private void OnNavigationSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
         if (args.SelectedItem is NavigationViewItem item && item.Tag is string tag)
+        {
+            NavigateTo(tag);
+        }
+    }
+
+    /// <summary>
+    /// 带子项的父项（「会话通道」）被点击时**不改变选中态**，只会展开并触发这里。
+    /// 不接这个事件的话，父项就真的"点不动"。
+    /// （叶子项两个事件都会来，<see cref="NavigateTo"/> 按 tag 去重，不会重复导航。）
+    /// </summary>
+    private void OnNavigationItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)
+    {
+        if (args.InvokedItemContainer is NavigationViewItem item && item.Tag is string tag && tag.Length > 0)
         {
             NavigateTo(tag);
         }
@@ -307,10 +364,11 @@ public sealed partial class MainWindow : Window
 
         _currentTag = tag;
 
-        // 会话通道页：把通道 id 作为导航参数带过去
+        // 单条通道页：把通道 id 作为导航参数带过去
         if (tag.StartsWith(ChannelTagPrefix, StringComparison.Ordinal))
         {
             ContentFrame.Navigate(typeof(Views.RdpChannelPage), tag[ChannelTagPrefix.Length..]);
+            ChannelsNavItem.IsExpanded = true;
             VM.UpdateMascotForPage("channel");
             SyncNavigationSelection(tag);
             return;
@@ -328,6 +386,11 @@ public sealed partial class MainWindow : Window
                 ContentFrame.Navigate(typeof(Views.LogsPage));
                 break;
             case "channels":
+            case MultiViewTag:
+                // 「会话通道」父项与它的「多画面」子项：同一个页面
+                ContentFrame.Navigate(typeof(Views.RdpMultiViewPage));
+                break;
+            case ChannelMgmtTag:
                 ContentFrame.Navigate(typeof(Views.ChannelsPage));
                 break;
             case "settings":
@@ -344,23 +407,38 @@ public sealed partial class MainWindow : Window
 
     private void SyncNavigationSelection(string tag)
     {
-        foreach (var item in NavView.MenuItems)
+        var target = FindNavItemByTag(NavView.MenuItems, tag)
+            ?? FindNavItemByTag(NavView.FooterMenuItems, tag);
+
+        if (target is not null)
         {
-            if (item is NavigationViewItem navItem && navItem.Tag is string itemTag && itemTag == tag)
+            NavView.SelectedItem = target;
+        }
+    }
+
+    /// <summary>按 tag 找菜单项（含父项的子项 —— 通道项现在挂在「会话通道」下面）。</summary>
+    private static NavigationViewItem? FindNavItemByTag(IEnumerable<object> items, string tag)
+    {
+        foreach (var item in items)
+        {
+            if (item is not NavigationViewItem nav)
             {
-                NavView.SelectedItem = navItem;
-                return;
+                continue;
+            }
+
+            if (nav.Tag is string itemTag && string.Equals(itemTag, tag, StringComparison.Ordinal))
+            {
+                return nav;
+            }
+
+            var nested = FindNavItemByTag(nav.MenuItems, tag);
+            if (nested is not null)
+            {
+                return nested;
             }
         }
 
-        foreach (var item in NavView.FooterMenuItems)
-        {
-            if (item is NavigationViewItem navItem && navItem.Tag is string itemTag && itemTag == tag)
-            {
-                NavView.SelectedItem = navItem;
-                return;
-            }
-        }
+        return null;
     }
 
     // ---------------- 控制栏 ----------------
@@ -386,7 +464,8 @@ public sealed partial class MainWindow : Window
             XamlRoot = Content.XamlRoot,
         };
 
-        var result = await dialog.ShowAsync();
+        // 走统一入口：排队 + 吞异常，避免和别的对话框撞上直接抛 COMException 崩进程
+        var result = await Helpers.DialogHelper.ShowAsync(dialog);
         if (result == ContentDialogResult.Primary)
         {
             VM.CancelShutdown();

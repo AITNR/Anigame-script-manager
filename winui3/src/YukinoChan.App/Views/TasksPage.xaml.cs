@@ -76,7 +76,8 @@ public sealed partial class TasksPage : Page
         VM.SelectedTask = VM.ScopeTasks.FirstOrDefault();
     }
 
-    private void OnOpenChannels(object sender, RoutedEventArgs e) => VM.Navigate("channels");
+    /// <summary>去「会话通道」父项下的「通道管理…」子项（增删通道、填凭据）。</summary>
+    private void OnOpenChannels(object sender, RoutedEventArgs e) => VM.Navigate("channel-mgmt");
 
     // ---------------- 中：通道内的任务 ----------------
 

@@ -90,7 +90,7 @@
                     Margin="0,8,0,0"
                     Click="OnOpenChannels">
                 <ToolTipService.ToolTip>
-                    <ToolTip Content="去「会话通道」页增删通道、填目标账户与凭据。" />
+                    <ToolTip Content="去左侧菜单「会话通道」下的「通道管理…」增删通道、填目标账户与凭据。" />
                 </ToolTipService.ToolTip>
             </Button>
         </Grid>

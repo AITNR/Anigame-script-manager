@@ -1177,9 +1177,11 @@ public sealed class MainViewModel : ObservableObject
             "tasks" => "任务列表在这里。确认好之后，就可以开始执行啦。",
             "stats" => "这里能看看最近的运行情况。",
             "logs" => "运行记录会放在这里，出问题时再慢慢看就好。",
-            // M4：静态项由 "rdp" 改名 "channels"（管理/预检页）；"channel" 是每条通道页。
-            // 旧键 "rdp" 留着兼容（外部/旧代码仍可能用它导航）。
-            "channels" or "rdp" => "每条通道就是一个目标账户的专属跑道，在这里配好就能并行跑任务了。",
+            // 「会话通道」父项（= 多画面）与其子项「多画面」：tag 分别是 channels / multiview。
+            // 多画面从通道页搬到了独立页面（docs/channel-menu-multiview-plan.md）。
+            "channels" or "multiview" => "这里能一次看到全部通道的画面，双击某一格还能把它弹成独立窗口。",
+            // 「通道管理…」子项（配置 / 凭据 / 部署代理 / 预检）；旧键 "rdp" 留着兼容。
+            "channel-mgmt" or "rdp" => "每条通道就是一个目标账户的专属跑道，在这里配好就能并行跑任务了。",
             "channel" => "这条通道的画面和进度都在这里，直接点画面就能操作远端。",
             "settings" => "全局设置在这里，改完记得保存哦。",
             _ => "雪乃酱待命中～需要时可以展开卡片继续操作。",
@@ -2002,7 +2004,7 @@ public sealed class MainViewModel : ObservableObject
             XamlRoot = App.MainWindow.Content.XamlRoot,
         };
 
-        var result = await dialog.ShowAsync();
+        var result = await DialogHelper.ShowAsync(dialog);
         return result == ContentDialogResult.Primary
             ? box.SelectedValue as string ?? TaskScopePlanner.LocalScopeId
             : null;
@@ -2096,7 +2098,7 @@ public sealed class MainViewModel : ObservableObject
                 if (ok)
                 {
                     AppendLog($"[会话通道] 会话代理：{Flatten(message)}");
-                    RdpStatusText = message.Contains("注销")
+                    RdpStatusText = ReportAgentDeployed(message)
                         ? "会话代理已部署（目标账户需注销重连才生效）"
                         : "会话代理已部署";
                 }
@@ -2520,8 +2522,12 @@ public sealed class MainViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 多画面网格要展示的通道 id（有会话或有内嵌画面的远程通道；设置页入口不进网格）。
-    /// 顺序：本轮执行涉及的通道在前，其次是有画面的 —— 保证网格顺序稳定、不随刷新跳位。
+    /// 多画面网格要展示的通道 id。顺序稳定（配置顺序在前），避免 1Hz 刷新时格位跳来跳去：
+    /// <list type="number">
+    /// <item>配置里**启用中**的通道 —— 不跑任务也能进网格，格子里给「连接到这条通道」；</item>
+    /// <item>本轮在跑的通道（含配置里已删 / 已停用的 —— 在跑就必须看得见）；</item>
+    /// <item>还剩有活画面的通道（设置页入口的空串不进网格）。</item>
+    /// </list>
     /// </summary>
     public IReadOnlyList<string> SurfaceGridChannelIds
     {
@@ -2529,25 +2535,28 @@ public sealed class MainViewModel : ObservableObject
         {
             var ids = new List<string>();
 
+            void AddIfNew(string? id)
+            {
+                if (!string.IsNullOrWhiteSpace(id)
+                    && !ids.Contains(id, StringComparer.OrdinalIgnoreCase))
+                {
+                    ids.Add(id);
+                }
+            }
+
+            foreach (var channel in Config.Rdp.Channels.Where(c => c.Enabled))
+            {
+                AddIfNew(channel.Id);
+            }
+
             foreach (var s in _sessions.Where(s => s.IsRemote))
             {
-                if (!ids.Contains(s.ChannelId, StringComparer.OrdinalIgnoreCase))
-                {
-                    ids.Add(s.ChannelId);
-                }
+                AddIfNew(s.ChannelId);
             }
 
             foreach (var key in SurfaceChannelIds)
             {
-                if (key.Length == 0)
-                {
-                    continue; // 设置页入口没有对应的通道页 / 网格格位
-                }
-
-                if (!ids.Contains(key, StringComparer.OrdinalIgnoreCase))
-                {
-                    ids.Add(key);
-                }
+                AddIfNew(key);
             }
 
             return ids;
@@ -3452,7 +3461,7 @@ public sealed class MainViewModel : ObservableObject
                 if (ok)
                 {
                     AppendLog($"会话代理：{Flatten(message)}");
-                    RdpStatusText = message.Contains("注销")
+                    RdpStatusText = ReportAgentDeployed(message)
                         ? "会话代理已部署（目标账户需注销重连才生效）"
                         : "会话代理已部署";
                 }
@@ -3477,10 +3486,44 @@ public sealed class MainViewModel : ObservableObject
             ? string.Empty
             : text.Replace("\r\n", " ").Replace('\n', ' ').Replace('\r', ' ');
 
+    /// <summary>
+    /// 「部署会话代理」的成功回执。
+    ///
+    /// 为什么成功也必须说话：这个按钮"换了程序才点一次"，但点完原先只做两件事 ——
+    /// 往运行日志里追一行、改一个**通道页上根本看不到**的 <c>RdpStatusText</c>。
+    /// 于是用户看到的就是"点了完全没反应"，只能来问到底成没成（2026-09-27 真机）。
+    /// 而失败反而是弹窗的 —— 一静一响，正好把"部署好了"和"没点上"混成同一个体感。
+    ///
+    /// 返回值：本次部署是否结束了正在跑的旧代理。是的话程序副本虽然换了，
+    /// 内存里那个旧进程已经不在了，得等目标账户重新登录才会拉起新副本。
+    /// </summary>
+    private static bool ReportAgentDeployed(string message)
+    {
+        var detail = Flatten(message);
+
+        // "已结束 N 个正在运行的旧会话代理" 和 "需注销目标账户后重新连接" 是同一个信号：
+        // 文件换了、旧进程没了，只有重新登录才会把新程序拉起来。
+        var needRelogin = detail.Contains("已结束") || detail.Contains("注销");
+
+        var body = "程序副本与公共启动项都已就位。\n\n"
+            + (detail.Length > 0 ? detail : "（无附加说明）");
+
+        if (needRelogin)
+        {
+            body += "\n\n注意：旧代理进程已经不在运行了。目标账户需要走一次「注销目标账户」再重新连接 —— "
+                + "代理只在登录那一刻由启动项拉起，直接重连旧会话不会换上新程序。";
+        }
+
+        _ = DialogHelper.ShowMessageAsync("会话代理部署完成", body);
+        return needRelogin;
+    }
+
     private void RemoveRdpAgent()
     {
-        RdpSessionService.RemoveAgent(out var message);
-        AppendLog($"会话代理：{message}");
+        var ok = RdpSessionService.RemoveAgent(out var message);
+        AppendLog($"会话代理：{Flatten(message)}");
+        RdpStatusText = ok ? "会话代理已移除" : "移除代理未完成";
+        _ = DialogHelper.ShowMessageAsync(ok ? "会话代理已移除" : "移除代理未完成", Flatten(message));
         RefreshRdpReadiness();
     }
 

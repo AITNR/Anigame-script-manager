@@ -1,6 +1,5 @@
 // -*- coding: utf-8 -*-
 using System;
-using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
 using Microsoft.UI.Dispatching;
@@ -14,27 +13,19 @@ using YukinoChan.ViewModels;
 namespace YukinoChan.Views;
 
 /// <summary>
-/// 一条会话通道的页面：画面（单画面 / 多画面网格）+ 该通道自己的进度 / 心跳 / 事件。
+/// 一条会话通道的页面：**只显示本通道**的画面 + 进度 / 心跳 / 事件。
 ///
 /// 状态直接取自 <see cref="RdpChannelSession"/>（每通道一份，不是全局单例），
 /// 所以两条通道的页面各看各的，不会互相覆盖 —— 这正是 M3 把状态下沉的目的。
 ///
-/// 画面（M6）：
-/// <list type="bullet">
-/// <item>内嵌连接按通道分家（每条通道各一个 client），所以**多路画面可以同时存在**；</item>
-/// <item>「单画面」= 只摆本通道一格（占满，可全屏，键盘一并接管）；</item>
-/// <item>「多画面」= 2×2 网格并列全部会话通道，每页最多 4 格（>4 分页）——
-///       4 路是有意的同时渲染上限，再多 CPU/GPU 扛不住（计划书 §M6 风险项）；</item>
-/// <item>每格可「弹出窗口」到独立普通窗口（用户自己并排摆放）。</item>
-/// </list>
+/// 画面：本通道一格（占满，可全屏、键盘一并接管、可弹成独立窗口）。
+/// 「一眼看到全部通道」的网格在 <see cref="RdpMultiViewPage"/>（左侧菜单的「会话通道」父项）——
+/// 原先它挤在本页的「单画面 / 多画面」开关后面，概念上就是拧的（详见
+/// docs/channel-menu-multiview-plan.md）。
 /// </summary>
 public sealed partial class RdpChannelPage : Page, System.ComponentModel.INotifyPropertyChanged
 {
-    /// <summary>多画面网格每页的格数（2×2）。</summary>
-    private const int GridPageSize = 4;
-
     private readonly ObservableCollection<RdpTaskEvent> _emptyEvents = new();
-    private readonly List<RdpSurfaceCell> _cells = new();
 
     private RdpChannelSession? _session;
 
@@ -47,17 +38,9 @@ public sealed partial class RdpChannelPage : Page, System.ComponentModel.INotify
     private bool _pageAlive;
 
     /// <summary>
-    /// 全屏编排（全屏窗口 + 键盘接管 + 宿主渲染挂起）。
-    /// 宿主固定为第 0 格 —— 单画面模式下它就是本通道那一格；
-    /// 多画面模式下不给全屏（会盖掉别的路），用「弹出窗口」代替。
+    /// 全屏编排（全屏窗口 + 键盘接管 + 宿主渲染挂起），宿主固定为唯一那一格。
     /// </summary>
     private RdpFullScreenCoordinator? _fullScreen;
-
-    /// <summary>当前是否多画面网格。</summary>
-    private bool _multiView;
-
-    /// <summary>多画面分页页码（0 起）。</summary>
-    private int _gridPage;
 
     /// <summary>事件卡是否收起（收起后画面能多占 140px）。</summary>
     private bool _eventsCollapsed;
@@ -75,19 +58,16 @@ public sealed partial class RdpChannelPage : Page, System.ComponentModel.INotify
     {
         InitializeComponent();
 
-        _cells.AddRange(new[] { Cell0, Cell1, Cell2, Cell3 });
-        foreach (var cell in _cells)
-        {
-            cell.PopOutRequested += OnCellPopOut;
-            cell.FullScreenRequested += OnCellFullScreen;
-            cell.DisconnectRequested += OnCellDisconnect;
-            cell.ConnectRequested += OnCellConnect;
-        }
+        Cell0.PopOutRequested += OnCellPopOut;
+        Cell0.FullScreenRequested += OnCellFullScreen;
+        Cell0.DisconnectRequested += OnCellDisconnect;
+        Cell0.ConnectRequested += OnCellConnect;
 
         // 画面上的双击 / F11 也走同一条全屏路径（浮层按钮只是显式入口）
         _fullScreen = new RdpFullScreenCoordinator(Cell0.View, App.ViewModel.AppendLog, OnFullScreenStateChanged);
 
-        UpdateViewModeButtons();
+        // 本页只有一格，全屏按钮常开
+        Cell0.ShowFullScreenButton = true;
     }
 
     private void RaiseAllChanged() =>
@@ -160,12 +140,7 @@ public sealed partial class RdpChannelPage : Page, System.ComponentModel.INotify
         }
 
         _pageAlive = true;
-
-        // 默认单画面：进通道页的第一眼就该是本通道的大画面
-        _multiView = false;
-        _gridPage = 0;
-        UpdateViewModeButtons();
-        LayoutSurfaces();
+        RefreshSurface();
         RaiseAllChanged();
 
         // 与主控端 1Hz 轮询同节奏刷新展示，避免每通道再开一套通知机制
@@ -174,7 +149,7 @@ public sealed partial class RdpChannelPage : Page, System.ComponentModel.INotify
         _refreshTimer.IsRepeating = true;
         _refreshTimer.Tick += (_, _) =>
         {
-            LayoutSurfaces();
+            RefreshSurface();
             RaiseAllChanged();
         };
         _refreshTimer.Start();
@@ -190,166 +165,44 @@ public sealed partial class RdpChannelPage : Page, System.ComponentModel.INotify
         _fullScreen?.Detach();
 
         // 只解挂、不断开：会话与画面流照旧，切回来（或弹出窗口）继续用同一个 client
-        foreach (var cell in _cells)
-        {
-            cell.SetClient(null);
-        }
+        Cell0.SetClient(null);
 
         base.OnNavigatedFrom(e);
     }
 
-    // ---------------- 画面网格 ----------------
+    // ---------------- 画面（本通道一格） ----------------
 
     /// <summary>
-    /// 按当前模式（单画面 / 多画面）摆放格位、挂上各通道的内嵌画面，并刷新角标。
-    /// 每拍调用是安全的：<see cref="RdpSurfaceCell.SetClient"/> 对同一实例会短路，
-    /// 不会把画面重挂成闪断。
+    /// 把本通道这一格挂上/解下画面并刷新角标。每拍调用安全：
+    /// <see cref="RdpSurfaceCell.SetClient"/> 对同一实例会短路，不会把画面重挂成闪断。
     /// </summary>
-    private void LayoutSurfaces()
+    private void RefreshSurface()
     {
-        var ids = ResolveSurfaceIds();
-
-        var pageCount = Math.Max(1, (ids.Count + GridPageSize - 1) / GridPageSize);
-        _gridPage = Math.Clamp(_gridPage, 0, pageCount - 1);
-
-        var pageIds = _multiView
-            ? ids.Skip(_gridPage * GridPageSize).Take(GridPageSize).ToList()
-            : ids;
-
-        foreach (var cell in _cells)
+        if (string.IsNullOrEmpty(_channelId))
         {
-            cell.Visibility = Visibility.Collapsed;
-            cell.ShowFullScreenButton = !_multiView;
+            Cell0.Assign(string.Empty, string.Empty);
+            Cell0.SetClient(null);
+            SurfaceEmptyText.Text = "没有指定通道。请从左侧菜单「会话通道」下面选一条通道。";
+            SurfaceEmptyHint.Visibility = Visibility.Visible;
+            return;
         }
 
-        for (var i = 0; i < _cells.Count; i++)
+        Cell0.Assign(_channelId, VM.ChannelDisplayName(_channelId));
+
+        // 画面已被独立窗口占用的通道：本格让位（两个渲染器不能挂同一个 client）
+        Cell0.SetClient(VM.IsSurfacePoppedOut(_channelId) ? null : VM.GetSurfaceClient(_channelId));
+        Cell0.UpdateChrome();
+
+        // 这一格自己会说明"没画面的原因"（占位文案），这里只在通道配置都没了时补一句
+        var channelGone = Channel is null && _session is null;
+        SurfaceEmptyHint.Visibility = channelGone ? Visibility.Visible : Visibility.Collapsed;
+        if (channelGone)
         {
-            var cell = _cells[i];
-
-            if (i >= pageIds.Count)
-            {
-                // 本页用不到的格位：解挂，别让它在后台白渲染
-                cell.SetClient(null);
-                continue;
-            }
-
-            var id = pageIds[i];
-
-            cell.Assign(id, VM.ChannelDisplayName(id));
-            PlaceCell(cell, i, pageIds.Count);
-
-            // 画面已被独立窗口占用的通道：本格让位（两个渲染器不能挂同一个 client）
-            cell.SetClient(VM.IsSurfacePoppedOut(id) ? null : VM.GetSurfaceClient(id));
-            cell.UpdateChrome();
+            SurfaceEmptyText.Text = $"通道「{_channelId}」已从配置里删除，这一页只剩历史事件。";
         }
-
-        // 分页条：只在多画面且不止一页时出现
-        PagerBar.Visibility = _multiView && pageCount > 1 ? Visibility.Visible : Visibility.Collapsed;
-        PageText.Text = $"{_gridPage + 1} / {pageCount}";
-        PrevPageButton.IsEnabled = _gridPage > 0;
-        NextPageButton.IsEnabled = _gridPage < pageCount - 1;
-
-        // 一路可显示的通道都没有时的空态
-        var empty = ids.Count == 0;
-        SurfaceEmptyHint.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
-        if (empty)
-        {
-            SurfaceEmptyText.Text = VM.IsEmbeddedMode
-                ? "这条通道还没有画面。点上面的「连接本通道」建连，或者先开始执行任务。"
-                : "当前客户端模式是「独立窗口（mstsc）」，画面在系统自带的远程桌面窗口里，应用内不显示。";
-        }
-    }
-
-    /// <summary>当前该显示哪些通道的画面。</summary>
-    private List<string> ResolveSurfaceIds()
-    {
-        if (_multiView)
-        {
-            return VM.SurfaceGridChannelIds.ToList();
-        }
-
-        return string.IsNullOrEmpty(_channelId) ? new List<string>() : new List<string> { _channelId };
-    }
-
-    /// <summary>把第 index 格放进 2×2 网格里合适的位置（1 / 2 / 3 格时自动跨行列）。</summary>
-    private static void PlaceCell(RdpSurfaceCell cell, int index, int count)
-    {
-        switch (count)
-        {
-            case 1:
-                Grid.SetRow(cell, 0);
-                Grid.SetColumn(cell, 0);
-                Grid.SetRowSpan(cell, 2);
-                Grid.SetColumnSpan(cell, 2);
-                break;
-
-            case 2:
-                Grid.SetRow(cell, 0);
-                Grid.SetColumn(cell, index);
-                Grid.SetRowSpan(cell, 2);
-                Grid.SetColumnSpan(cell, 1);
-                break;
-
-            case 3 when index == 0:
-                Grid.SetRow(cell, 0);
-                Grid.SetColumn(cell, 0);
-                Grid.SetRowSpan(cell, 2);
-                Grid.SetColumnSpan(cell, 1);
-                break;
-
-            case 3:
-                Grid.SetRow(cell, index == 1 ? 0 : 1);
-                Grid.SetColumn(cell, 1);
-                Grid.SetRowSpan(cell, 1);
-                Grid.SetColumnSpan(cell, 1);
-                break;
-
-            default:
-                Grid.SetRow(cell, index / 2);
-                Grid.SetColumn(cell, index % 2);
-                Grid.SetRowSpan(cell, 1);
-                Grid.SetColumnSpan(cell, 1);
-                break;
-        }
-
-        cell.Visibility = Visibility.Visible;
     }
 
     // ---------------- 交互 ----------------
-
-    private void UpdateViewModeButtons()
-    {
-        SingleViewButton.IsChecked = !_multiView;
-        MultiViewButton.IsChecked = _multiView;
-    }
-
-    private void OnSingleViewClicked(object sender, RoutedEventArgs e)
-    {
-        _multiView = false;
-        _gridPage = 0;
-        UpdateViewModeButtons();
-        LayoutSurfaces();
-    }
-
-    private void OnMultiViewClicked(object sender, RoutedEventArgs e)
-    {
-        _multiView = true;
-        _gridPage = 0;
-        UpdateViewModeButtons();
-        LayoutSurfaces();
-    }
-
-    private void OnPrevPageClicked(object sender, RoutedEventArgs e)
-    {
-        _gridPage = Math.Max(0, _gridPage - 1);
-        LayoutSurfaces();
-    }
-
-    private void OnNextPageClicked(object sender, RoutedEventArgs e)
-    {
-        _gridPage++;
-        LayoutSurfaces();
-    }
 
     private void OnConnectPreviewClicked(object sender, RoutedEventArgs e)
         => VM.ConnectChannelSurface(_channelId);
@@ -371,24 +224,14 @@ public sealed partial class RdpChannelPage : Page, System.ComponentModel.INotify
     private void OnCellDisconnect(object? sender, string channelId)
     {
         VM.DisposeSurface(channelId);
-        LayoutSurfaces();
+        RefreshSurface();
         RaiseAllChanged();
     }
 
-    /// <summary>「全屏」：单画面下新窗口接管同一个内嵌连接（键盘一并接管，F11 / 双击画面退出）。</summary>
-    private void OnCellFullScreen(object? sender, string channelId)
-    {
-        // 多画面下双击 / 全屏 = 把这一路弹成独立窗口（全屏会盖掉别的路）
-        if (_multiView)
-        {
-            PopOutSurface(channelId);
-            return;
-        }
+    /// <summary>「全屏」：新窗口接管本通道的内嵌连接（键盘一并接管，F11 / 双击画面退出）。</summary>
+    private void OnCellFullScreen(object? sender, string channelId) => _fullScreen?.Toggle();
 
-        _fullScreen?.Toggle();
-    }
-
-    /// <summary>「弹出窗口」：把这路画面交到一个普通独立窗口，用户自己并排摆放。</summary>
+    /// <summary>「弹出窗口」：把这路画面交到一个普通独立窗口，用户自己摆放。</summary>
     private void OnCellPopOut(object? sender, string channelId) => PopOutSurface(channelId);
 
     private void PopOutSurface(string channelId)
@@ -408,7 +251,7 @@ public sealed partial class RdpChannelPage : Page, System.ComponentModel.INotify
         // 顺序要紧：先把本格让出来（解挂），再让新窗口接管同一个 client，
         // 否则两个渲染器会同时挂在一条会话上互相打架。
         VM.MarkSurfacePoppedOut(channelId, true);
-        LayoutSurfaces();
+        RefreshSurface();
 
         var window = new RdpChannelWindow(client, VM.ChannelDisplayName(channelId));
 
@@ -420,7 +263,7 @@ public sealed partial class RdpChannelPage : Page, System.ComponentModel.INotify
 
             if (_pageAlive)
             {
-                LayoutSurfaces();
+                RefreshSurface();
             }
         };
 
@@ -436,6 +279,6 @@ public sealed partial class RdpChannelPage : Page, System.ComponentModel.INotify
         ToggleEventsButton.Content = _eventsCollapsed ? "展开" : "收起";
     }
 
-    /// <summary>全屏状态变化：切第 0 格的按钮文案（画面本身由协调器挂起/恢复渲染）。</summary>
+    /// <summary>全屏状态变化：切本格的按钮文案（画面本身由协调器挂起/恢复渲染）。</summary>
     private void OnFullScreenStateChanged(bool active) => Cell0.SetFullScreenActive(active);
 }
