@@ -93,6 +93,15 @@ public sealed class ScriptRunner
     /// 配置里写的常是中文窗口标题，靠它杀不掉也查不出，见 <see cref="LearnMonitorImageNames"/>。
     /// </summary>
     private readonly HashSet<string> _learnedImageNames = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 本轮**脚本进程派生出来的后代**（PID + 镜像名）。
+    /// 停止时必须连同它们一起清，理由见 <see cref="LearnScriptDescendants"/>。
+    /// 按 PID 记而不是按名字记 —— 名字容易撞车（脚本常会派生 <c>conhost.exe</c> 这类公共进程），
+    /// 按名字清会误伤系统里别的同名进程。
+    /// </summary>
+    private readonly List<ProcessSnapshotEntry> _scriptDescendants = new();
+
     private readonly List<AbnormalEvent> _abnormalEvents = new();
 
     private volatile bool _stopRequested;
@@ -202,6 +211,11 @@ public sealed class ScriptRunner
         {
             processes = new List<IMonitoredProcess>(_currentProcesses);
         }
+
+        // 在这里就把"脚本进程派生了谁"记下来 —— 这是停止链路上**最早**的一刻，
+        // 晚一点父进程可能已经死了，只剩孤儿记录（2026-09-27 漏网事故的直接原因）。
+        // 开销只是一次进程快照（毫秒级），不影响本方法"轻量"的约束。
+        LearnScriptDescendants(processes);
 
         foreach (var process in processes)
         {
@@ -886,6 +900,9 @@ public sealed class ScriptRunner
         string scopeLabel,
         bool includeWindowKeywords)
     {
+        // ⚠️ 必须在任何结束动作**之前**学：父子关系一动手就变了（根一死只剩孤儿记录）
+        LearnScriptDescendants(directProcesses);
+
         foreach (var process in directProcesses ?? new List<IMonitoredProcess>())
         {
             if (process is not null && process.Poll() is null)
@@ -894,6 +911,10 @@ public sealed class ScriptRunner
                 process.Terminate();
             }
         }
+
+        // 紧接着收脚本进程派生的后代 —— 它才是"真正干活的引擎"。
+        // 留到后面收等于白给了它一个把游戏重新拉起来的时间窗（真机事故就是这么来的）。
+        TerminateScriptDescendants(scopeLabel);
 
         // 第 0 层：本轮监控实际命中的进程。
         // 配置里写的往往是中文窗口标题（「原神」「星穹铁道」），而真实镜像名是英文
@@ -980,6 +1001,133 @@ public sealed class ScriptRunner
     }
 
     /// <summary>
+    /// 记下"脚本进程派生了哪些子进程"。
+    ///
+    /// 为什么必须学：像 March7th 这类工具，配置里指向的 `March7th Launcher.exe` **只是个壳**，
+    /// 真正干活的是它派生的 `March7th Assistant.exe`。停止时若只按配置里写的名字清理，
+    /// 子进程会完全漏网 —— 它随后会自己把游戏重新拉起来。2026-09-27 真机实测：
+    /// 22:42:01 打完「✓ 都已结束」，22:42:57 游戏就被它重启，一直跑到 22:49 才收尾，
+    /// 用户看到的就是"明明停止了，过一会又自己跑起来"。
+    ///
+    /// 调用时机：必须在**任何结束动作之前**。根进程一死，进程表里就只剩孤儿记录，
+    /// 那时再想按 PPID 补课已经晚了 —— 这也是当初漏网的直接原因。
+    ///
+    /// 记 PID 而不是名字：脚本常会派生 <c>conhost.exe</c> 这类公共进程，
+    /// 按名字清会误伤系统里别的同名实例，按 PID 才精准。
+    /// </summary>
+    private void LearnScriptDescendants(List<IMonitoredProcess>? directProcesses)
+    {
+        var rootPids = new List<int>();
+
+        lock (_sync)
+        {
+            foreach (var pid in _tasksByPid.Keys)
+            {
+                if (!rootPids.Contains(pid))
+                {
+                    rootPids.Add(pid);
+                }
+            }
+        }
+
+        foreach (var process in directProcesses ?? new List<IMonitoredProcess>())
+        {
+            if (process is not null && process.Pid > 0 && !rootPids.Contains(process.Pid))
+            {
+                rootPids.Add(process.Pid);
+            }
+        }
+
+        if (rootPids.Count == 0)
+        {
+            return;
+        }
+
+        var snapshot = ProcessHelper.SnapshotProcesses();
+        if (snapshot.Count == 0)
+        {
+            Log("停止清理：读不到系统进程表，无法登记脚本进程的后代（只能退回按名字清理，可能漏掉子进程）。");
+            return;
+        }
+
+        foreach (var pid in rootPids)
+        {
+            foreach (var child in ProcessHelper.DescendantsOf(pid, snapshot))
+            {
+                var known = false;
+                lock (_sync)
+                {
+                    foreach (var item in _scriptDescendants)
+                    {
+                        if (item.Pid == child.Pid)
+                        {
+                            known = true;
+                            break;
+                        }
+                    }
+
+                    if (!known)
+                    {
+                        _scriptDescendants.Add(child);
+                    }
+                }
+
+                if (known)
+                {
+                    continue;
+                }
+
+                Log($"已记下脚本进程（PID {pid}）派生的子进程：{child.Name}（PID {child.Pid}）—— 停止时按它清理与复查。");
+            }
+        }
+    }
+
+    /// <summary>
+    /// 结束本轮登记过的脚本后代（按 PID，**先深后浅**）。
+    ///
+    /// 每个都必须给回执：这次事故里最难发现的一环正是"上一步报成功、子进程其实还在"，
+    /// 所以这里不用任何"没抛异常就算过"的写法，结论一律来自进程表的复查。
+    /// </summary>
+    private void TerminateScriptDescendants(string scopeLabel)
+    {
+        List<ProcessSnapshotEntry> descendants;
+        lock (_sync)
+        {
+            descendants = new List<ProcessSnapshotEntry>(_scriptDescendants);
+        }
+
+        if (descendants.Count == 0)
+        {
+            return;
+        }
+
+        // 倒着收 = 从最深的叶子往根：先断掉"会自己重启游戏"的引擎，壳留到最后。
+        for (var i = descendants.Count - 1; i >= 0; i--)
+        {
+            var item = descendants[i];
+            if (!ProcessHelper.IsSameProcessAlive(item.Pid, item.Name))
+            {
+                continue;
+            }
+
+            Log($"{scopeLabel}：正在清理脚本进程派生的子进程：{item.Name}（PID {item.Pid}）");
+            var result = ProcessHelper.TerminateProcessTree(item.Pid);
+            Log($"{scopeLabel}：结束「{item.Name}」（PID {item.Pid}）：{result.Summary}");
+
+            if (result.Ok)
+            {
+                continue;
+            }
+
+            var closed = ProcessHelper.CloseMainWindowsByPid(item.Pid);
+            if (closed > 0)
+            {
+                Log($"{scopeLabel}：强制结束被拒，已向「{item.Name}」的 {closed} 个窗口发送关闭请求（走它自己的退出流程）。");
+            }
+        }
+    }
+
+    /// <summary>
     /// 记下"本轮监控命中的那个窗口属于哪个进程"。
     ///
     /// 为什么必须学：任务配置里写的往往是中文窗口标题（「原神」「星穹铁道」），
@@ -1054,6 +1202,25 @@ public sealed class ScriptRunner
             }
         }
 
+        // 脚本进程派生的后代：按 PID 复查（按名字查会撞上同名的公共进程，如 conhost.exe）
+        List<ProcessSnapshotEntry> descendants;
+        lock (_sync)
+        {
+            descendants = new List<ProcessSnapshotEntry>(_scriptDescendants);
+        }
+
+        var descendantLeftovers = new List<string>();
+        foreach (var item in descendants)
+        {
+            if (!ProcessHelper.IsSameProcessAlive(item.Pid, item.Name))
+            {
+                continue;
+            }
+
+            AddUnique(descendantLeftovers, item.ToString());
+            AddUnique(leftovers, $"{item}（脚本进程派生的子进程）");
+        }
+
         foreach (var task in tasks)
         {
             var scriptPath = task.ScriptPath.Trim().Length > 0
@@ -1109,6 +1276,14 @@ public sealed class ScriptRunner
         Log($"{scopeLabel}：⚠ 它们多半带反作弊 / 驱动级保护，普通权限结束不了。"
             + "改成在目标会话里以管理员身份运行代理、或手动结束；"
             + "若日志里一直没有「按目标进程关键词兜底结束」这类记录，把真实镜像名（如 YuanShen、StarRail）补进任务的「进程关键词」。");
+
+        // 单独点名"漏网的是脚本自己的子进程"：这是最容易被误判成"已经停止"的一种，
+        // 而且它会自己把游戏重新拉回来（2026-09-27 真机事故）。
+        if (descendantLeftovers.Count > 0)
+        {
+            Log($"{scopeLabel}：⚠ 其中「启动脚本派生的子进程」没结束掉：{string.Join("、", descendantLeftovers)}"
+                + " —— 它是真正干活的引擎，很可能会自己把游戏重新拉起来，建议在目标会话里手动结束它再确认。");
+        }
     }
 
     private void TerminateProcessesByWindowKeyword(string keyword, string scopeLabel, string taskName)
@@ -1247,9 +1422,12 @@ public sealed class ScriptRunner
 
     /// <summary>
     /// 统一清理顺序：
-    /// 1. 启动进程（脚本 exe + launcher_process）
+    /// 1. 启动进程（脚本 exe + 任务名 + launcher_process）
     /// 2. 目标进程（wait_process_name + main_process + process_keywords）
     /// 3. 游戏/扩展进程（game_process + window_keywords 中的 .exe）
+    ///
+    /// 清理与复查**共用这一份计划** —— 只清不查会漏，只查不清会误报，
+    /// 两边用的名字必须来自同一个函数（2026-09-27 假 ✓ 事故的教训）。
     /// </summary>
     private static List<(string Stage, List<string> Names)> BuildCleanupPlan(TaskConfig task, string? scriptPath)
     {
@@ -1260,6 +1438,15 @@ public sealed class ScriptRunner
         if (scriptPath is not null && Path.GetExtension(scriptPath).Equals(".exe", StringComparison.OrdinalIgnoreCase))
         {
             AddUnique(launcherNames, Path.GetFileName(scriptPath));
+        }
+
+        // 任务名本身也纳入「启动脚本进程」。
+        // 为什么必须加：漏网事故里活下来、并把游戏重新拉起来的那个进程
+        // （`March7th Assistant.exe`），名字与**任务名**一致，却既不是 script_path 的文件名、
+        // 也不在 wait_process_name 里 —— 于是清理和复查两边都看不见它，复查才会打出假的 ✓。
+        if (ProcessHelper.LooksLikeImageName(task.Name))
+        {
+            AddUnique(launcherNames, task.Name.Trim());
         }
 
         AddUnique(launcherNames, task.LauncherProcess);

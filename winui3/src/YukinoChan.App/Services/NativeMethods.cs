@@ -155,4 +155,47 @@ internal static class NativeMethods
         IntPtr hServer,
         uint sessionId,
         [MarshalAs(UnmanagedType.Bool)] bool bWait);
+
+    // ---------------- Toolhelp32：一次快照拿全系统的 PID / 父 PID / 镜像名 ----------------
+    //
+    // 为什么必须自己拿父子关系：.NET 的 Process.Kill(entireProcessTree: true) **实测会漏掉后代** ——
+    // 2026-09-27 真机：`March7th Launcher.exe` 派生 `March7th Assistant.exe`，停止时托管 API
+    // 回报"结束成功"，子进程却活得好好的，随后自己把游戏重新拉起来继续跑（用户看到"停了又自己跑"）。
+    // 所以"结束整棵树"这件事不能交给它：得自己按 PPID 列后代、自己逐个结束、再自己复查。
+    //
+    // 选 Toolhelp32 而不是 WMI / PowerShell：一次调用、不受系统语言与代码页影响、
+    // 不需要管理员权限，也**不受会话限制**（能列到 RDP 目标会话里的进程）。
+
+    public const uint Th32csSnapProcess = 0x00000002;
+
+    public static readonly IntPtr InvalidHandleValue = new(-1);
+
+    /// <summary>对应 PROCESSENTRY32W。x64 下 Marshal.SizeOf = 564（与 Windows 期望的 dwSize 一致）。</summary>
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct ProcessEntry32W
+    {
+        public int dwSize;
+        public uint cntUsage;
+        public uint th32ProcessID;
+        public IntPtr th32DefaultHeapID;
+        public uint th32ModuleID;
+        public uint cntThreads;
+        public uint th32ParentProcessID;
+        public int pcPriClassBase;
+        public uint dwFlags;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string szExeFile;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool Process32FirstW(IntPtr hSnapshot, ref ProcessEntry32W lppe);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool Process32NextW(IntPtr hSnapshot, ref ProcessEntry32W lppe);
 }

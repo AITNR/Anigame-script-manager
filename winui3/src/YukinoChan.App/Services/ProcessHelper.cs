@@ -3,7 +3,9 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 namespace YukinoChan.Services;
 
@@ -46,11 +48,209 @@ public sealed class ProcessTerminateResult
 }
 
 /// <summary>
+/// 一次进程快照里的一条：PID、父 PID、镜像名（带 <c>.exe</c>）。
+///
+/// 有了父 PID，才能自己按父子关系列出"某个进程派生了哪些后代"。
+/// 这件事 .NET 的 <c>Kill(entireProcessTree: true)</c> 干不可靠（实测漏后代），见 <see cref="ProcessHelper.TerminateProcessTree"/>。
+/// </summary>
+public sealed class ProcessSnapshotEntry
+{
+    public ProcessSnapshotEntry(int pid, int parentPid, string name)
+    {
+        Pid = pid;
+        ParentPid = parentPid;
+        Name = (name ?? string.Empty).Trim();
+    }
+
+    public int Pid { get; }
+
+    public int ParentPid { get; }
+
+    /// <summary>镜像名，Windows 给的本来带 <c>.exe</c>（如 <c>March7th Assistant.exe</c>）。</summary>
+    public string Name { get; }
+
+    public override string ToString() => Name.Length > 0 ? $"{Name}(PID {Pid})" : $"PID {Pid}";
+}
+
+/// <summary>
 /// 进程 / 窗口探测与清理。
 /// 对应 Python 版 ScriptRunnerWorker 中的 tasklist / EnumWindows / taskkill 逻辑。
 /// </summary>
 public static class ProcessHelper
 {
+    /// <summary>去掉 <c>.exe</c> 的镜像名（<c>Process.ProcessName</c> 不带扩展名，比较前必须统一）。</summary>
+    public static string BareImageName(string? imageName)
+    {
+        var text = (imageName ?? string.Empty).Trim();
+        if (text.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        return text.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? text[..^4] : text;
+    }
+
+    /// <summary>
+    /// 任务名要拿去**按名字**清理时，先确认它"像个镜像名"。
+    ///
+    /// 为什么需要这道闸：任务名可能是「原神日常」这种给人看的显示名，
+    /// 直接拿去做 <c>taskkill /IM</c> 不但打不中，还有误杀同名程序的风险。
+    /// 判定从宽（.exe 结尾、或单个词）—— 因为任务名在本工程里绝大多数就是 exe 名，
+    /// 而漏掉它的代价是"子进程漏网"（见 <see cref="TerminateProcessTree"/> 的案例）。
+    /// </summary>
+    public static bool LooksLikeImageName(string? value)
+    {
+        var text = (value ?? string.Empty).Trim();
+        if (text.Length == 0 || text.Length > 128)
+        {
+            return false;
+        }
+
+        if (text.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return !text.Contains('/') && !text.Contains('\\') && !text.Contains(' ');
+    }
+
+    /// <summary>
+    /// 一次 Toolhelp32 快照拿全系统的 PID / 父 PID / 镜像名。
+    /// 失败（极少数受限环境）返回空表，调用方按"拿不到父子关系"降级即可。
+    /// </summary>
+    public static List<ProcessSnapshotEntry> SnapshotProcesses()
+    {
+        var result = new List<ProcessSnapshotEntry>();
+        var snapshot = IntPtr.Zero;
+        try
+        {
+            snapshot = NativeMethods.CreateToolhelp32Snapshot(NativeMethods.Th32csSnapProcess, 0);
+            if (snapshot == IntPtr.Zero || snapshot == NativeMethods.InvalidHandleValue)
+            {
+                return result;
+            }
+
+            var size = Marshal.SizeOf<NativeMethods.ProcessEntry32W>();
+            var entry = new NativeMethods.ProcessEntry32W { dwSize = size };
+            if (!NativeMethods.Process32FirstW(snapshot, ref entry))
+            {
+                return result;
+            }
+
+            while (true)
+            {
+                var pid = (int)entry.th32ProcessID;
+                if (pid > 0)
+                {
+                    result.Add(new ProcessSnapshotEntry(pid, (int)entry.th32ParentProcessID, entry.szExeFile ?? string.Empty));
+                }
+
+                // 每轮用新结构体，避免上一轮较长的镜像名残留在缓冲区里
+                entry = new NativeMethods.ProcessEntry32W { dwSize = size };
+                if (!NativeMethods.Process32NextW(snapshot, ref entry))
+                {
+                    break;
+                }
+            }
+        }
+        catch
+        {
+            // 快照失败不该影响调用方，返回已收集到的部分
+        }
+        finally
+        {
+            if (snapshot != IntPtr.Zero && snapshot != NativeMethods.InvalidHandleValue)
+            {
+                try
+                {
+                    NativeMethods.CloseHandle(snapshot);
+                }
+                catch
+                {
+                    // 忽略句柄关闭失败
+                }
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// 收集 <paramref name="pid"/> 的**全部后代**（不含自己），父在前的 BFS 顺序（越靠后 = 越深）。
+    ///
+    /// 关键性质：进程死了之后，它的子进程仍带着**原始父 PID**（Windows 不会重新认父），
+    /// 所以"根已经退出、只剩孤儿"的场景照样能列出来 —— 这正是漏网事故里最难查的那一半。
+    /// </summary>
+    public static List<ProcessSnapshotEntry> DescendantsOf(int pid, List<ProcessSnapshotEntry>? snapshot = null)
+    {
+        var result = new List<ProcessSnapshotEntry>();
+        if (pid <= 0)
+        {
+            return result;
+        }
+
+        var all = snapshot ?? SnapshotProcesses();
+        if (all.Count == 0)
+        {
+            return result;
+        }
+
+        var seen = new HashSet<int> { pid };
+        var queue = new Queue<int>();
+        queue.Enqueue(pid);
+
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            foreach (var item in all)
+            {
+                if (item.ParentPid != current || !seen.Add(item.Pid))
+                {
+                    continue;
+                }
+
+                result.Add(item);
+                queue.Enqueue(item.Pid);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// 指定 PID 是否**还是原来那个进程**（镜像名一致）。
+    /// 加名字校验是为了防 PID 被系统复用后把"新来的无关进程"误判成残留。
+    /// </summary>
+    public static bool IsSameProcessAlive(int pid, string? imageName)
+    {
+        if (pid <= 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            using var process = Process.GetProcessById(pid);
+            var bare = BareImageName(imageName);
+            if (bare.Length == 0)
+            {
+                return true;
+            }
+
+            return string.Equals(process.ProcessName, bare, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (ArgumentException)
+        {
+            // 查不到 = 已经退出了
+            return false;
+        }
+        catch
+        {
+            // 拒绝访问 = 它还在那儿，只是我们读不到细节
+            return true;
+        }
+    }
+
     /// <summary>把用户填写的进程名转成 taskkill /IM 可尝试的名称。</summary>
     public static List<string> ProcessNameCandidates(string? raw)
     {
@@ -391,12 +591,20 @@ public static class ProcessHelper
     }
 
     /// <summary>
-    /// 结束进程树的**带降级**版本：taskkill 不成就换托管 API。
+    /// 结束**整棵进程树**：taskkill 不成自己按 PPID 逐层收，最后**复查**才给结论。
     ///
-    /// 为什么需要降级：taskkill /F 对**带内核级自我保护的游戏**（原神 / 星穹铁道的反作弊驱动）
-    /// 会直接拒绝访问，而 taskkill 的失败是静默的 —— 日志里只留下"正在结束"，
-    /// 用户对着还在跑的游戏根本判断不出到底关了没有（真机踩过）。
-    /// 托管 API 失败时会抛出真实原因（拒绝访问等），能明确写进日志。
+    /// 【为什么不再信"托管 API 说成功"】2026-09-27 真机事故：
+    /// 任务配的 `March7th Launcher.exe` 只是个壳，真正干活的引擎是它派生的 `March7th Assistant.exe`。
+    /// 停止时 <c>taskkill /IM /T /F</c> 被拒（拒绝访问），降级 <c>Kill(entireProcessTree: true)</c>
+    /// **回报"结束成功"，却只带走了根 PID**；漏网的子进程发现游戏窗口没了，
+    /// 22:42:57 自己 `游戏终止 → 游戏启动` 把游戏重新拉起来，一直跑到 22:49 才收尾 ——
+    /// 用户看到的就是"明明停止了，过一会又自己跑起来"。
+    ///
+    /// 所以本方法的纪律是：**任何结束动作之后都必须自己复查**，
+    /// 结论只能来自"目标还在不在"，绝不来自 taskkill 的退出码或托管 API 没抛异常。
+    ///
+    /// 顺序也重要：父子关系必须在**动手之前**取（根一死，查询方就只剩孤儿记录），
+    /// 结束时**从叶子往根**收（先断掉会自己重启的子进程，最后才收根）。
     /// </summary>
     public static ProcessTerminateResult TerminateProcessTree(int pid)
     {
@@ -405,29 +613,126 @@ public static class ProcessHelper
             return ProcessTerminateResult.Skip("PID 无效");
         }
 
-        var viaTaskkill = TerminatePidTree(pid);
-        if (viaTaskkill.Ok)
+        // ① 先拍快照，把整棵树记下来 —— 动手之后父子关系就变了
+        var snapshot = SnapshotProcesses();
+        var targets = DescendantsOf(pid, snapshot);
+        var root = FindById(snapshot, pid);
+        if (root is not null)
         {
-            return viaTaskkill;
+            targets.Insert(0, root);
         }
 
+        if (targets.Count == 0)
+        {
+            // 根和后代都查不到 = 本来就不在
+            return new ProcessTerminateResult(true, -1, "进程已不存在");
+        }
+
+        // ② taskkill 便宜且能带上我们枚举不到的层，先让它试一把
+        var viaTaskkill = TerminatePidTree(pid);
+
+        // ③ 复查①：不看退出码，看进程还在不在
+        var remaining = AliveTargets(targets);
+        if (remaining.Count == 0)
+        {
+            var how = viaTaskkill.Ok ? viaTaskkill.Detail : "taskkill 报错但复查确认已无残留";
+            return new ProcessTerminateResult(true, viaTaskkill.ExitCode, DescribeKilled(targets, how));
+        }
+
+        // ④ 剩下的自己动手，**从叶子往根**（BFS 顺序倒过来就是最深优先）
+        var failures = new List<string>();
+        for (var i = remaining.Count - 1; i >= 0; i--)
+        {
+            var item = remaining[i];
+            var reason = KillByPid(item.Pid);
+            if (reason.Length > 0)
+            {
+                failures.Add($"{item}：{reason}");
+            }
+        }
+
+        // ⑤ 复查②：结论必须是查出来的，不是猜出来的
+        Thread.Sleep(200);
+        var stillAlive = AliveTargets(targets);
+        if (stillAlive.Count == 0)
+        {
+            var how = viaTaskkill.Ok ? "taskkill 部分生效" : "taskkill 被拒，改用托管 API 逐层结束";
+            return new ProcessTerminateResult(true, -1, DescribeKilled(targets, how));
+        }
+
+        var names = new List<string>();
+        foreach (var item in stillAlive)
+        {
+            AddUnique(names, item.ToString());
+        }
+
+        var prefix = failures.Count > 0 ? string.Join("；", failures) + "；" : string.Empty;
+        return new ProcessTerminateResult(
+            false,
+            -1,
+            $"{prefix}整树 {targets.Count} 个进程中仍有 {stillAlive.Count} 个在运行：{string.Join("、", names)}");
+    }
+
+    private static ProcessSnapshotEntry? FindById(List<ProcessSnapshotEntry> snapshot, int pid)
+    {
+        foreach (var item in snapshot)
+        {
+            if (item.Pid == pid)
+            {
+                return item;
+            }
+        }
+
+        return null;
+    }
+
+    private static List<ProcessSnapshotEntry> AliveTargets(List<ProcessSnapshotEntry> targets)
+    {
+        var result = new List<ProcessSnapshotEntry>();
+        foreach (var item in targets)
+        {
+            if (IsSameProcessAlive(item.Pid, item.Name))
+            {
+                result.Add(item);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>结束单个 PID（不管后代 —— 后代由调用方按顺序各自处理）。返回空串 = 成功或本来就不在。</summary>
+    private static string KillByPid(int pid)
+    {
         try
         {
             using var process = Process.GetProcessById(pid);
-            process.Kill(entireProcessTree: true);
-            process.WaitForExit(3000);
-            return new ProcessTerminateResult(true, -1, "taskkill 被拒，改用托管 API 结束成功");
+            process.Kill();
+            process.WaitForExit(2000);
+            return string.Empty;
         }
         catch (ArgumentException)
         {
-            // 查不到这个 PID = 它已经退出了，按成功处理
-            return new ProcessTerminateResult(true, -1, "进程已不存在");
+            return string.Empty;
         }
         catch (Exception ex)
         {
-            var detail = viaTaskkill.Detail.Length > 0 ? $"{viaTaskkill.Detail}；" : string.Empty;
-            return new ProcessTerminateResult(false, -1, $"{detail}托管 API 也失败：{ex.Message}");
+            return ex.Message;
         }
+    }
+
+    private static string DescribeKilled(List<ProcessSnapshotEntry> targets, string how)
+    {
+        var names = new List<string>();
+        foreach (var item in targets)
+        {
+            AddUnique(names, item.Name.Length > 0 ? item.Name : $"PID {item.Pid}");
+        }
+
+        var list = names.Count > 4
+            ? string.Join("、", names.GetRange(0, 4)) + $" 等 {names.Count} 种"
+            : string.Join("、", names);
+
+        return $"整棵进程树 {targets.Count} 个进程已结束（{list}）；{how}";
     }
 
     /// <summary>
