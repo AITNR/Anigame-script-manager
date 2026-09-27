@@ -70,7 +70,9 @@ jobs:
         id: native-cache
         uses: actions/cache/restore@v4
         with:
-          path: .native-out
+          # ⚠️ 目录名不能以 . 开头：upload-artifact 默认**跳过隐藏文件**，
+          #    早先用 .native-out 时上传报「No files were found」，CI 就在这卡了一轮。
+          path: native-out
           key: ycn-native-${{ runner.os }}-${{ hashFiles('winui3/src/YukinoChan.RdpNative/CMakeLists.txt', 'winui3/src/YukinoChan.RdpNative/ycn_rdp.c', 'winui3/src/YukinoChan.RdpNative/ycn_rdp.h') }}
 
       - name: 取 vcpkg（钉住提交，不用 vcpkg 默认分支）
@@ -183,14 +185,14 @@ jobs:
         if: steps.native-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force .native-out | Out-Null
-          Copy-Item .native-build/Release/*.dll .native-out/ -Force
-          Get-ChildItem .native-out | Select-Object Name, @{n = 'MB'; e = { [math]::Round($_.Length / 1MB, 1) } }
+          New-Item -ItemType Directory -Force native-out | Out-Null
+          Copy-Item .native-build/Release/*.dll native-out/ -Force
+          Get-ChildItem native-out | Select-Object Name, @{n = 'MB'; e = { [math]::Round($_.Length / 1MB, 1) } }
 
       - name: 校验原生层产物
         shell: pwsh
         run: |
-          $dll = '.native-out/ycn_rdp.dll'
+          $dll = 'native-out/ycn_rdp.dll'
           if (-not (Test-Path $dll)) { throw "原生层没有产出 $dll" }
           Write-Host ("ycn_rdp.dll 大小 {0:N0} 字节" -f (Get-Item $dll).Length)
 
@@ -199,14 +201,14 @@ jobs:
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
-          path: .native-out
+          path: native-out
           key: ycn-native-${{ runner.os }}-${{ hashFiles('winui3/src/YukinoChan.RdpNative/CMakeLists.txt', 'winui3/src/YukinoChan.RdpNative/ycn_rdp.c', 'winui3/src/YukinoChan.RdpNative/ycn_rdp.h') }}
 
       - name: 上传原生层产物
         uses: actions/upload-artifact@v4
         with:
           name: native-dlls
-          path: .native-out/*.dll
+          path: native-out/*.dll
           retention-days: ${{ inputs.retention_days }}
           if-no-files-found: error
 
