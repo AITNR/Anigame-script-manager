@@ -150,7 +150,7 @@
       "game_process": ""
     },
     {
-      "enabled": true,
+      "enabled": false,
       "name": "March7th Assistant.exe",
       "script_path": "C:\\Program Files\\March7thAssistant_v2.7.0\\March7th Launcher.exe",
       "order": 7,
@@ -217,8 +217,8 @@
     ]
   },
   "window": {
-    "x": 1295,
-    "y": 423,
+    "x": 966,
+    "y": 428,
     "width": 2344,
     "height": 991,
     "maximized": false

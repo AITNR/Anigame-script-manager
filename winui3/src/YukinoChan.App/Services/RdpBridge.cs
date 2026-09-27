@@ -157,7 +157,16 @@ public sealed class RdpBridge
         try
         {
             LastError = string.Empty;
-            return WriteAtomic(CommandPath, JsonSerializer.Serialize(command, WriteOptions));
+            if (!WriteAtomic(CommandPath, JsonSerializer.Serialize(command, WriteOptions)))
+            {
+                return false;
+            }
+
+            // 下发新指令即清场：上一轮没被消费的 stop.json 不该带进新一轮。
+            // （不靠 CommandId 兜底就够了的说法是错的 —— 排障时那份残留文件会让人
+            //  误判"停止请求压根没写进去"，而且老版本代理的归属校验更弱。）
+            ClearStop();
+            return true;
         }
         catch (Exception ex)
         {

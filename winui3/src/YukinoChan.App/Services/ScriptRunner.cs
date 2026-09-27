@@ -87,10 +87,17 @@ public sealed class ScriptRunner
     private readonly List<IMonitoredProcess> _currentProcesses = new();
     private readonly Dictionary<int, List<string>> _processNamesByPid = new();
     private readonly Dictionary<int, TaskConfig> _tasksByPid = new();
+
+    /// <summary>
+    /// 本轮通过窗口标题监控**实际命中**的进程镜像名（如 <c>YuanShen</c> / <c>StarRail</c>）。
+    /// 配置里写的常是中文窗口标题，靠它杀不掉也查不出，见 <see cref="LearnMonitorImageNames"/>。
+    /// </summary>
+    private readonly HashSet<string> _learnedImageNames = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<AbnormalEvent> _abnormalEvents = new();
 
     private volatile bool _stopRequested;
     private volatile bool _pauseRequested;
+    private volatile bool _emergencyRequested;
 
     public ScriptRunner(
         IEnumerable<TaskConfig> tasks,
@@ -149,39 +156,61 @@ public sealed class ScriptRunner
         Log("收到继续请求：任务队列恢复运行。");
     }
 
-    /// <summary>停止执行：只收尾当前正在运行的任务。</summary>
+    /// <summary>
+    /// 停止执行：只收尾当前正在运行的任务。
+    ///
+    /// 【为什么不再在这里做整轮清理】本方法是被"每秒计时回调"/停止监听线程**同步**调用的，
+    /// 而按关键词清理要枚举全部进程、逐个 taskkill，实测一轮要十几秒。
+    /// 在这十几秒里工作线程被完全占住：进度停摆、心跳停摆、状态不再回传 ——
+    /// 主控端看到的就是"点了停止，界面卡住没反应"（真机日志实证过：停止到收尾隔了 14 秒）。
+    /// 现在这里只做两件轻量且立刻见效的事：置标志位 + 终止已登记的直接脚本进程；
+    /// 按关键词的统一三层清理交给主循环下一拍（250ms 内必到），那里本来就有完整的收尾分支。
+    /// </summary>
     public void RequestStop()
     {
         _stopRequested = true;
         _pauseRequested = false;
         Log("收到用户停止执行请求：正在按当前任务的启动脚本进程 → 目标进程 → 游戏窗口/扩展进程顺序收尾。");
-
-        List<IMonitoredProcess> processes;
-        List<TaskConfig> tasks;
-        lock (_sync)
-        {
-            processes = new List<IMonitoredProcess>(_currentProcesses);
-            tasks = DistinctTasks(_tasksByPid.Values);
-        }
-
-        CleanupProcessesForTasks(tasks, processes, "停止执行", includeWindowKeywords: true);
+        TerminateTrackedProcesses("停止执行");
     }
 
-    /// <summary>紧急停止：停止队列，并按所有任务配置执行全局三层清理。</summary>
+    /// <summary>
+    /// 紧急停止：停掉队列，并把**全部任务配置**（不只当前任务）的进程一起收尾。
+    ///
+    /// 与 <see cref="RequestStop"/> 的唯一差别是清理范围：
+    ///   常规停止 = 当前任务（+ 本轮监控学到的真实镜像名）；
+    ///   紧急停止 = 全部任务配置 —— 因此连"启动后不等待"那类已经脱离本轮的进程也能扫到。
+    /// 两者都不在这里做重活（理由同 RequestStop）。
+    /// </summary>
     public void RequestEmergencyStop()
     {
         _stopRequested = true;
         _pauseRequested = false;
-        Log("收到紧急停止请求：正在扫描所有任务配置，并按启动脚本进程 → 目标进程 → 游戏窗口/扩展进程顺序强制收尾。");
+        _emergencyRequested = true;
+        Log("收到紧急停止请求：本轮立即停止，并按全部任务配置（不只当前任务）清理进程。");
+        TerminateTrackedProcesses("紧急停止");
+    }
 
+    /// <summary>
+    /// 立刻结束当前登记在册的脚本进程（轻量：只 Kill，不枚举、不扫关键词）。
+    /// 关键词那层留给主循环，避免把调用方（计时回调 / 停止监听线程）堵住。
+    /// </summary>
+    private void TerminateTrackedProcesses(string scopeLabel)
+    {
         List<IMonitoredProcess> processes;
         lock (_sync)
         {
             processes = new List<IMonitoredProcess>(_currentProcesses);
         }
 
-        CleanupProcessesForTasks(new List<TaskConfig>(_tasks), processes, "紧急停止", includeWindowKeywords: true);
-        Log("紧急停止处理已执行。");
+        foreach (var process in processes)
+        {
+            if (process.Poll() is null)
+            {
+                Log($"{scopeLabel}：正在终止脚本进程 PID：{process.Pid}");
+                process.Terminate();
+            }
+        }
     }
 
     public Task RunAsync() => Task.Run(RunCore);
@@ -273,18 +302,23 @@ public sealed class ScriptRunner
                 }
             }
 
-            lock (_sync)
-            {
-                _currentProcesses.Clear();
-            }
-
             if (stopped)
             {
+                // 统一收尾（必须在清空登记表**之前**）：正常路径上 RunOneTask 已经就地清过了，
+                // 但「启动确认 / 接力确认被停止打断」走的是另一条分支（只放弃等待、不做清理），
+                // 常规停止在那条路上就没人杀目标进程 —— 表现成"点了停止，游戏还在跑"。
+                CleanupForStop();
+
                 RaiseStatus("已停止");
                 Log("任务队列已停止。");
                 SaveAbnormalReport();
                 RaiseFinished(true);
                 return;
+            }
+
+            lock (_sync)
+            {
+                _currentProcesses.Clear();
             }
 
             if (HadTaskError)
@@ -524,6 +558,15 @@ public sealed class ScriptRunner
         var stopwatch = Stopwatch.StartNew();
         if (!ConfirmLaunchSuccess(task, process, name, stopwatch, monitorSpec))
         {
+            // 停止请求把启动确认 / 接力确认打断了 —— 进程很可能还活着（是我们主动放弃等待，
+            // 不是它退出了），所以既不解除登记、也不记"启动失败或提前退出"这条异常：
+            // 登记信息要留给 RunCore 的统一收尾去清（提权接力起来的新实例也在关键词范围内）。
+            if (_stopRequested)
+            {
+                Log($"任务「{name}」在启动确认阶段被停止请求打断，交给统一收尾清理。");
+                return RunOutcome.StopRequested;
+            }
+
             UntrackProcess(process);
             var failedElapsed = (int)stopwatch.Elapsed.TotalSeconds;
             _stats.AddRecord(name, failedElapsed, "启动失败或提前退出", task.WaitMode);
@@ -583,7 +626,13 @@ public sealed class ScriptRunner
             if (_stopRequested)
             {
                 Log($"任务「{name}」执行中收到停止请求，正在按统一清理顺序收尾当前任务。");
-                CleanupProcessesForTasks(new List<TaskConfig> { task }, new List<IMonitoredProcess> { process }, "停止执行", includeWindowKeywords: true);
+
+                // 常规停止只收尾当前任务；紧急停止按全部任务配置清理。
+                var scope = _emergencyRequested
+                    ? new List<TaskConfig>(_tasks)
+                    : new List<TaskConfig> { task };
+
+                CleanupProcessesForTasks(scope, new List<IMonitoredProcess> { process }, "停止执行", includeWindowKeywords: true);
                 UntrackProcess(process);
                 return RunOutcome.StopRequested;
             }
@@ -604,6 +653,10 @@ public sealed class ScriptRunner
                     {
                         monitorSeen = true;
                         Log($"检测到{label}「{matchedKeyword}」，现在开始等待它消失。");
+
+                        // 监控命中 = 目标真的起来了，此刻它的**真实镜像名**是可查的。
+                        // 记下来，停止时按它清理和复查，不再依赖窗口标题（见 LearnMonitorImageNames）。
+                        LearnMonitorImageNames(monitorSpec);
                     }
                 }
                 else if (monitorSeen)
@@ -837,9 +890,35 @@ public sealed class ScriptRunner
         {
             if (process is not null && process.Poll() is null)
             {
-                Log($"正在终止脚本进程 PID：{process.Pid}");
+                Log($"{scopeLabel}：正在终止脚本进程 PID：{process.Pid}");
                 process.Terminate();
             }
+        }
+
+        // 第 0 层：本轮监控实际命中的进程。
+        // 配置里写的往往是中文窗口标题（「原神」「星穹铁道」），而真实镜像名是英文
+        // （YuanShen / StarRail）—— 按名字 taskkill 打不中中文，只能靠窗口标题那一路兜底；
+        // 这里用监控时学到的真实镜像名直接杀，不依赖窗口是否还在。
+        List<string> learned;
+        lock (_sync)
+        {
+            learned = new List<string>(_learnedImageNames);
+        }
+
+        if (learned.Count > 0)
+        {
+            Log($"{scopeLabel}：正在清理本轮监控到的实际进程：{string.Join(", ", learned)}");
+            foreach (var name in learned)
+            {
+                var result = ProcessHelper.TerminateProcessName(name);
+                Log($"{scopeLabel}：结束进程名「{name}」：{result.Summary}");
+                if (!result.Ok)
+                {
+                    Log($"{scopeLabel}：↳ {result.Hint}");
+                }
+            }
+
+            Thread.Sleep(350);
         }
 
         var killedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -896,6 +975,140 @@ public sealed class ScriptRunner
                 }
             }
         }
+
+        ReportCleanupResult(tasks, includeWindowKeywords, scopeLabel);
+    }
+
+    /// <summary>
+    /// 记下"本轮监控命中的那个窗口属于哪个进程"。
+    ///
+    /// 为什么必须学：任务配置里写的往往是中文窗口标题（「原神」「星穹铁道」），
+    /// 而游戏真实镜像名是英文（<c>YuanShen</c> / <c>StarRail</c>）——
+    /// 只用配置里的关键词，会同时踩两个坑：
+    ///   ① 杀不掉：<c>taskkill /IM "原神"</c> 打不中英文镜像名；
+    ///   ② 复查不出：按中文名字查进程永远是"不在"，明明还在跑也会报"已结束"。
+    /// 监控命中的那一刻真实镜像名是可查的，记下来就能绕开窗口标题这条脆弱链路。
+    /// </summary>
+    private void LearnMonitorImageNames(MonitorSpec monitorSpec)
+    {
+        if (monitorSpec.Kind != MonitorKinds.Window)
+        {
+            // 进程 / 命令行模式下配置里写的就是真实镜像名，没什么可学的
+            return;
+        }
+
+        foreach (var keyword in monitorSpec.Keywords)
+        {
+            foreach (var pid in ProcessHelper.WindowPidsByKeyword(keyword))
+            {
+                try
+                {
+                    using var process = Process.GetProcessById(pid);
+                    var imageName = process.ProcessName;
+                    if (imageName.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    lock (_sync)
+                    {
+                        if (!_learnedImageNames.Add(imageName))
+                        {
+                            continue;
+                        }
+                    }
+
+                    Log($"已记下监控命中的真实进程名：{imageName}（PID {pid}）—— 停止时按它清理与复查，不再依赖窗口标题。");
+                }
+                catch
+                {
+                    // 进程已退出或拒绝访问，跳过
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 清理后复查：把"到底关掉没有"明确写进日志。
+    ///
+    /// 为什么必要：<c>taskkill</c> 对被内核级反作弊保护的游戏会失败，而失败与成功在旧日志里
+    /// 长得一模一样（都只有"正在结束"）。用户只能对着还在跑的游戏猜是没杀掉还是画面没刷新。
+    /// 这里用同一套候选名 + 监控学到的真实镜像名 + 窗口关键词再查一遍：
+    /// 干净就明确确认，有残留就点名并给出下一步。
+    /// </summary>
+    private void ReportCleanupResult(List<TaskConfig> tasks, bool includeWindowKeywords, string scopeLabel)
+    {
+        var leftovers = new List<string>();
+
+        List<string> learned;
+        lock (_sync)
+        {
+            learned = new List<string>(_learnedImageNames);
+        }
+
+        foreach (var name in learned)
+        {
+            if (ProcessHelper.IsProcessNameRunning(name))
+            {
+                AddUnique(leftovers, name + "（监控命中的实际进程）");
+            }
+        }
+
+        foreach (var task in tasks)
+        {
+            var scriptPath = task.ScriptPath.Trim().Length > 0
+                ? Path.GetFullPath(Environment.ExpandEnvironmentVariables(task.ScriptPath.Trim()))
+                : null;
+
+            foreach (var (stage, rawNames) in BuildCleanupPlan(task, scriptPath))
+            {
+                foreach (var rawName in rawNames)
+                {
+                    foreach (var candidate in ProcessHelper.ProcessNameCandidates(rawName))
+                    {
+                        if (ProcessHelper.IsProcessNameRunning(candidate))
+                        {
+                            AddUnique(leftovers, $"{candidate}（{stage}）");
+                        }
+                    }
+                }
+            }
+
+            if (!includeWindowKeywords)
+            {
+                continue;
+            }
+
+            foreach (var keyword in KeywordHelper.Normalize(task.WindowKeywords))
+            {
+                var pids = ProcessHelper.WindowPidsByKeyword(keyword);
+                if (pids.Count == 0)
+                {
+                    var stripped = ProcessHelper.TitleMatchKey(keyword);
+                    if (stripped.Length > 0
+                        && !string.Equals(stripped, keyword.Trim(), StringComparison.OrdinalIgnoreCase))
+                    {
+                        pids = ProcessHelper.WindowPidsByKeyword(stripped);
+                    }
+                }
+
+                if (pids.Count > 0)
+                {
+                    AddUnique(leftovers, $"窗口「{keyword}」仍在（PID {string.Join("/", pids)}）");
+                }
+            }
+        }
+
+        if (leftovers.Count == 0)
+        {
+            Log($"{scopeLabel}：✓ 已复查确认，任务相关的进程都已结束。");
+            return;
+        }
+
+        Log($"{scopeLabel}：⚠ 复查发现 {leftovers.Count} 项仍在运行：{string.Join("、", leftovers)}");
+        Log($"{scopeLabel}：⚠ 它们多半带反作弊 / 驱动级保护，普通权限结束不了。"
+            + "改成在目标会话里以管理员身份运行代理、或手动结束；"
+            + "若日志里一直没有「按目标进程关键词兜底结束」这类记录，把真实镜像名（如 YuanShen、StarRail）补进任务的「进程关键词」。");
     }
 
     private void TerminateProcessesByWindowKeyword(string keyword, string scopeLabel, string taskName)
@@ -906,9 +1119,25 @@ public sealed class ScriptRunner
             return;
         }
 
+        // 无条件先记一条 —— 这一层跑没跑到必须能一眼看出来。
+        // （真机上出现过"配置里有窗口关键词、日志里却一条相关记录都没有"的情况，
+        //   当时无法判断是没执行、还是执行了但两条分支都没命中。）
+        Log($"{scopeLabel}：任务「{taskName}」按游戏窗口关键词「{text}」查找残留进程…");
+
         try
         {
+            // 窗口标题里不会出现 .exe：关键词写成「原神.exe」时按原样比标题必然落空，
+            // 而这条路正是清掉游戏本体（YuanShen / StarRail）的主要手段。剥掉扩展名再比。
             var pids = ProcessHelper.WindowPidsByKeyword(text);
+            if (pids.Count == 0)
+            {
+                var stripped = ProcessHelper.TitleMatchKey(text);
+                if (stripped.Length > 0 && !string.Equals(stripped, text.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    pids = ProcessHelper.WindowPidsByKeyword(stripped);
+                }
+            }
+
             if (pids.Count == 0)
             {
                 Log($"{scopeLabel}：任务「{taskName}」未发现游戏窗口关键词「{text}」对应的残留窗口。");
@@ -918,13 +1147,42 @@ public sealed class ScriptRunner
             Log($"{scopeLabel}：任务「{taskName}」发现游戏窗口关键词「{text}」对应 PID：{string.Join(", ", pids)}");
             foreach (var pid in pids)
             {
-                ProcessHelper.TerminatePidTree(pid);
+                KillWithFallback(pid, $"窗口「{text}」");
             }
         }
         catch (Exception ex)
         {
             Log($"{scopeLabel}：按游戏窗口关键词「{text}」清理失败：{ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// 结束一个进程树并把结果写进日志；强杀被拒时退一步"请它自己退出"。
+    ///
+    /// 为什么要降级：原神 / 星穹铁道这类游戏带内核级反作弊驱动，普通权限的
+    /// <c>taskkill /F</c> 会直接被拒 —— 而失败是**静默**的，旧日志里只留下"正在结束"，
+    /// 用户看着还在跑的游戏根本判断不出到底关了没有（真机踩过）。
+    /// 强杀被拒后给窗口发 WM_CLOSE：那是应用层消息，反作弊不拦，走游戏自己的退出流程
+    /// （有些游戏会弹一个确认退出框，需要在目标会话里点一下）。
+    /// </summary>
+    private void KillWithFallback(int pid, string label)
+    {
+        var result = ProcessHelper.TerminateProcessTree(pid);
+        Log($"  ↳ {label}：{result.Summary}");
+
+        if (result.Ok)
+        {
+            return;
+        }
+
+        var closed = ProcessHelper.CloseMainWindowsByPid(pid);
+        if (closed > 0)
+        {
+            Log($"  ↳ 强制结束被拒，已向 {label} 的 {closed} 个窗口发送关闭请求（走游戏自己的退出流程，可能需要在目标会话里确认）。");
+            return;
+        }
+
+        Log($"  ↳ 强制结束被拒，且没有可发送关闭请求的窗口。{result.Hint}");
     }
 
     private void TerminateProcessKeyword(string keyword)
@@ -940,14 +1198,22 @@ public sealed class ScriptRunner
         {
             if (tried.Add(candidate))
             {
-                ProcessHelper.TerminateProcessName(candidate);
-                Log($"已尝试结束进程名：{candidate}");
+                var byName = ProcessHelper.TerminateProcessName(candidate);
+                Log($"结束进程名「{candidate}」：{byName.Summary}");
             }
         }
 
         try
         {
-            var lower = text.ToLowerInvariant();
+            // 关键词要剥掉扩展名才能匹配标题与镜像名（理由见 ProcessHelper.TitleMatchKey）。
+            // 这一路兜底是把游戏本体（YuanShen / StarRail）清掉的**唯一**手段 ——
+            // 按名字 taskkill 用的是中文关键词，注定打不中英文镜像名。
+            var lower = ProcessHelper.TitleMatchKey(text);
+            if (lower.Length == 0)
+            {
+                return;
+            }
+
             var currentPid = Environment.ProcessId;
             foreach (var proc in Process.GetProcesses())
             {
@@ -964,7 +1230,7 @@ public sealed class ScriptRunner
                         || (!string.IsNullOrEmpty(title) && title.ToLowerInvariant().Contains(lower)))
                     {
                         Log($"按目标进程关键词兜底结束：{text} -> PID {proc.Id} ({procName})");
-                        ProcessHelper.TerminatePidTree(proc.Id);
+                        KillWithFallback(proc.Id, procName);
                     }
                 }
                 catch
@@ -1180,6 +1446,47 @@ public sealed class ScriptRunner
             _currentProcesses.Remove(process);
             _processNamesByPid.Remove(process.Pid);
             _tasksByPid.Remove(process.Pid);
+        }
+    }
+
+    /// <summary>
+    /// 停止时的统一收尾兜底 —— 保证"停止请求到达的那一刻，无论在哪个阶段，目标进程都会被清掉"。
+    ///
+    /// 为什么必须有它：把整轮关键词清理从 <see cref="RequestStop"/> 里挪走之后（那里同步跑十几秒
+    /// 会把工作线程堵死，进度与心跳全停），清理就只剩 RunOneTask 主循环里那一条路径。
+    /// 而「启动确认 / 接力确认阶段被停止打断」走的是另一条分支 —— 那里只放弃等待、不做清理，
+    /// 于是目标进程（包括提权 / 单实例接力起来的新实例）会活下来。
+    ///
+    /// 范围按**已登记过的任务**定（<c>_tasksByPid</c>）：只覆盖真的启动过的那批，
+    /// 免得顺手把用户另外开着、只是关键词撞上的程序也杀掉。紧急停止才扩大到全部任务配置。
+    ///
+    /// 幂等：正常路径上 RunOneTask 已经清过、并把进程解除登记了，这里会拿到空集合直接返回，
+    /// 不会白跑一遍十几秒的清理。
+    /// </summary>
+    private void CleanupForStop()
+    {
+        List<IMonitoredProcess> processes;
+        List<TaskConfig> tasks;
+        lock (_sync)
+        {
+            processes = new List<IMonitoredProcess>(_currentProcesses);
+            tasks = _emergencyRequested
+                ? new List<TaskConfig>(_tasks)
+                : DistinctTasks(_tasksByPid.Values);
+        }
+
+        if (processes.Count == 0 && tasks.Count == 0)
+        {
+            return;
+        }
+
+        var label = _emergencyRequested ? "紧急停止" : "停止执行";
+        Log($"{label}：统一收尾 —— 复查 {tasks.Count} 个任务配置、{processes.Count} 个登记进程。");
+        CleanupProcessesForTasks(tasks, processes, label, includeWindowKeywords: true);
+
+        if (_emergencyRequested)
+        {
+            Log("紧急停止处理已执行。");
         }
     }
 

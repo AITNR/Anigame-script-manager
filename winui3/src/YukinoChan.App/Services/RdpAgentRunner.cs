@@ -32,6 +32,17 @@ public sealed class RdpAgentRunner
     /// </summary>
     private const int PulseIntervalSeconds = 60;
 
+    /// <summary>
+    /// 检查 stop.json 的间隔（毫秒）。
+    ///
+    /// 为什么是独立的 500ms 循环而不是继续挂在"每秒计时回调"上：
+    /// 计时回调只在任务主循环里触发，一旦执行流程停在启动确认、接力确认、并发组等待、
+    /// 或者正在做进程清理这些不产生计时回调的地方，停止请求就没人读 ——
+    /// 真机日志里"点停止后代理卡住不动"就是这么来的。
+    /// 独立循环与任务执行并行，任何阶段都能在半秒内响应。
+    /// </summary>
+    private const int StopPollIntervalMs = 500;
+
     /// <summary>指定指令桥目录的命令行前缀。</summary>
     public const string BridgeArgumentPrefix = RdpTargets.BridgeArgumentPrefix;
 
@@ -105,6 +116,10 @@ public sealed class RdpAgentRunner
             _stats,
             _command.EnableTimeoutScreenshot);
 
+        // 停止监听与任务执行并行：不再依赖计时回调，任何阶段都能响应"停"。
+        using var stopWatch = new CancellationTokenSource();
+        StartStopWatcher(runner, stopWatch.Token);
+
         // 上次回传脉搏时的秒数（任务切换时会归零）
         var lastPulseSecond = 0;
 
@@ -133,9 +148,6 @@ public sealed class RdpAgentRunner
 
         runner.ElapsedChanged += (_, seconds) =>
         {
-            // 每秒一拍：顺手看一眼主控端有没有请求停止（桥文件是两个会话之间唯一的通信手段）
-            CheckStopRequest(runner);
-
             Update(status =>
             {
                 // 任务切换时 ScriptRunner 会把计时归零（RaiseElapsed(0)），脉搏也要跟着重置，
@@ -217,28 +229,39 @@ public sealed class RdpAgentRunner
 
         try
         {
-            await runner.RunAsync().ConfigureAwait(false);
+            try
+            {
+                await runner.RunAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                var message = $"代理执行异常：{ex.Message}";
+                Log(message);
+                Append(RdpEventKinds.Finished, message, abnormal: true);
+                FinishSession("error", message);
+                return;
+            }
+
+            var summary = hadError ? "已完成（有异常）" : "全部任务已完成";
+            // 异常与否写进事件：常驻代理会把 Phase 从 done 迅速改成 idle，主控端来不及看相位，
+            // 只能靠这条 Finished 事件的 abnormal 标记来区分"正常结束"与"有异常结束"。
+            Append(RdpEventKinds.Finished, summary, abnormal: hadError);
+
+            if (_command.NotifyOnAllDone)
+            {
+                NotificationService.ShowSummary("雪乃酱：远程任务结束", summary);
+            }
+
+            FinishSession(hadError ? "done" : "done", summary);
         }
-        catch (Exception ex)
+        finally
         {
-            var message = $"代理执行异常：{ex.Message}";
-            Log(message);
-            Append(RdpEventKinds.Finished, message, abnormal: true);
-            FinishSession("error", message);
-            return;
+            // 停掉监听循环；并把桥里可能残留的停止请求清掉 ——
+            // 本轮已经结束，留着它只会污染下一轮（主控端靠 CommandId 兜底能挡住误停，
+            // 但排障时看到一份没人消费的 stop.json 非常误导）。
+            stopWatch.Cancel();
+            _bridge.ClearStop();
         }
-
-        var summary = hadError ? "已完成（有异常）" : "全部任务已完成";
-        // 异常与否写进事件：常驻代理会把 Phase 从 done 迅速改成 idle，主控端来不及看相位，
-        // 只能靠这条 Finished 事件的 abnormal 标记来区分"正常结束"与"有异常结束"。
-        Append(RdpEventKinds.Finished, summary, abnormal: hadError);
-
-        if (_command.NotifyOnAllDone)
-        {
-            NotificationService.ShowSummary("雪乃酱：远程任务结束", summary);
-        }
-
-        FinishSession(hadError ? "done" : "done", summary);
     }
 
     private void FinishSession(string phase, string summary)
@@ -324,12 +347,37 @@ public sealed class RdpAgentRunner
     }
 
     /// <summary>
-    /// 响应主控端的停止请求（stop.json）。
+    /// 起一条与任务执行并行的停止监听。
     ///
     /// 为什么必须由 Agent 主动查：任务跑在目标会话里，主控端点了「停止执行」之后
     /// 没有任何办法直接去停那个进程 —— 两条会话之间只有桥文件能通信。
-    /// 这里挂在每秒的计时回调上，代价可以忽略。
+    /// 为什么不放进"每秒计时回调"：那个回调只在任务主循环里触发，
+    /// 一旦执行流程停在启动确认 / 接力确认 / 并发组等待 / 进程清理等分支，
+    /// 停止请求就没人读，主控端只能干等（真机日志里已经复现过）。
     /// </summary>
+    private void StartStopWatcher(ScriptRunner runner, CancellationToken token)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    CheckStopRequest(runner);
+                    await Task.Delay(StopPollIntervalMs, token).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // 本轮执行结束，正常退出
+            }
+            catch (Exception ex)
+            {
+                Log($"停止监听循环异常退出：{ex.Message}");
+            }
+        });
+    }
+
     private void CheckStopRequest(ScriptRunner runner)
     {
         if (!_bridge.IsStopRequested(_command.Id, out var emergency))
@@ -338,7 +386,8 @@ public sealed class RdpAgentRunner
         }
 
         // 先把请求文件清掉：ScriptRunner 停止是异步收尾，还会再跑一会儿，
-        // 不清掉的话后面每一拍都会重复触发。
+        // 不清掉的话后面每一拍都会重复触发；已经处理过的也要清 ——
+        // 否则（例如先点停止、再点紧急停止）后一份请求会永远躺在桥目录里没人收。
         _bridge.ClearStop();
 
         if (_stopHandled)
@@ -351,6 +400,15 @@ public sealed class RdpAgentRunner
         var text = emergency ? "收到紧急停止请求，立即结束任务。" : "收到停止请求，正在收尾。";
         Log(text);
         Append(RdpEventKinds.Log, text);
+
+        // 立刻把相位切成 stopping 作为"回执"：主控端据此知道请求已送达，不再盲目重发，
+        // 也能在界面上把状态固定成"正在收尾"，而不是继续显示"运行中"。
+        Update(status =>
+        {
+            status.Phase = "stopping";
+            status.StatusText = text;
+            return status;
+        });
 
         if (emergency)
         {

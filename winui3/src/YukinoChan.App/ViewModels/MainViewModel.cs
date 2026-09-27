@@ -800,7 +800,7 @@ public sealed class MainViewModel : ObservableObject
                 continue;
             }
 
-            session.MarkStopping(emergency);
+            session.MarkStopping(emergency, DateTimeOffset.Now);
             sent++;
         }
 
@@ -3992,6 +3992,8 @@ public sealed class MainViewModel : ObservableObject
             return;
         }
 
+        var now = DateTimeOffset.Now;
+
         foreach (var session in _sessions.ToList())
         {
             if (!session.IsRemote || !session.HasCommand)
@@ -3999,13 +4001,16 @@ public sealed class MainViewModel : ObservableObject
                 continue;
             }
 
+            // 停止请求可能没送达（代理刚好卡在清理里、或压根是旧版本），按间隔补发
+            ServiceStopRequest(session, now);
+
             var status = session.Bridge.TryReadStatus();
             if (status is null)
             {
                 continue;
             }
 
-            var tick = session.Tick(status, DateTimeOffset.Now, RdpSettings.ConnectTimeoutSeconds);
+            var tick = session.Tick(status, now, RdpSettings.ConnectTimeoutSeconds);
             ApplyChannelTick(session, tick);
         }
 
@@ -4087,7 +4092,80 @@ public sealed class MainViewModel : ObservableObject
         if (tick.CompletionSignaled)
         {
             ReportSessionCompletion(session, tick);
+            return;
         }
+
+        // ⑤ 停止请求的回执：代理把相位切成 stopping，或回了"收到停止请求"的日志事件。
+        //    拿到回执就不再重发，界面文案也跟着切成"正在收尾"。
+        if (session.StopPending && !session.StopAcked && StopAckedBy(tick))
+        {
+            session.MarkStopAcked();
+            AppendLog($"[通道：{tag}] 目标会话的代理已收到停止请求，正在收尾。");
+        }
+
+        // ⑥ 已请求停止但还没收尾：把文案固定住 ——
+        //    否则下一拍就会被代理回传的"运行中"盖回去，用户以为点击没生效。
+        if (session.StopPending)
+        {
+            session.SetStatusText(session.StopAcked
+                ? "已请求停止，目标会话正在收尾…"
+                : "已请求停止，等待目标会话确认…");
+        }
+    }
+
+    /// <summary>
+    /// 本拍是否表明目标代理已经收到停止请求。
+    /// 相位 stopping 是代理的显式回执；日志事件是兜底（老一点的实现只写事件不改相位）。
+    /// </summary>
+    private static bool StopAckedBy(RdpChannelTick tick)
+    {
+        if (string.Equals(tick.Status?.Phase, "stopping", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        foreach (var ev in tick.NewEvents)
+        {
+            if (ev.Message.Contains("收到停止请求") || ev.Message.Contains("收到紧急停止请求"))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 停止请求没回执就补发 —— 之前只写一次 stop.json，之后完全不管：
+    /// 代理漏读（正卡在清理里）、或还是旧副本（不认识 stop.json）时，
+    /// 用户点完「停止执行」就再也等不到任何反馈，只能干看着任务继续跑。
+    /// </summary>
+    private void ServiceStopRequest(RdpChannelSession session, DateTimeOffset now)
+    {
+        if (!session.NeedsStopResend(now))
+        {
+            return;
+        }
+
+        if (!session.WriteStop(session.StopEmergency, out var error))
+        {
+            AppendChannelLog(session, $"⚠ 重发停止请求失败：{error}");
+            return;
+        }
+
+        session.MarkStopResent(now);
+        var tag = session.DisplayName;
+        var times = session.StopSendCount;
+
+        if (session.StopGiveUp)
+        {
+            AppendLog($"[通道：{tag}] ⚠ 已下发 {times} 次停止请求，目标会话的代理始终没有回执。");
+            AppendLog($"[通道：{tag}] 大概率是目标会话里跑的还是旧版本代理（不认识 stop.json）。");
+            AppendLog($"[通道：{tag}] 请在设置页重新「部署会话代理」，然后注销目标账户再重新连接一次。");
+            return;
+        }
+
+        AppendLog($"[通道：{tag}] 停止请求暂未收到目标代理的回执（第 {times} 次下发），继续等待。");
     }
 
     /// <summary>

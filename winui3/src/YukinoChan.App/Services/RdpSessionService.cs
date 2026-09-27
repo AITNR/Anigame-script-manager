@@ -1015,8 +1015,10 @@ public static class RdpSessionService
         refusal = string.Empty;
 
         // 代理正在跑任务就别动它。它那路桥的目录按目标账户派生（见 RdpChannelPaths）。
+        // "stopping" 也算忙：停止请求已收到、正在按三层顺序杀进程，
+        // 这时候把代理杀掉，目标进程就没人收了（用户会看到"停了但游戏还在"）。
         var status = RdpBridge.For(RdpChannelPaths.Resolve(null, targetUser)).TryReadStatus();
-        if (status is not null && status.Phase == "running")
+        if (status is not null && status.Phase is "running" or "stopping")
         {
             // 光看 "running" 三个字不够：注销目标账户会把代理一起杀掉，而 status.json
             // 会永远停在最后一帧的 running（见 RdpModels 里那段说明）。要是就这么拦着，
@@ -1025,8 +1027,9 @@ public static class RdpSessionService
             if (heartbeat.Parsed && !heartbeat.IsStale)
             {
                 var who = string.IsNullOrWhiteSpace(targetUser) ? "目标账户" : targetUser;
-                refusal = $"{who} 的会话代理正在执行任务，现在部署会打断它。"
-                    + "请等任务结束、或先点「停止执行」，然后再部署。";
+                var busy = status.Phase == "stopping" ? "正在按停止请求收尾" : "正在执行任务";
+                refusal = $"{who} 的会话代理{busy}，现在部署会打断它。"
+                    + "请等它彻底空下来，或先点「停止执行」，然后再部署。";
                 return false;
             }
         }

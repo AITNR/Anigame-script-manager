@@ -8,6 +8,44 @@ using System.Text;
 namespace YukinoChan.Services;
 
 /// <summary>
+/// 一次"结束进程"尝试的结果。
+///
+/// 为什么要它：原来 <c>taskkill</c> 是"发了就算完"，输出与退出码全丢，
+/// 日志里只留下"正在结束 X"。于是**没人能判断到底关掉没有** ——
+/// 用户对着还在跑的游戏，只能猜是没杀掉还是画面没刷新（真机踩过）。
+/// </summary>
+public sealed class ProcessTerminateResult
+{
+    public ProcessTerminateResult(bool ok, int exitCode, string detail)
+    {
+        Ok = ok;
+        ExitCode = exitCode;
+        Detail = detail ?? string.Empty;
+    }
+
+    /// <summary>是否确认结束（或本来就不存在）。</summary>
+    public bool Ok { get; }
+
+    /// <summary>taskkill 的退出码；托管 API 或跳过时为 -1。</summary>
+    public int ExitCode { get; }
+
+    /// <summary>失败原因 / 补充说明（taskkill 的 stderr 或托管 API 的异常消息）。</summary>
+    public string Detail { get; }
+
+    public static ProcessTerminateResult Skip(string reason) => new(true, -1, reason);
+
+    /// <summary>日志用的一行摘要。</summary>
+    public string Summary => Ok
+        ? (Detail.Length > 0 ? "已结束（" + Detail + "）" : "已结束")
+        : (Detail.Length > 0 ? $"未能结束：{Detail}" : "未能结束");
+
+    /// <summary>失败时给用户的下一步建议 —— 绝大多数情况是权限/自我保护。</summary>
+    public string Hint => Ok
+        ? string.Empty
+        : "目标进程可能带反作弊保护、或属于更高权限的运行环境，普通权限结束不了。";
+}
+
+/// <summary>
 /// 进程 / 窗口探测与清理。
 /// 对应 Python 版 ScriptRunnerWorker 中的 tasklist / EnumWindows / taskkill 逻辑。
 /// </summary>
@@ -246,6 +284,27 @@ public static class ProcessHelper
         return false;
     }
 
+    /// <summary>
+    /// 关键词 → 用于匹配**窗口标题 / 镜像名**的键（小写、已剥扩展名）。
+    ///
+    /// 为什么必须剥：镜像名（<c>ProcessName</c>）本来就不带 <c>.exe</c>，
+    /// 窗口标题是「原神」「星穹铁道」这种人类可读文本也不会带 ——
+    /// 而游戏本体的真实镜像名往往是英文（原神 = <c>YuanShen</c>、崩铁 = <c>StarRail</c>），
+    /// 按名字 <c>taskkill /IM</c> 注定失败，**只剩按窗口标题兜底这一条路**能把游戏清掉。
+    /// 拿带扩展名的原始关键词去比标题（「原神.exe」vs「原神」）会让这条路整个失效。
+    /// </summary>
+    public static string TitleMatchKey(string? keyword)
+    {
+        var text = (keyword ?? string.Empty).Trim();
+        if (text.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        var name = Path.GetFileNameWithoutExtension(text).Trim();
+        return (name.Length == 0 ? text : name).ToLowerInvariant();
+    }
+
     /// <summary>按窗口标题关键词收集窗口所属 PID。</summary>
     public static List<int> WindowPidsByKeyword(string keyword)
     {
@@ -307,26 +366,109 @@ public static class ProcessHelper
         return titles;
     }
 
-    /// <summary>按镜像名结束进程树：taskkill /IM /T /F。</summary>
-    public static void TerminateProcessName(string processName)
+    /// <summary>按镜像名结束进程树：taskkill /IM /T /F。返回结果用于日志回执。</summary>
+    public static ProcessTerminateResult TerminateProcessName(string processName)
     {
         if (string.IsNullOrWhiteSpace(processName))
         {
-            return;
+            return ProcessTerminateResult.Skip("进程名为空");
         }
 
-        RunHidden("taskkill", $"/IM \"{processName}\" /T /F", 10000);
+        var result = RunHidden("taskkill", $"/IM \"{processName}\" /T /F", 10000);
+        return new ProcessTerminateResult(result.Ok, result.ExitCode, result.Detail);
     }
 
-    /// <summary>按 PID 结束进程树：taskkill /PID /T /F。</summary>
-    public static void TerminatePidTree(int pid)
+    /// <summary>按 PID 结束进程树：taskkill /PID /T /F。返回结果用于日志回执。</summary>
+    public static ProcessTerminateResult TerminatePidTree(int pid)
     {
         if (pid <= 0)
         {
-            return;
+            return ProcessTerminateResult.Skip("PID 无效");
         }
 
-        RunHidden("taskkill", $"/PID {pid} /T /F", 10000);
+        var result = RunHidden("taskkill", $"/PID {pid} /T /F", 10000);
+        return new ProcessTerminateResult(result.Ok, result.ExitCode, result.Detail);
+    }
+
+    /// <summary>
+    /// 结束进程树的**带降级**版本：taskkill 不成就换托管 API。
+    ///
+    /// 为什么需要降级：taskkill /F 对**带内核级自我保护的游戏**（原神 / 星穹铁道的反作弊驱动）
+    /// 会直接拒绝访问，而 taskkill 的失败是静默的 —— 日志里只留下"正在结束"，
+    /// 用户对着还在跑的游戏根本判断不出到底关了没有（真机踩过）。
+    /// 托管 API 失败时会抛出真实原因（拒绝访问等），能明确写进日志。
+    /// </summary>
+    public static ProcessTerminateResult TerminateProcessTree(int pid)
+    {
+        if (pid <= 0)
+        {
+            return ProcessTerminateResult.Skip("PID 无效");
+        }
+
+        var viaTaskkill = TerminatePidTree(pid);
+        if (viaTaskkill.Ok)
+        {
+            return viaTaskkill;
+        }
+
+        try
+        {
+            using var process = Process.GetProcessById(pid);
+            process.Kill(entireProcessTree: true);
+            process.WaitForExit(3000);
+            return new ProcessTerminateResult(true, -1, "taskkill 被拒，改用托管 API 结束成功");
+        }
+        catch (ArgumentException)
+        {
+            // 查不到这个 PID = 它已经退出了，按成功处理
+            return new ProcessTerminateResult(true, -1, "进程已不存在");
+        }
+        catch (Exception ex)
+        {
+            var detail = viaTaskkill.Detail.Length > 0 ? $"{viaTaskkill.Detail}；" : string.Empty;
+            return new ProcessTerminateResult(false, -1, $"{detail}托管 API 也失败：{ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 给指定进程的所有可见顶层窗口发 WM_CLOSE —— 走游戏自己的"正常退出"流程。
+    ///
+    /// 为什么要这条：对带反作弊保护的游戏，强制结束进程会被驱动拦下；
+    /// 但"请求窗口关闭"是应用层消息，走的是游戏自己的退出逻辑，反作弊不拦。
+    /// 代价是有些游戏会弹一个"确认退出"对话框，需要用户或后续按键确认。
+    /// </summary>
+    public static int CloseMainWindowsByPid(int pid)
+    {
+        if (pid <= 0)
+        {
+            return 0;
+        }
+
+        var closed = 0;
+        try
+        {
+            NativeMethods.EnumWindows((hwnd, _) =>
+            {
+                NativeMethods.GetWindowThreadProcessId(hwnd, out var owner);
+                if (owner != (uint)pid || !NativeMethods.IsWindowVisible(hwnd))
+                {
+                    return true;
+                }
+
+                if (NativeMethods.PostMessageW(hwnd, NativeMethods.WmClose, IntPtr.Zero, IntPtr.Zero))
+                {
+                    closed++;
+                }
+
+                return true;
+            }, IntPtr.Zero);
+        }
+        catch
+        {
+            // 枚举失败不影响主流程
+        }
+
+        return closed;
     }
 
     /// <summary>向当前前台窗口发送一次 Enter（仅用于用户明确确认过的启动确认框）。</summary>
@@ -349,7 +491,14 @@ public static class ProcessHelper
         return builder.Length > 0 ? builder.ToString() : null;
     }
 
-    private static void RunHidden(string fileName, string arguments, int timeoutMs)
+    /// <summary>
+    /// 跑一个隐藏外部命令并**把结果带回来**。
+    ///
+    /// 为什么必须带回来：以前这里把 taskkill 的输出与退出码全丢掉、异常也吞掉，
+    /// 于是"结束失败"和"结束成功"在日志里长得一模一样。
+    /// 输出用异步读，避免子进程写满管道缓冲导致 WaitForExit 卡住（经典的死锁写法）。
+    /// </summary>
+    private static (bool Ok, int ExitCode, string Detail) RunHidden(string fileName, string arguments, int timeoutMs)
     {
         try
         {
@@ -362,20 +511,60 @@ public static class ProcessHelper
                 RedirectStandardError = true,
             };
 
+            // taskkill 在中文系统上按 ANSI/OEM 输出，用 UTF-8 读会乱码
+            var encoding = ConsoleTextEncoding();
+            startInfo.StandardOutputEncoding = encoding;
+            startInfo.StandardErrorEncoding = encoding;
+
             using var process = Process.Start(startInfo);
             if (process is null)
             {
-                return;
+                return (false, -1, $"无法启动 {fileName}");
             }
+
+            var stdout = process.StandardOutput.ReadToEndAsync();
+            var stderr = process.StandardError.ReadToEndAsync();
 
             if (!process.WaitForExit(timeoutMs))
             {
-                process.Kill(true);
+                try
+                {
+                    process.Kill(true);
+                }
+                catch
+                {
+                    // 忽略：超时进程杀不掉也不该影响调用方
+                }
+
+                return (false, -1, $"{fileName} 超时（>{timeoutMs}ms）");
             }
+
+            var text = ((stderr.Result ?? string.Empty) + (stdout.Result ?? string.Empty)).Trim();
+            text = text.Replace("\r", " ").Replace("\n", " ").Trim();
+            if (text.Length > 300)
+            {
+                text = text[..300];
+            }
+
+            return (process.ExitCode == 0, process.ExitCode, text);
+        }
+        catch (Exception ex)
+        {
+            return (false, -1, ex.Message);
+        }
+    }
+
+    /// <summary>取控制台命令的文本编码（中文系统 = CP936）；取不到就退回 UTF-8。</summary>
+    private static Encoding ConsoleTextEncoding()
+    {
+        try
+        {
+            return Encoding.GetEncoding(936);
         }
         catch
         {
-            // taskkill 对不存在的进程会返回非零退出码，忽略即可
+            // 未注册 CodePagesEncodingProvider 时 GetEncoding(936) 会抛，退回默认
+            return Encoding.UTF8;
         }
     }
 

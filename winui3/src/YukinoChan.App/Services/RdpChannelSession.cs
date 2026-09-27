@@ -71,6 +71,16 @@ public sealed class RdpChannelSession
     /// <summary>界面事件列表的保留条数（与改造前一致）。</summary>
     public const int MaxEventLines = 200;
 
+    /// <summary>
+    /// 停止请求没收到回执时的重发间隔。
+    /// 代理每 500ms 查一次 stop.json，正常半秒内就该回执；
+    /// 5 秒足够覆盖"代理刚好卡在清理里"这类抖动，又不至于让用户等太久。
+    /// </summary>
+    public static readonly TimeSpan StopResendInterval = TimeSpan.FromSeconds(5);
+
+    /// <summary>停止请求最多下发几次（含首次）。超了就认定目标代理不认识 stop.json。</summary>
+    public const int StopResendMaxSends = 5;
+
     private readonly RdpBridge _bridge;
     private long _lastEventSeq;
     private bool _staleReported;
@@ -144,6 +154,26 @@ public sealed class RdpChannelSession
     /// <summary>"跑完了"这件事是否已经收尾（保证一轮指令只收尾一次）。</summary>
     public bool CompletionReported => _completionReported;
 
+    // ---------------- 停止请求的投递状态 ----------------
+
+    /// <summary>主控端已经下发过停止请求、且还没到收尾那一刻。</summary>
+    public bool StopPending { get; private set; }
+
+    /// <summary>下发的是紧急停止（true）还是常规停止（false）。</summary>
+    public bool StopEmergency { get; private set; }
+
+    /// <summary>最近一次下发停止请求的时刻（重发计时的起点）。</summary>
+    public DateTimeOffset? StopRequestedAt { get; private set; }
+
+    /// <summary>已经下发了几次（含首次）。</summary>
+    public int StopSendCount { get; private set; }
+
+    /// <summary>目标会话的代理已经回执"收到停止请求"。</summary>
+    public bool StopAcked { get; private set; }
+
+    /// <summary>重发到上限仍无回执 —— 目标代理多半是旧版本，不再白费力气。</summary>
+    public bool StopGiveUp { get; private set; }
+
     public string ElapsedText => FormatHelper.FormatSeconds(ElapsedSeconds);
 
     public string TaskDisplay => string.IsNullOrEmpty(CurrentTask) ? "－" : CurrentTask;
@@ -174,6 +204,7 @@ public sealed class RdpChannelSession
         _staleReported = false;
         _awaitingLogged = false;
         _completionReported = false;
+        ResetStopTracking();
     }
 
     /// <summary>
@@ -195,6 +226,18 @@ public sealed class RdpChannelSession
         _awaitingLogged = false;
         _completionReported = false;
         CommandId = null;
+        ResetStopTracking();
+    }
+
+    /// <summary>清掉"停止请求投递状态"（新一轮指令、或本轮已经收尾时调用）。</summary>
+    private void ResetStopTracking()
+    {
+        StopPending = false;
+        StopEmergency = false;
+        StopRequestedAt = null;
+        StopSendCount = 0;
+        StopAcked = false;
+        StopGiveUp = false;
     }
 
     /// <summary>
@@ -252,6 +295,7 @@ public sealed class RdpChannelSession
     {
         _completionReported = true;
         CommandId = null;
+        ResetStopTracking();
     }
 
     // ---------------- 轮询 ----------------
@@ -406,9 +450,49 @@ public sealed class RdpChannelSession
         return true;
     }
 
-    /// <summary>把当前状态同步成"已停止"（停止请求已下发、等代理收尾时用）。</summary>
-    public void MarkStopping(bool emergency)
+    /// <summary>
+    /// 记下一次停止请求的投递（首次由「停止执行」按钮触发，之后由重发逻辑调用）。
+    /// 界面文案同步成"等待收尾"，让用户立刻看到点击有了着落。
+    /// </summary>
+    public void MarkStopping(bool emergency, DateTimeOffset now)
     {
+        StopPending = true;
+        StopEmergency = emergency;
+        StopRequestedAt = now;
+        StopSendCount++;
         StatusText = emergency ? "已请求紧急停止…" : "已请求停止…";
+    }
+
+    /// <summary>目标会话的代理回执了（相位 stopping / 收到停止的日志事件）。</summary>
+    public void MarkStopAcked()
+    {
+        StopAcked = true;
+        StatusText = StopEmergency ? "已请求紧急停止，目标会话正在收尾…" : "已请求停止，目标会话正在收尾…";
+    }
+
+    /// <summary>记一次重发。</summary>
+    public void MarkStopResent(DateTimeOffset now)
+    {
+        StopRequestedAt = now;
+        StopSendCount++;
+
+        // 到了上限还收不到回执，基本可以断定目标代理不认识 stop.json ——
+        // 通常是 ProgramData 里那份代理副本还是旧的（改过代理代码后没重新部署）。
+        if (StopSendCount >= StopResendMaxSends)
+        {
+            StopGiveUp = true;
+        }
+    }
+
+    /// <summary>是否该再补发一次停止请求（没回执、没放弃、没到次数上限、间隔已到）。</summary>
+    public bool NeedsStopResend(DateTimeOffset now)
+    {
+        if (!StopPending || StopAcked || StopGiveUp || StopRequestedAt is null)
+        {
+            return false;
+        }
+
+        return StopSendCount < StopResendMaxSends
+            && now - StopRequestedAt.Value >= StopResendInterval;
     }
 }
