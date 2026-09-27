@@ -120,19 +120,60 @@ jobs:
         run: |
           & .\.vcpkg\vcpkg.exe install "freerdp[client]:x64-windows" --clean-after-build
 
+      - name: 保存 vcpkg 依赖缓存
+        # 位置要紧：放在编译之前 —— 万一编译失败，这 10 分钟的依赖也不会白装
+        if: steps.native-cache.outputs.cache-hit != 'true' && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        continue-on-error: true # 并发跑时可能被别人抢先存了，不该因此判红
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .vcpkg/installed
+            .vcpkg/downloads
+          key: vcpkg-${{ env.VCPKG_COMMIT }}-x64-windows
+
       - name: CMake 配置 + 编译 ycn_rdp
         if: steps.native-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          # runner 的 VS 版本会变（2022 / 2026…），从 cmake 支持的生成器里挑最新的那个
-          $gen = cmake --help |
-            Select-String -Pattern '(Visual Studio \d{2} \d{4})' -AllMatches |
+          # 拾生成器要按「VS 大版本」对齐，不能按字符串顺序取 ——
+          # `cmake --help` 里最老的（Visual Studio 14 2015）反而排在最后，
+          # 而那个版本压根没装 MSBuild，一律失败（CI 首次就是这么挂的）。
+          $cands = cmake --help |
+            Select-String -Pattern 'Visual Studio (\d{2}) (\d{4})' -AllMatches |
             ForEach-Object { $_.Matches } |
-            ForEach-Object { $_.Groups[1].Value } |
-            Select-Object -Last 1
-          if (-not $gen) { throw 'runner 上找不到 Visual Studio 生成器（需要 VS + C++ 工作负载）' }
-          Write-Host "使用生成器：$gen"
+            ForEach-Object {
+              [pscustomobject]@{
+                Gen   = $_.Groups[0].Value.Trim()
+                Major = [int]$_.Groups[1].Value
+                Year  = [int]$_.Groups[2].Value
+              }
+            } |
+            Sort-Object Year -Descending
 
+          if (-not $cands) { throw 'runner 上没有任何 Visual Studio 生成器' }
+
+          # 首选：vswhere 报出来的、真正装了 C++ 工具的那套 VS
+          $gen = $null
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (Test-Path $vswhere) {
+            $vsVer = & $vswhere -latest -products * `
+              -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+              -property installationVersion
+            if ($vsVer) {
+              $vsMajor = [int]($vsVer -split '\.')[0]
+              $hit = $cands | Where-Object { $_.Major -eq $vsMajor } | Select-Object -First 1
+              if ($hit) { $gen = $hit.Gen }
+              Write-Host "vswhere 报告装好 C++ 工具的 VS 大版本：$vsMajor"
+            }
+          }
+
+          # 兜底：取年份最新的那个
+          if (-not $gen) {
+            $gen = ($cands | Select-Object -First 1).Gen
+            Write-Host '::warning::vswhere 没给出结论，退回"最新年份"的生成器'
+          }
+
+          Write-Host "使用生成器：$gen"
           $inst = (Resolve-Path '.vcpkg/installed/x64-windows').Path
           cmake -S winui3/src/YukinoChan.RdpNative -B .native-build -G $gen -A x64 "-DVCPKG_INST=$inst"
           cmake --build .native-build --config Release --parallel
@@ -151,16 +192,6 @@ jobs:
           $dll = '.native-out/ycn_rdp.dll'
           if (-not (Test-Path $dll)) { throw "原生层没有产出 $dll" }
           Write-Host ("ycn_rdp.dll 大小 {0:N0} 字节" -f (Get-Item $dll).Length)
-
-      - name: 保存 vcpkg 依赖缓存
-        if: steps.native-cache.outputs.cache-hit != 'true' && steps.vcpkg-cache.outputs.cache-hit != 'true'
-        continue-on-error: true # 并发跑时可能被别人抢先存了，不该因此判红
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            .vcpkg/installed
-            .vcpkg/downloads
-          key: vcpkg-${{ env.VCPKG_COMMIT }}-x64-windows
 
       - name: 保存原生层产物缓存
         if: steps.native-cache.outputs.cache-hit != 'true'
