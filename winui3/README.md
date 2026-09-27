@@ -88,6 +88,66 @@ cp -rf <临时目录>/. bin/x64/Release/net8.0-windows10.0.19041.0/
 
 也可以用 Visual Studio 2022 打开 `winui3/YukinoChan.sln` 直接 F5。
 
+### 原生层 `ycn_rdp.dll`（内嵌画面必需）
+
+应用依赖 `src/YukinoChan.RdpNative/` 编出来的 `ycn_rdp.dll`（FreeRDP 桥接层）。
+**它是构建产物、没有入库**，所以全新克隆之后要自己编一次：
+
+```bash
+# 1) 装 vcpkg 的 freerdp（一次，之后复用）——需要 VS 2022 + C++ 工作负载
+git clone https://github.com/microsoft/vcpkg _tools/vcpkg
+_tools/vcpkg/bootstrap-vcpkg.bat -disableMetrics
+_tools/vcpkg/vcpkg.exe install "freerdp[client]:x64-windows"
+
+# 2) 编桥接层（CMakeLists 默认从 <仓库>/../_tools/vcpkg 找依赖，也可用 -DVCPKG_INST 覆盖）
+cmake -S winui3/src/YukinoChan.RdpNative -B winui3/src/YukinoChan.RdpNative/build \
+      -G "Visual Studio 17 2022" -A x64 \
+      "-DVCPKG_INST=<vcpkg>/installed/x64-windows"
+cmake --build winui3/src/YukinoChan.RdpNative/build --config Release
+```
+
+产物是 `build/Release/ycn_rdp.dll` + 一批 FreeRDP 运行库（freerdp3 / winpr3 / openssl / zlib / cjson…），
+`dotnet build` 会把它们自动拷进应用输出目录。
+
+> 开发时对着的是 **FreeRDP 3.32.0**（对应 vcpkg 提交 `10541e31`）。CI 钉的就是这个提交；
+> 换版本要重新真机验收内嵌画面。
+
+### GitHub Actions：自动编译 / 测试版 / 正式版
+
+`.github/workflows/` 下三个工作流：
+
+| 工作流 | 触发 | 做什么 |
+|---|---|---|
+| `build.yml` | 被后两个调用（自身不触发） | 编原生层（两级缓存）→ 编应用 → 打包 + 自检 → 上传产物 |
+| `ci.yml` | push 到 main / PR / 手动 | 编译；**main 上还会自动发「测试版」**（滚动 tag `test-build`，预发布） |
+| `release.yml` | **只能手动**（Actions → 正式版发布 → Run workflow） | 按填写的版本号打正式 tag `vX.Y.Z` 并发正式 Release |
+
+- 测试版每次都把 `test-build` 连 tag 一起重建 —— tag 永远指向最新提交，资产不会越堆越多；
+- 正式版会校验版本号格式，并**拒绝复用已存在的 tag**；可勾「先存为草稿」再公开；
+- 首次 CI 要现编 FreeRDP（约 20-40 分钟），之后命中缓存只需一两分钟；
+  **只改 C# 时原生层整段直接跳过**（按 `ycn_rdp.c/h` + `CMakeLists.txt` 的哈希缓存）。
+
+**在本机复现 CI 的编译与打包**（产物落在 `dist/`，命令与工作流里逐字一致）：
+
+```bash
+# 1) 编译（前提：原生层产物已在 src/YukinoChan.RdpNative/build/Release/）
+dotnet build winui3/src/YukinoChan.App/YukinoChan.App.csproj -c Release -p:Platform=x64 -p:OutDir=ci-build/
+
+# 2) 自包含发布（省掉这一步就是框架依赖包 —— 体积小，但目标机要装 .NET 8 运行时）
+dotnet publish winui3/src/YukinoChan.App/YukinoChan.App.csproj -c Release -p:Platform=x64 \
+  -r win-x64 --self-contained true -o ci-publish
+
+# 3) 打包 + 自检（缺 .pri / XBF / FreeRDP 运行库会直接报错退出）
+python winui3/tools/package_release.py --build-dir ci-build --publish-dir ci-publish \
+  --assets assets --out dist --name YukinoChan-winui3-2.1.0-x64 --version 2.1.0
+```
+
+> **为什么不能直接发 `dotnet publish` 的输出**：WinUI 3 的 `YukinoChan.pri` 与各页面的 `*.xbf`
+> 只存在于 **build** 输出（`Views/`、`Themes/`、`embed/`），FreeRDP 那批运行库也是 ——
+> publish 目录里没有它们（实测），缺了程序起不来 / 页面打不开。
+> `package_release.py` 负责把两边合并、补上 `assets/` 素材与使用说明，
+> 并在关键文件缺失或误打包 `config.json` 时**直接失败**（宁可 CI 红，也不发一个跑不起来的包）。
+
 ---
 
 ## 四、目录结构
@@ -95,7 +155,8 @@ cp -rf <临时目录>/. bin/x64/Release/net8.0-windows10.0.19041.0/
 ```text
 winui3/
 ├─ YukinoChan.sln                   # 只包含 YukinoChan.App
-├─ docs/                            # 设计文档（内嵌 RDP / 多会话通道计划书）
+├─ docs/                            # 设计文档（内嵌 RDP / 多会话通道 / 菜单重构计划书）
+├─ tools/package_release.py         # 发布打包：合并 build+publish 输出、补素材、关键文件自检
 ├─ src/YukinoChan.RdpNative/        # 原生 FreeRDP 封装（ycn_rdp.c / .h + CMakeLists.txt）
 │  └─ ycn_rdp.c                     #   多会话上限 YCN_MAX_SESSIONS = 8
 └─ src/YukinoChan.App/

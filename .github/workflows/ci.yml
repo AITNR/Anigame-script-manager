@@ -1,0 +1,92 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# CI：每次提交自动编译，main 上再自动发一个「滚动测试版」
+#
+#   · main 分支 push      → 编译 + 打包 + 更新滚动测试版（Release tag: test-build，prerelease）
+#   · Pull Request        → 只编译，产物挂在 Actions 的 artifact 里（不动 Release）
+#   · 手动 workflow_dispatch → 同上，按 main 的行为走
+#
+# 滚动测试版的做法：每次先删掉旧的 test-build（连同 tag），再按最新提交重建 ——
+# 这样 tag 始终指向最新提交、资产永远是本次这一份，不会越堆越多。
+# 正式版走 release.yml（手动触发），与这里互不影响。
+# ═══════════════════════════════════════════════════════════════════════════════
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的旧构建没意义，直接取消
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: 编译
+    uses: ./.github/workflows/build.yml
+    with:
+      self_contained: true # 测试版也做成解压即用（只比框架依赖大 30MB 左右）
+
+  test-build:
+    name: 发布测试版（滚动）
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 需要建 / 删 Release
+    steps:
+      - name: 取回发布包
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: dist
+
+      - name: 更新滚动测试版
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: test-build
+          ZIP: ${{ needs.build.outputs.zip_name }}
+          VER: ${{ needs.build.outputs.version }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+
+          # 连 tag 一起删掉，让它跟着最新提交走（不存在就忽略）
+          gh release delete "$TAG" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          cat > notes.md <<EOF
+          ## 自动构建的测试版
+
+          | 项 | 值 |
+          |---|---|
+          | 版本 | \`$VER\` |
+          | 提交 | \`$SHORT_SHA\` |
+          | 分支 | \`$GITHUB_REF_NAME\` |
+          | 构建 | [run #$GITHUB_RUN_NUMBER]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) |
+
+          ### 本次提交
+
+          \`\`\`
+          $COMMIT_MSG
+          \`\`\`
+
+          ### 怎么用
+
+          1. 下载下面的 \`$ZIP\`，解压到**固定目录**（不要放临时目录，日志会写在它旁边）；
+          2. 双击 \`YukinoChan.exe\`，首次运行自动生成 \`config.json\`；
+          3. 这是自动构建、**未经过完整体验验收** —— 只用来抢先试新功能，别拿它跑重要的一轮任务。
+
+          > 需要正式版请等 \`正式版发布\` 工作流手动发。
+          EOF
+
+          gh release create "$TAG" "dist/$ZIP" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "测试版（滚动更新）· $VER" \
+            --notes-file notes.md \
+            --prerelease

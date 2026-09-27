@@ -55,3 +55,11 @@ obj/
 
 # Test cache
 .pytest_cache/
+
+# GitHub Actions / 本地复现 CI 的中间目录（winui3/README.md §三）
+ci-build/
+ci-publish/
+.native-out/
+.native-build/
+.vcpkg/
+.nuget/

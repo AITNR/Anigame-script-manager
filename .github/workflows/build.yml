@@ -1,0 +1,265 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 可复用构建流程（被 ci.yml / release.yml 调用，自身不直接触发）
+#
+# 为什么要分「原生层」和「打包」两个 job：
+#   1) 应用依赖 YukinoChan.RdpNative 编出来的 ycn_rdp.dll（FreeRDP 桥接层），
+#      而那是**构建产物、没有入库**（.gitignore 掉了），GitHub 上必须自己编；
+#   2) 它走 vcpkg 源码编译 FreeRDP，首次约 20-40 分钟 —— 所以做了两级缓存：
+#        · 原生源码（CMakeLists / ycn_rdp.c / ycn_rdp.h）没变 → 直接复用 DLL，跳过 vcpkg；
+#        · 源码变了 → vcpkg 依赖仍在缓存里，只需要重新编译链接（分钟级）。
+#
+# 打包为什么不直接用 `dotnet publish` 的输出：
+#   WinUI 3 的 YukinoChan.pri 与各页面的 *.xbf（Views/、Themes/、embed/）只在 **build**
+#   输出里；FreeRDP 那批运行库（freerdp3 / winpr3 / openssl / zlib / cjson）也是。
+#   publish 目录里没有它们（实测），缺了程序起不来 / 页面打不开 ——
+#   所以由 winui3/tools/package_release.py 把两边合并并做关键文件自检。
+#
+# 想在本机复现同一套流程（已实测）：见 winui3/README.md §三「GitHub Actions」。
+# ═══════════════════════════════════════════════════════════════════════════════
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 写入程序集版本（如 2.1.0，可带 -dev.1 这类后缀）。留空 = 2.0.0-dev.<run_number>
+        type: string
+        required: false
+        default: ''
+      self_contained:
+        description: 是否把 .NET 运行时也打进包（true = 解压即用；false = 需要目标机装 .NET 8 运行时）
+        type: boolean
+        required: false
+        default: true
+      retention_days:
+        description: 中间产物（未发布时）保留天数
+        type: number
+        required: false
+        default: 14
+    outputs:
+      version:
+        description: 实际使用的版本号（已去掉 v 前缀）
+        value: ${{ jobs.package.outputs.version }}
+      zip_name:
+        description: 生成的 ZIP 文件名
+        value: ${{ jobs.package.outputs.zip_name }}
+      artifact_name:
+        description: 上传的 artifact 名（供调用方下载）
+        value: ${{ jobs.package.outputs.artifact_name }}
+
+permissions:
+  contents: read
+
+env:
+  # 本机开发环境用的 vcpkg 就钉在这个提交上，它的 freerdp port 正是 3.32.0
+  # （YukinoChan.RdpNative 是对着这个版本开发与真机验证的）。
+  # 换提交 = 换 FreeRDP 版本，必须重新真机验收内嵌画面。
+  VCPKG_COMMIT: 10541e317a660f4165ba4ac2851ab54a8d4577b1
+  NUGET_PACKAGES: ${{ github.workspace }}\.nuget
+
+jobs:
+  # ────────────────────────────────────────────────────────────── 原生层
+  native:
+    name: 原生层（FreeRDP 桥接 DLL）
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 还原原生层产物缓存（只改 C# 时直接复用，整步跳过）
+        id: native-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .native-out
+          key: ycn-native-${{ runner.os }}-${{ hashFiles('winui3/src/YukinoChan.RdpNative/CMakeLists.txt', 'winui3/src/YukinoChan.RdpNative/ycn_rdp.c', 'winui3/src/YukinoChan.RdpNative/ycn_rdp.h') }}
+
+      - name: 取 vcpkg（钉住提交，不用 vcpkg 默认分支）
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          git init .vcpkg
+          git -C .vcpkg remote add origin https://github.com/microsoft/vcpkg.git
+
+          # 优先：按提交号直接浅取（最快）
+          git -C .vcpkg fetch --depth 1 origin $env:VCPKG_COMMIT
+          $ok = ($LASTEXITCODE -eq 0)
+          if ($ok) { git -C .vcpkg checkout --detach FETCH_HEAD; $ok = ($LASTEXITCODE -eq 0) }
+
+          # 兜底：blobless 克隆（慢一点，但不怕按提交号取不到）
+          if (-not $ok) {
+            Write-Host '按提交号浅取失败 —— 退回 blobless 克隆'
+            Remove-Item .vcpkg -Recurse -Force -ErrorAction SilentlyContinue
+            git clone --filter=blob:none --no-checkout https://github.com/microsoft/vcpkg.git .vcpkg
+            git -C .vcpkg fetch --depth 1 origin $env:VCPKG_COMMIT
+            if ($LASTEXITCODE -eq 0) { git -C .vcpkg checkout --detach FETCH_HEAD }
+          }
+
+          if (-not (Test-Path '.vcpkg/ports/freerdp/vcpkg.json')) { throw '取不到 vcpkg 的 freerdp port' }
+
+          # 版本守卫：开发环境是对着 3.32.0 验证的，换版本必须重新真机验收画面
+          $port = Get-Content '.vcpkg/ports/freerdp/vcpkg.json' -Raw | ConvertFrom-Json
+          if ($port.version -ne '3.32.0') {
+            Write-Host "::warning::vcpkg 里的 freerdp 版本是 $($port.version)，与本机验证过的 3.32.0 不同 —— 画面相关改动需重新真机验收"
+          }
+
+          & .\.vcpkg\bootstrap-vcpkg.bat -disableMetrics
+
+      - name: 还原 vcpkg 依赖缓存
+        id: vcpkg-cache
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .vcpkg/installed
+            .vcpkg/downloads
+          key: vcpkg-${{ env.VCPKG_COMMIT }}-x64-windows
+
+      - name: 安装 freerdp[client]（首次约 20-40 分钟，之后命中缓存秒过）
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          & .\.vcpkg\vcpkg.exe install "freerdp[client]:x64-windows" --clean-after-build
+
+      - name: CMake 配置 + 编译 ycn_rdp
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          # runner 的 VS 版本会变（2022 / 2026…），从 cmake 支持的生成器里挑最新的那个
+          $gen = cmake --help |
+            Select-String -Pattern '(Visual Studio \d{2} \d{4})' -AllMatches |
+            ForEach-Object { $_.Matches } |
+            ForEach-Object { $_.Groups[1].Value } |
+            Select-Object -Last 1
+          if (-not $gen) { throw 'runner 上找不到 Visual Studio 生成器（需要 VS + C++ 工作负载）' }
+          Write-Host "使用生成器：$gen"
+
+          $inst = (Resolve-Path '.vcpkg/installed/x64-windows').Path
+          cmake -S winui3/src/YukinoChan.RdpNative -B .native-build -G $gen -A x64 "-DVCPKG_INST=$inst"
+          cmake --build .native-build --config Release --parallel
+
+      - name: 收集 DLL
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force .native-out | Out-Null
+          Copy-Item .native-build/Release/*.dll .native-out/ -Force
+          Get-ChildItem .native-out | Select-Object Name, @{n = 'MB'; e = { [math]::Round($_.Length / 1MB, 1) } }
+
+      - name: 校验原生层产物
+        shell: pwsh
+        run: |
+          $dll = '.native-out/ycn_rdp.dll'
+          if (-not (Test-Path $dll)) { throw "原生层没有产出 $dll" }
+          Write-Host ("ycn_rdp.dll 大小 {0:N0} 字节" -f (Get-Item $dll).Length)
+
+      - name: 保存 vcpkg 依赖缓存
+        if: steps.native-cache.outputs.cache-hit != 'true' && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        continue-on-error: true # 并发跑时可能被别人抢先存了，不该因此判红
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .vcpkg/installed
+            .vcpkg/downloads
+          key: vcpkg-${{ env.VCPKG_COMMIT }}-x64-windows
+
+      - name: 保存原生层产物缓存
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .native-out
+          key: ycn-native-${{ runner.os }}-${{ hashFiles('winui3/src/YukinoChan.RdpNative/CMakeLists.txt', 'winui3/src/YukinoChan.RdpNative/ycn_rdp.c', 'winui3/src/YukinoChan.RdpNative/ycn_rdp.h') }}
+
+      - name: 上传原生层产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-dlls
+          path: .native-out/*.dll
+          retention-days: ${{ inputs.retention_days }}
+          if-no-files-found: error
+
+  # ────────────────────────────────────────────────────────────── 编译 + 打包
+  package:
+    name: 编译 + 打包
+    needs: native
+    runs-on: windows-latest
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      zip_name: ${{ steps.pack.outputs.zip_name }}
+      artifact_name: app-package
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 计算版本号
+        id: ver
+        shell: pwsh
+        run: |
+          $v = "${{ inputs.version }}".Trim().TrimStart('v', 'V')
+          if ([string]::IsNullOrEmpty($v)) { $v = "2.0.0-dev.${{ github.run_number }}" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "本次版本：$v"
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 还原 NuGet 缓存
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.NUGET_PACKAGES }}
+          key: nuget-${{ runner.os }}-${{ hashFiles('winui3/src/YukinoChan.App/YukinoChan.App.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      # 放回 csproj 期望的位置：它按 ..\YukinoChan.RdpNative\build\Release\ 拷 ycn_rdp.dll，
+      # 而 CopyRdpRuntimeDlls 目标也从这里取 FreeRDP 运行库
+      - name: 取原生层产物
+        uses: actions/download-artifact@v4
+        with:
+          name: native-dlls
+          path: winui3/src/YukinoChan.RdpNative/build/Release
+
+      - name: 编译（Release / x64）
+        shell: pwsh
+        run: |
+          $outDir = (Join-Path $env:GITHUB_WORKSPACE 'ci-build').Replace('\', '/') + '/'
+          dotnet build winui3/src/YukinoChan.App/YukinoChan.App.csproj `
+            -c Release -p:Platform=x64 -p:Version=${{ steps.ver.outputs.version }} -p:OutDir=$outDir
+
+      - name: 发布（自包含，带 .NET 运行时）
+        if: inputs.self_contained
+        shell: pwsh
+        run: |
+          $pub = Join-Path $env:GITHUB_WORKSPACE 'ci-publish'
+          dotnet publish winui3/src/YukinoChan.App/YukinoChan.App.csproj `
+            -c Release -p:Platform=x64 -p:Version=${{ steps.ver.outputs.version }} `
+            -r win-x64 --self-contained true -o $pub
+
+      - name: 打包（补齐 .pri / XBF / FreeRDP 运行库 / 看板娘素材 + 自检）
+        id: pack
+        shell: pwsh
+        run: |
+          $name = "YukinoChan-winui3-${{ steps.ver.outputs.version }}-x64"
+          $argv = @(
+            'winui3/tools/package_release.py',
+            '--build-dir', 'ci-build',
+            '--assets', 'assets',
+            '--out', 'dist',
+            '--name', $name,
+            '--version', '${{ steps.ver.outputs.version }}'
+          )
+          if ('${{ inputs.self_contained }}' -eq 'true') { $argv += @('--publish-dir', 'ci-publish') }
+          python @argv
+          "zip_name=$name.zip" >> $env:GITHUB_OUTPUT
+
+      - name: 上传发布包
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-package
+          path: dist/*.zip
+          retention-days: ${{ inputs.retention_days }}
+          if-no-files-found: error

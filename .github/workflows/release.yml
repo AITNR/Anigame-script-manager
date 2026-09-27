@@ -1,0 +1,121 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 正式版发布 —— **只能手动触发**（Actions 页面选这个工作流 → Run workflow）
+#
+# 与 CI 的分工：
+#   · ci.yml      → 每次提交自动发「测试版」（滚动 tag test-build，预发布）
+#   · 本工作流     → 人工决定版本号，打正式 tag（vX.Y.Z）并发布正式 Release
+#
+# 用法：
+#   1. 在 main 上确认要发的提交（工作流用的是你在 Run workflow 里选的分支/提交）；
+#   2. 填版本号（如 v2.1.0，前缀 v 会自动去掉）、发布说明（留空则用 GitHub 自动生成的变更列表）；
+#   3. 想先看看再公开就勾「先存为草稿」——草稿不会出现在 Releases 页面上；
+#   4. 跑完去 Releases 页面确认。
+#
+# 版本号会被同时写进程序集版本（-p:Version=）与 ZIP 文件名，方便对号入座。
+# ═══════════════════════════════════════════════════════════════════════════════
+name: 正式版发布
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（如 v2.1.0；前缀 v 可省）'
+        type: string
+        required: true
+      notes:
+        description: '发布说明（留空 = 自动生成变更列表）'
+        type: string
+        required: false
+        default: ''
+      draft:
+        description: '先存为草稿（不立即公开）'
+        type: boolean
+        required: false
+        default: false
+      self_contained:
+        description: '打包成自包含（解压即用；取消勾选则体积小但需要 .NET 8 运行时）'
+        type: boolean
+        required: false
+        default: true
+
+# 同一时间只允许一次发布，避免两个 tag 交叉
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: 编译
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ inputs.version }}
+      self_contained: ${{ inputs.self_contained }}
+      retention_days: 7
+
+  release:
+    name: 发布 Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 取回发布包
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: dist
+
+      - name: 校验版本号与 tag 是否可用
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # 版本号已经在 build 里去掉了 v 前缀，这里只校验形如 2.1.0 / 2.1.0-rc1
+          if ! printf '%s' "$VER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::版本号格式不对：$VER（应形如 2.1.0 或 2.1.0-rc1）"
+            exit 1
+          fi
+
+          # tag 存在就停下：正式版号不该被复用（宁可人工去删）
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VER" >/dev/null 2>&1; then
+            echo "::error::tag v$VER 已存在 —— 换个版本号，或先手动删掉那个 tag / release"
+            exit 1
+          fi
+
+          echo "将发布 v$VER"
+
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ needs.build.outputs.version }}
+          ZIP: ${{ needs.build.outputs.zip_name }}
+          NOTES: ${{ inputs.notes }}
+          DRAFT: ${{ inputs.draft }}
+        run: |
+          set -euo pipefail
+
+          args=(--repo "$GITHUB_REPOSITORY" --title "雪乃酱 WinUI 3 版 v$VER")
+
+          if [ -n "$NOTES" ]; then
+            printf '%s\n' "$NOTES" > notes.md
+            args+=(--notes-file notes.md)
+          else
+            # 让 GitHub 按 PR / 提交自动生成变更列表
+            args+=(--generate-notes)
+          fi
+
+          if [ "$DRAFT" = "true" ]; then
+            args+=(--draft)
+          else
+            args+=(--latest)
+          fi
+
+          gh release create "v$VER" "dist/$ZIP" "${args[@]}"
+
+          echo "✅ 已发布 v$VER" >> "$GITHUB_STEP_SUMMARY"
+          echo "资产：$ZIP（自包含：${{ inputs.self_contained }}）" >> "$GITHUB_STEP_SUMMARY"
