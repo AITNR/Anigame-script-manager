@@ -16,22 +16,7 @@
 
 ## 一、为什么要重写
 
-原 Python 版约 5600 行，界面层基于 PySide6（Qt），存在几个绕不开的问题：
-
-| 问题 | 说明 |
-|---|---|
-| 分发体积 | PyInstaller 打包后体积大，冷启动慢 |
-| 主题割裂 | Qt 自定义皮肤与 Windows 11 系统主题、Mica、亚克力、系统强调色无法统一 |
-| DPI 表现 | 高 DPI / 多显示器缩放下偶发错位 |
-| 依赖链 | Python + PySide6 + psutil 运行时依赖，用户环境差异大 |
-
-改成 C# + Windows App SDK（WinUI 3）之后：
-
-- 原生 Fluent Design，直接吃到 **Mica 背景、系统主题、系统强调色、圆角、阴影**
-- 自定义标题栏（`ExtendsContentIntoTitleBar`），无 Qt 那种边框割裂感
-- `PerMonitorV2` 高 DPI，多显示器拖拽不糊不错位
-- 单一 exe 直接运行（unpackaged 模式），无需 Python 运行时
-- 进程/窗口监控直接用 Win32 P/Invoke，少一层 Python ↔ 系统调用开销
+重写动机与新旧对照表已归档到 [docs/migration-from-python.md](docs/migration-from-python.md#一为什么要重写)。
 
 ---
 
@@ -241,104 +226,13 @@ winui3/
 
 ## 五、移植对照表
 
-### 核心逻辑
-
-| Python（原版） | C# / WinUI 3（新版） | 说明 |
-|---|---|---|
-| `core/core.py` | `Services/ScriptRunner.cs` | 任务执行引擎全量移植 |
-| `core/runtime/runtime_watchdog.py` | `Services/ScriptRunner.cs` + `ProcessHelper.cs` | 监控循环内联合并 |
-| `ui/main_window.py` | `Views/MainWindow.xaml(.cs)` + `ViewModels/MainViewModel.cs` | 拆分为视图 + 视图模型 |
-| `ui/cards.py` | `Views/HomePage.xaml` | 卡片式首页 |
-| `ui/card_scene.py` | `Views/MascotPanel.xaml` + `Services/MascotService.cs` | 看板娘面板 |
-| `config.json` | `Models/AppConfig.cs` / `TaskConfig.cs` | 键名完全一致，双向兼容 |
-| `app_dir()` 路径回溯 | `Services/AppPaths.cs` | 同样向上回溯找 `config.json` / `assets` |
-| `shlex.split(posix=False)` | `CommandLine.Split` | 用 `CommandLineToArgvW` 实现等价语义 |
-| `subprocess` + `runas` | `Services/MonitoredProcess.cs` | `ShellExecuteExW(runas)` 提权 |
-
-### 界面
-
-| 原 Qt 组件 | WinUI 3 对应 |
-|---|---|
-| `QMainWindow` | `Window` + `NavigationView` + `Frame` |
-| `QListWidget` | `ListView` |
-| `QStackedWidget` | `Frame.Navigate` |
-| `QGroupBox` | `Expander` |
-| `QSpinBox` / `QDoubleSpinBox` | `NumberBox` |
-| `QCheckBox` | `ToggleSwitch` / `CheckBox` |
-| `QMessageBox` | `ContentDialog` |
-| `QSystemTrayIcon` 提示 | `InfoBar` |
-| 自定义标题栏 | `ExtendsContentIntoTitleBar` + `SetTitleBar` |
-| — | **新增**：`MicaBackdrop` 背景 |
-
-### 主题
-
-原 6 套 Qt 皮肤（`yukino` / `campus` / `fresh` / `fantasy` …）收敛为 WinUI 3 原生三档：
-
-| 值 | 含义 |
-|---|---|
-| `system` | 跟随系统（默认） |
-| `light` | 浅色 |
-| `dark` | 深色 |
-
-旧配置里的 `yukino` / `campus` / `fresh` / `fantasy` 仍会被识别为合法值并平滑降级为 **跟随系统**，不会报错、不会被强制改写。
+Python → C# 的逐项对照（核心逻辑 / 界面 / 主题）已归档到 [docs/migration-from-python.md](docs/migration-from-python.md#二移植对照表)。
 
 ---
 
 ## 六、已完整移植的执行语义
 
-以下行为与原 Python 版 **逐条对齐**，不是"看起来差不多"：
-
-**监控关键词优先级**
-
-```text
-window_keywords  >  process_keywords  >  legacy wait_mode  >  direct_process
-```
-
-**三层清理顺序**（超时 / 停止 / 紧急停止共用）
-
-```text
-启动脚本进程  →  目标进程关键词  →  游戏/扩展进程
-```
-
-**并发组**
-
-- `wait_all`：等组内全部任务完成
-- `wait_first`：组内任一完成即推进
-
-**超时动作**
-
-- `kill_and_continue`：杀进程后继续下一项
-- `skip_and_continue`：不杀进程，直接下一项
-- `stop_all`：停止整条任务链
-
-**监控循环**
-
-| 参数 | 值 |
-|---|---|
-| 监控目标连续消失宽限 | 15 秒 |
-| 监控目标出现截止 | 180 秒 |
-| 启动成功确认窗口 | 2 秒 |
-| 过早退出阈值 | 超时时间 / 6 |
-
-**看板娘状态机**
-
-- 状态：`idle` / `work` / `rest` / `error`
-- `error` 锁定：`15 秒 × 错误次数` 叠加后自动释放
-- 气泡优先级：`error 100` > `work 70` > `rest 50` > `guide 30` > `idle 20`
-- 素材目录：`assets/mascot/{state}.png` 或 `{state}_*.png`
-
-**日志**
-
-- 单文件上限按启动批次自动分配 `2026-05-26.log` / `(2)` / `(3)` …
-- 会话标记：`===== SESSION START : 任务名 =====` / `===== SESSION END : 任务名 =====`
-
-**其他**
-
-- 超时现场截图：`logs/screenshots/{session}_{HHmmss}_{task}_timeout_{before,after}_kill.png`
-- 异常报告：`logs/last_abnormal_report.json`，下次启动在首页 InfoBar 主动汇报
-- 开机自启动：HKCU `Software\Microsoft\Windows\CurrentVersion\Run`，值名「雪乃酱 / 二游脚本助手」
-- 自动关机：`shutdown /s /t {delay}`，倒计时对话框可取消（`shutdown /a`）
-- 快捷键：`F8` 停止执行，`Ctrl+Alt+F8` 紧急停止
+监控优先级、清理顺序、超时动作、看板娘状态机等逐条对齐清单已归档到 [docs/migration-from-python.md](docs/migration-from-python.md#三已完整移植的执行语义)。
 
 ---
 
@@ -696,7 +590,7 @@ prompt for credentials:i:0  # 凭据走凭据管理器，不弹输入框
 
 ---
 
-## 八、与 Python 版的关系
+## 八、数据目录
 
 | 用途 | 路径 | 说明 |
 |---|---|---|
@@ -711,28 +605,10 @@ Python + PySide6 版原先共用这几份数据；它已于 2026-09-28 从仓库
 
 ## 九、已知限制
 
-- **真机 GUI 验证尚未全覆盖**：构建环境在沙箱中无法启动 GUI，自动化部分靠 `dotnet build` + `_smoke`（751 项断言）；
-  多通道并行、内嵌画面、多画面同屏等交互需要在真机上逐项验收（清单见计划书 §10）。
-- **无 MSIX 打包**：unpackaged 模式直接跑 exe，如果需要商店分发要另建打包工程。
-- **主题降级**：原 6 套 Qt 皮肤不保留，统一为系统 / 浅色 / 深色。
-- **截图依赖 GDI+**：`System.Drawing.Common` 在 Windows 上可用，非 Windows 平台不支持（本工程本来就是 Windows-only）。
-- **多画面每页最多 4 路**：8 路画面同时渲染的 CPU / GPU 开销不可接受，所以网格按 2×2 分页（翻页，不是滚动）。
-- **弹出窗口没有独立入口**：画面弹成独立窗口后，要回去看它只能通过左侧菜单「会话通道」下该通道的子项；
-  窗口本身只有关闭按钮（关闭后画面自动回页面里那一格）。
-- **一次最多 8 条通道并行**（原生 `YCN_MAX_SESSIONS`）；超出的通道会被截断并明示原因。
-- **真断线告警最迟 ~90 秒**：心跳判定把启动宽限期上限放在 90 秒（避免把正常的登录 + 代理拉起误报成失联），
-  所以 90 秒内真掉线要到宽限期结束才会报。这是刻意的折中。
-- **桥的 `command.json` / `status.json` 仍是 PascalCase**：与 `config.json` 的全 snake_case 约定不一致（历史遗留，待统一）。
+已归档到 [docs/known-limits-and-roadmap.md](docs/known-limits-and-roadmap.md#已知限制)。
 
 ---
 
 ## 十、后续建议
 
-1. **真机验收多会话通道**：按计划书 §10 的清单逐项过（并行、停止、失联隔离、多画面、并发上限），
-   重点是「系统是否支持多会话」与「多通道能否真正同时推进」。
-2. 补齐 `docs/images/` 下 WinUI 3 版截图（尤其是会话通道页与多画面网格）。
-3. 视情况加 MSIX 打包工程（`WindowsPackageType=MSIX`）。
-4. 待办清理：桥的 `command.json` / `status.json` 改 snake_case；设置页主题切换重复弹对话框的异常；
-   设置页加「重置窗口位置」；无人使用的 P/Invoke 清理。
-5. 尚未做：内嵌会话的**剪贴板互通**（需专门的 FreeRDP 通道支持）。
-6. Python 版在 README 中明确标注 legacy。
+已归档到 [docs/known-limits-and-roadmap.md](docs/known-limits-and-roadmap.md#后续建议)。
