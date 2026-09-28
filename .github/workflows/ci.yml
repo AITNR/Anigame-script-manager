@@ -1,13 +1,20 @@
 # ═══════════════════════════════════════════════════════════════════════════════
-# CI：每次提交自动编译，main 上再自动发一个「滚动测试版」
+# CI：编译，并把**每一次编译**都留下一份独立归档
 #
-#   · main 分支 push      → 编译 + 打包 + 更新滚动测试版（Release tag: test-build，prerelease）
-#   · Pull Request        → 只编译，产物挂在 Actions 的 artifact 里（不动 Release）
-#   · 手动 workflow_dispatch → 同上，按 main 的行为走
+#   每次构建会得到一个自己的预发布 tag，资产不会被下一次覆盖：
+#     · PR         →  tag: pr-<PR号>-<构建号>
+#     · push / 手动 →  tag: build-<构建号>
+#   想回溯哪一版，就去 Releases 找对应的 tag 即可。
 #
-# 滚动测试版的做法：每次先删掉旧的 test-build（连同 tag），再按最新提交重建 ——
-# 这样 tag 始终指向最新提交、资产永远是本次这一份，不会越堆越多。
-# 正式版走 release.yml（手动触发），与这里互不影响。
+#   除此之外，main 分支的 push 还会额外把「test-build」这个滚动标签挪到最新的一份，
+#   给只想拿最新版的人一个固定入口（历史版本仍在各自的 build-* / pr-* 标签里）。
+#
+#   正式版依旧走 release.yml（手动触发），与本工作流互不干扰。
+#
+# 注意：
+#   · 归档 tag 用 run_number 区分；同一轮 run 重跑会先把同名那份删掉再建，保证不留重复。
+#   · fork 仓库来的 PR 拿不到写权限，会自动跳过归档（产物仍在 Actions 页面）。
+#   · 归档只增不减 —— 想瘦身就用 cleanup-builds.yml（手动触发，默认先演习）。
 # ═══════════════════════════════════════════════════════════════════════════════
 name: CI
 
@@ -17,10 +24,11 @@ on:
   pull_request:
   workflow_dispatch:
 
-# 同一分支的旧构建没意义，直接取消
+# 同一分支的多个提交排队跑，**不取消**：取消了那一版就没有归档了。
+# 代价是连续 push 时会排队；想省 minutes 就把下面改成 true。
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -32,13 +40,151 @@ jobs:
     with:
       self_contained: true # 测试版也做成解压即用（只比框架依赖大 30MB 左右）
 
-  test-build:
-    name: 发布测试版（滚动）
+  # ─────────────────────────────────── 每一次编译都归档一份
+  archive:
+    name: 归档本次构建
     needs: build
+    if: >-
+      needs.build.result == 'success' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 建 Release
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: 取回发布包
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: dist
+
+      - name: 计算归档标签
+        id: tag
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          RUN_NUM: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "pull_request" ]; then
+            tag="pr-${PR_NUM}-${RUN_NUM}"
+          else
+            tag="build-${RUN_NUM}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "::notice::本次构建的归档标签：$tag"
+
+      - name: 发布归档（预发布）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          ZIP: ${{ needs.build.outputs.zip_name }}
+          VER: ${{ needs.build.outputs.version }}
+          EVENT: ${{ github.event_name }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+
+          # 重跑同一轮 run 时 tag 会撞同名 —— 先删旧的（连 tag），保证留下来的是这一份
+          gh release delete "$TAG" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+
+          # PR 事件没有 head_commit.message，兜一句说明，免得说明里空一块
+          COMMIT_LINE="$COMMIT_MSG"
+          if [ -z "${COMMIT_LINE// /}" ]; then
+            COMMIT_LINE="$EVENT 事件触发（$GITHUB_REF_NAME）"
+          fi
+
+          if [ "$EVENT" = "pull_request" ]; then
+            TITLE="PR #$PR_NUM 构建 · $VER"
+            SOURCE_ROW="| 来源 | PR [#$PR_NUM]($PR_URL) $PR_TITLE |"
+          else
+            TITLE="CI 构建 #$GITHUB_RUN_NUMBER · $VER"
+            SOURCE_ROW="| 来源 | \`$GITHUB_REF_NAME\` 分支 push |"
+          fi
+
+          cat > notes.md <<EOF
+          ## 本次编译的归档
+
+          这是第 **$GITHUB_RUN_NUMBER** 次构建的产物，固定不变 —— 不会被后续提交覆盖。
+
+          | 项 | 值 |
+          |---|---|
+          | 版本 | \`$VER\` |
+          | 提交 | \`$SHORT_SHA\` |
+          $SOURCE_ROW
+          | 标签 | \`$TAG\` |
+          | 构建 | [run #$GITHUB_RUN_NUMBER]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) |
+
+          ### 本次提交
+
+          \`\`\`
+          EOF
+          # 提交信息里可能带 $ / 反引号 —— 单独按字面写入，别让它被 shell 再展开一遍
+          printf '%s\n' "$COMMIT_LINE" >> notes.md
+          cat >> notes.md <<EOF
+          \`\`\`
+
+          ### 怎么用
+
+          1. 下载 \`$ZIP\`，解压到**固定目录**（不要放临时目录，日志会写在它旁边）；
+          2. 双击 \`YukinoChan.exe\`，首次运行自动生成 \`config.json\`；
+          3. 自动构建、**未经完整体验验收** —— 只用来抢先试新功能，别拿它跑重要的一轮任务。
+
+          > 只想要最新版？看 \`test-build\` 标签（跟着 main 的最新提交滚动）。
+          > 正式版请等 \`正式版发布\` 工作流手动发。
+          EOF
+
+          gh release create "$TAG" "dist/$ZIP" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TITLE" \
+            --notes-file notes.md \
+            --prerelease
+
+          {
+            echo "## 归档完成"
+            echo ""
+            echo "- 标签：\`$TAG\`"
+            echo "- 资产：\`$ZIP\`"
+            echo "- 地址：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # fork 来的 PR 只能读，没法建 Release —— 单独说明一下，免得以为漏了
+  archive-skipped:
+    name: 归档（fork PR 跳过）
+    needs: build
+    if: >-
+      needs.build.result == 'success' &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - env:
+          ZIP: ${{ needs.build.outputs.zip_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          echo "::warning::这是 fork 仓库的 PR，GITHUB_TOKEN 只有读权限，无法创建 Release 归档；产物请到 Actions 页面下载（$ZIP）。" 
+          {
+            echo "## 归档已跳过"
+            echo ""
+            echo "fork 仓库的 PR 没有写权限，本次编译的 \`$ZIP\` 请到 [Actions 页面]($RUN_URL) 下载。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ─────────────────────────────────── 滚动标签：总是指向最新的一份
+  rolling:
+    name: 更新滚动测试版
+    needs: [build, archive]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
-      contents: write # 需要建 / 删 Release
+      contents: write
     steps:
       - name: 取回发布包
         uses: actions/download-artifact@v4
@@ -50,6 +196,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: test-build
+          ARCHIVE_TAG: ${{ needs.archive.outputs.tag }}
           ZIP: ${{ needs.build.outputs.zip_name }}
           VER: ${{ needs.build.outputs.version }}
           COMMIT_MSG: ${{ github.event.head_commit.message }}
@@ -61,19 +208,24 @@ jobs:
 
           SHORT_SHA="${GITHUB_SHA:0:7}"
           cat > notes.md <<EOF
-          ## 自动构建的测试版
+          ## 自动构建的测试版（滚动）
+
+          这个标签**总是指向 main 的最新一次编译**，内容会被下一次覆盖。
+          要回溯某一版，去 \`build-*\` / \`pr-*\` 标签里找（本次对应的固定归档是 \`$ARCHIVE_TAG\`）。
 
           | 项 | 值 |
           |---|---|
           | 版本 | \`$VER\` |
           | 提交 | \`$SHORT_SHA\` |
-          | 分支 | \`$GITHUB_REF_NAME\` |
+          | 固定归档 | [\`$ARCHIVE_TAG\`]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$ARCHIVE_TAG) |
           | 构建 | [run #$GITHUB_RUN_NUMBER]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) |
 
           ### 本次提交
 
           \`\`\`
-          $COMMIT_MSG
+          EOF
+          printf '%s\n' "$COMMIT_MSG" >> notes.md
+          cat >> notes.md <<EOF
           \`\`\`
 
           ### 怎么用
@@ -90,3 +242,5 @@ jobs:
             --title "测试版（滚动更新）· $VER" \
             --notes-file notes.md \
             --prerelease
+
+          echo "滚动测试版已更新到 \`$VER\`（固定归档 \`$ARCHIVE_TAG\`）" >> "$GITHUB_STEP_SUMMARY"

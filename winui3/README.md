@@ -100,15 +100,28 @@ cmake --build winui3/src/YukinoChan.RdpNative/build --config Release
 
 ### GitHub Actions：自动编译 / 测试版 / 正式版
 
-`.github/workflows/` 下三个工作流：
+`.github/workflows/` 下四个工作流：
 
 | 工作流 | 触发 | 做什么 |
 |---|---|---|
-| `build.yml` | 被后两个调用（自身不触发） | 编原生层（两级缓存）→ 编应用 → 打包 + 自检 → 上传产物 |
-| `ci.yml` | push 到 main / PR / 手动 | 编译；**main 上还会自动发「测试版」**（滚动 tag `test-build`，预发布） |
+| `build.yml` | 被其余调用（自身不触发） | 编原生层（两级缓存）→ 编应用 → 打包 + 自检 → 上传产物 |
+| `ci.yml` | push 到 main / PR / 手动 | 编译；**每一次编译都留一份独立归档**（预发布）；main 上再顺带刷新滚动 tag `test-build` |
 | `release.yml` | **只能手动**（Actions → 正式版发布 → Run workflow） | 按填写的版本号打正式 tag `vX.Y.Z` 并发正式 Release |
+| `cleanup-builds.yml` | **只能手动**（Actions → 清理归档构建） | 归档只增不减，用它按份数/天数瘦身（默认只演习） |
 
-- 测试版每次都把 `test-build` 连 tag 一起重建 —— tag 永远指向最新提交，资产不会越堆越多；
+### 每编译一次就多一份归档，怎么找
+
+CI 的每次构建都会建一个自己的预发布 tag，资产不会被下一次覆盖 —— 想回溯哪一版就去 Releases 找对应 tag：
+
+| 触发 | 归档 tag | 说明 |
+|---|---|---|
+| PR | `pr-<PR号>-<构建号>` | 未合入的代码也有可下载的成品；fork 仓库的 PR 因无权写 Release 会跳过归档（产物在 Actions 页面） |
+| push / 手动 | `build-<构建号>` | main 上每次合入都留一份 |
+
+`test-build` 是**滚动标签**：总是指向 main 最新一次编译，方便只想要最新版的人；它本身会被覆盖，要回溯请用上面的 `build-*`。
+因为要为每个版本单独留档，`concurrency` 设的是 `cancel-in-progress: false` —— 连续 push 会排队而不是互相取消（取消掉的那一版就没有归档了，想省 minutes 再改回 `true`）。
+
+归档只增不减，自包含包一份几十 MB —— 攒多了用 `cleanup-builds.yml` 瘦身：默认**只演习**（把待删清单打进 job summary），确认没问题再勾「真的删除」重跑；保留规则是「最近 N 份 **或** 最近 N 天内」满足其一即留，且只认预发布、只处理 `build-` / `pr-` 前缀，`test-build` 与正式版 `vX.Y.Z` 都不会被碰。
 - 正式版会校验版本号格式，并**拒绝复用已存在的 tag**；可勾「先存为草稿」再公开；
 - 首次 CI 要现编 FreeRDP（约 20-40 分钟），之后命中缓存只需一两分钟；
   **只改 C# 时原生层整段直接跳过**（按 `ycn_rdp.c/h` + `CMakeLists.txt` 的哈希缓存）。

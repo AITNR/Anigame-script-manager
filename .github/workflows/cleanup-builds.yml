@@ -1,0 +1,113 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 清理 CI 的归档构建 —— **只能手动触发**（Actions → 清理归档构建 → Run workflow）
+#
+# ci.yml 每编译一次就留一份固定归档，只增不减。自包含包一份几十 MB，
+# 攒多了会吃掉仓库存储 —— 需要瘦身时跑这个。
+#
+# 两道保险：
+#   1. 默认只演习（不勾「真的删除」），只把将被删的清单打进 job summary，先看清再动手；
+#   2. 双重保留规则 —— 最近 keep_count 份 **或** 最近 keep_days 天内，满足其一就留下。
+#
+# 只认**预发布**（prerelease），正式版 vX.Y.Z 一律不碰；也只处理指定前缀的 tag。
+# ═══════════════════════════════════════════════════════════════════════════════
+name: 清理归档构建
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep_count:
+        description: '至少保留最近多少份归档（按创建时间倒序）'
+        type: number
+        required: false
+        default: 10
+      keep_days:
+        description: '最近多少天内的一律保留'
+        type: number
+        required: false
+        default: 30
+      prefixes:
+        description: '只清理这些前缀的标签（逗号分隔）'
+        type: string
+        required: false
+        default: 'build-,pr-'
+      execute:
+        description: '真的删除（不勾选 = 只列出将被删除的清单）'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write # 删 Release / tag
+
+jobs:
+  clean:
+    name: 列出待清清单
+    runs-on: ubuntu-latest
+    steps:
+      - name: 计算待删清单
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP_COUNT: ${{ inputs.keep_count }}
+          KEEP_DAYS: ${{ inputs.keep_days }}
+          PREFIXES: ${{ inputs.prefixes }}
+          EXECUTE: ${{ inputs.execute }}
+        run: |
+          set -euo pipefail
+
+          pat="^($(printf '%s' "$PREFIXES" | tr -d ' ' | tr ',' '|'))"
+          cutoff=$(date -u -d "-${KEEP_DAYS} days" +%s)
+          echo "前缀：$pat / 保留最近 $KEEP_COUNT 份 / 保留最近 $KEEP_DAYS 天内"
+
+          # Releases API 本身是倒序的，这里再 sort 一道，防止顺序有变导致删错新的
+          all=()
+          while IFS= read -r line; do
+            [ -n "$line" ] && all+=("$line")
+          done < <(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+                    --jq '.[] | select(.prerelease) | "\(.tag_name) \(.created_at)"' \
+                  | grep -E "$pat" | sort -k2 -r)
+
+          echo "匹配到 ${#all[@]} 份归档"
+
+          del=()
+          i=0
+          for line in "${all[@]}"; do
+            tag="${line%% *}"
+            created="${line##* }"
+            i=$((i + 1))
+            ts=$(date -u -d "$created" +%s)
+            if [ "$i" -le "$KEEP_COUNT" ] || [ "$ts" -ge "$cutoff" ]; then
+              echo "  保留 #$i $tag（$created）"
+            else
+              echo "  待删 #$i $tag（$created）"
+              del+=("$tag")
+            fi
+          done
+
+          if [ ${#del[@]} -eq 0 ]; then
+            echo "::notice::没有需要清理的归档"
+            exit 0
+          fi
+
+          {
+            echo "## 归档清理清单"
+            echo ""
+            echo "- 规则：保留最近 $KEEP_COUNT 份 / 最近 $KEEP_DAYS 天内（满足其一即留）"
+            echo "- 命中 ${#del[@]} 份："
+            for tag in "${del[@]}"; do echo "  - \`$tag\`"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$EXECUTE" != "true" ]; then
+            echo "::notice::演习模式 —— 上面这些不会被删；勾选「真的删除」再跑一次才会动"
+            echo "> 演习模式，未实际删除。" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          for tag in "${del[@]}"; do
+            if gh release delete "$tag" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY"; then
+              echo "已删 $tag"
+            else
+              echo "::warning::删除 $tag 失败（继续处理其余）"
+            fi
+          done
+
+          echo "已删除 ${#del[@]} 份归档" >> "$GITHUB_STEP_SUMMARY"
