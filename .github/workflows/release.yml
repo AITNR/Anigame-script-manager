@@ -116,7 +116,12 @@ jobs:
             args+=(--latest)
           fi
 
-          gh release create "v$VER" "dist/$SETUP" "dist/$ZIP" "${args[@]}"
+          assets=("dist/$ZIP")
+          if [ -n "$SETUP" ] && [ -f "dist/$SETUP" ]; then
+            assets=("dist/$SETUP" "dist/$ZIP")
+          fi
+
+          gh release create "v$VER" "${assets[@]}" "${args[@]}"
 
           echo "✅ 已发布 v$VER" >> "$GITHUB_STEP_SUMMARY"
           echo "资产：$SETUP（安装版）、$ZIP（绿色版，自包含：${{ inputs.self_contained }}）" >> "$GITHUB_STEP_SUMMARY"

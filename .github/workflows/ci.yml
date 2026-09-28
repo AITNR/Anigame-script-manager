@@ -148,7 +148,13 @@ jobs:
           > 正式版请等 \`正式版发布\` 工作流手动发。
           EOF
 
-          gh release create "$TAG" "dist/$SETUP" "dist/$ZIP" \
+          # 安装版可能没编出来（那时 $SETUP 为空）—— 空着别传，否则 gh 会把 dist/ 目录当资产
+          assets=("dist/$ZIP")
+          if [ -n "$SETUP" ] && [ -f "dist/$SETUP" ]; then
+            assets=("dist/$SETUP" "dist/$ZIP")
+          fi
+
+          gh release create "$TAG" "${assets[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$TITLE" \
             --notes-file notes.md \
@@ -251,7 +257,12 @@ jobs:
           > 需要正式版请等 \`正式版发布\` 工作流手动发。
           EOF
 
-          gh release create "$TAG" "dist/$SETUP" "dist/$ZIP" \
+          assets=("dist/$ZIP")
+          if [ -n "$SETUP" ] && [ -f "dist/$SETUP" ]; then
+            assets=("dist/$SETUP" "dist/$ZIP")
+          fi
+
+          gh release create "$TAG" "${assets[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --title "测试版（滚动更新）· $VER" \
             --notes-file notes.md \

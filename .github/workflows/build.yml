@@ -46,6 +46,10 @@ on:
       artifact_name:
         description: 上传的 artifact 名（供调用方下载）
         value: ${{ jobs.package.outputs.artifact_name }}
+      # ⚠️ 少了这一条，调用方拿到的 setup_name 就是空字符串（job 级 output 不会自动透出）
+      setup_name:
+        description: 安装程序文件名（setup.exe；与绿色版 ZIP 一起上传）
+        value: ${{ jobs.package.outputs.setup_name }}
 
 permissions:
   contents: read
