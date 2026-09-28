@@ -16,7 +16,8 @@
 
         <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8">
             <Button Content="刷新统计" Click="OnRefresh" />
-            <Button Content="打开统计目录" Click="OnOpenFolder" />
+            <Button Content="打开本机统计目录" Click="OnOpenFolder" />
+            <Button Content="打开桥目录" Click="OnOpenBridgeFolder" />
         </StackPanel>
 
         <Border Grid.Row="2"
@@ -24,43 +25,59 @@
                 BorderThickness="1"
                 CornerRadius="8"
                 Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-            <ListView ItemsSource="{x:Bind VM.StatRows, Mode=OneWay}"
-                      SelectionMode="None">
-                <ListView.Header>
-                    <Grid Padding="14,10" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,0,0,1">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="3*" />
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="1.4*" />
-                            <ColumnDefinition Width="1.4*" />
-                            <ColumnDefinition Width="2.4*" />
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0" Text="脚本名称" FontWeight="SemiBold" />
-                        <TextBlock Grid.Column="1" Text="次数" FontWeight="SemiBold" TextAlignment="Center" />
-                        <TextBlock Grid.Column="2" Text="平均耗时" FontWeight="SemiBold" TextAlignment="Center" />
-                        <TextBlock Grid.Column="3" Text="最近耗时" FontWeight="SemiBold" TextAlignment="Center" />
-                        <TextBlock Grid.Column="4" Text="最近完成时间" FontWeight="SemiBold" />
-                    </Grid>
-                </ListView.Header>
-                <ListView.ItemTemplate>
-                    <DataTemplate x:DataType="vm:StatRow">
-                        <Grid Padding="14,6">
+            <Grid>
+                <ListView ItemsSource="{x:Bind VM.StatRows, Mode=OneWay}"
+                          SelectionMode="None">
+                    <ListView.Header>
+                        <Grid Padding="14,10" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,0,0,1">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="3*" />
+                                <ColumnDefinition Width="1.2*" />
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="1.4*" />
                                 <ColumnDefinition Width="1.4*" />
                                 <ColumnDefinition Width="2.4*" />
                             </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0" Text="{x:Bind Name}" TextTrimming="CharacterEllipsis" />
-                            <TextBlock Grid.Column="1" Text="{x:Bind Count}" TextAlignment="Center" />
-                            <TextBlock Grid.Column="2" Text="{x:Bind AverageText}" TextAlignment="Center" />
-                            <TextBlock Grid.Column="3" Text="{x:Bind LastText}" TextAlignment="Center" />
-                            <TextBlock Grid.Column="4" Text="{x:Bind LastTime}" Opacity="0.75" />
+                            <TextBlock Grid.Column="0" Text="脚本名称" FontWeight="SemiBold" />
+                            <TextBlock Grid.Column="1" Text="来源" FontWeight="SemiBold" />
+                            <TextBlock Grid.Column="2" Text="次数" FontWeight="SemiBold" TextAlignment="Center" />
+                            <TextBlock Grid.Column="3" Text="平均耗时" FontWeight="SemiBold" TextAlignment="Center" />
+                            <TextBlock Grid.Column="4" Text="最近耗时" FontWeight="SemiBold" TextAlignment="Center" />
+                            <TextBlock Grid.Column="5" Text="最近完成时间" FontWeight="SemiBold" />
                         </Grid>
-                    </DataTemplate>
-                </ListView.ItemTemplate>
-            </ListView>
+                    </ListView.Header>
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="vm:StatRow">
+                            <Grid Padding="14,6">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="3*" />
+                                    <ColumnDefinition Width="1.2*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="1.4*" />
+                                    <ColumnDefinition Width="1.4*" />
+                                    <ColumnDefinition Width="2.4*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="{x:Bind Name}" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Grid.Column="1" Text="{x:Bind Source}" TextTrimming="CharacterEllipsis" Opacity="0.85" />
+                                <TextBlock Grid.Column="2" Text="{x:Bind Count}" TextAlignment="Center" />
+                                <TextBlock Grid.Column="3" Text="{x:Bind AverageText}" TextAlignment="Center" />
+                                <TextBlock Grid.Column="4" Text="{x:Bind LastText}" TextAlignment="Center" />
+                                <TextBlock Grid.Column="5" Text="{x:Bind LastTime}" Opacity="0.75" />
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+
+                <!-- 空状态：任务交给会话通道执行时统计落在代理那边，全空时要解释清楚，别让人以为模块坏了 -->
+                <TextBlock Visibility="{x:Bind VM.StatsEmptyVisibility, Mode=OneWay}"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center"
+                           MaxWidth="460"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap"
+                           Opacity="0.7"
+                           Text="暂无统计数据。&#x000A;任务跑完一轮后，本机执行与各会话通道的耗时都会汇总到这里（每行右侧标注来源）。&#x000A;若刚更新过程序，请先重新部署会话代理（注销目标账户后重连）再跑一轮。" />
+            </Grid>
         </Border>
     </Grid>
 </Page>

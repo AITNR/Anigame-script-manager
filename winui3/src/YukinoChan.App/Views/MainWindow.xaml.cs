@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
 using Windows.Graphics;
 using YukinoChan.Services;
 using YukinoChan.ViewModels;
@@ -61,8 +62,8 @@ public sealed partial class MainWindow : Window
         VM.RequestNavigation += (_, tag) => NavigateTo(tag);
 
         // 会话通道（M4 / 计划书 §8.1）：「会话通道」是**父项**，下面挂子菜单 ——
-        //   父项本身        = 多画面页（全部通道的网格）；
-        //   子项「多画面」  = 同一个页面（给一个确定能点的入口）；
+        //   父项本身        = 只负责展开/收起子菜单，点击**不导航**（否则和子项重复）；
+        //   子项「多画面」  = 多画面页（全部通道的网格），唯一的菜单入口；
         //   子项「通道名」  = 该通道单独的画面页；
         //   子项「通道管理…」= 配置 / 凭据 / 部署代理 / 预检。
         // 子项按「配置里启用的通道 + 本轮在跑的通道」重建，配置一改就跟着变。
@@ -225,16 +226,22 @@ public sealed partial class MainWindow : Window
 
     /// <summary>
     /// 「通道管理…」子项 tag —— 配置 / 凭据 / 部署代理 / 预检（<see cref="Views.ChannelsPage"/>）。
-    /// 刻意不再叫 "channels"：那个 tag 现在是「会话通道」父项（多画面）的。
+    /// 刻意不再叫 "channels"：那个 tag 现在只是「会话通道」父项的标识，
+    /// 导航语义已让给「多画面」子项（<see cref="MultiViewTag"/>）。
     /// </summary>
     private const string ChannelMgmtTag = "channel-mgmt";
 
     /// <summary>
-    /// 「多画面」子项 tag。与父项同一个页面，但**标签不同** ——
-    /// 父项点击能否触发导航取决于 NavigationView 的内部处理（带子项时通常只展开），
-    /// 留一个确定能点、且选中态回显不会和父项打架的入口。
+    /// 「多画面（全部通道）」子项 tag —— 多画面页（全部通道网格）唯一的菜单入口。
+    /// 「会话通道」父项点击只展开/收起，不导航；旧 tag "channels" 在
+    /// <see cref="NavigateTo"/> 里统一映射到这个 tag（外部入口 + 选中态都对得上）。
     /// </summary>
     private const string MultiViewTag = "multiview";
+
+    /// <summary>子菜单展开时的级联入场动画节奏：单项 180ms、每项错开 25ms，总延迟封顶 120ms（通道多也不拖沓）。</summary>
+    private const int MenuEntranceDurationMs = 180;
+    private const int MenuEntranceStepMs = 25;
+    private const int MenuEntranceMaxDelayMs = 120;
 
     private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
@@ -300,6 +307,101 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
+    /// 「会话通道」父项被点击时切换子菜单的展开/收起。
+    ///
+    /// 为什么延后一拍再看状态：NavigationView 在部分版本里会自己切换 IsExpanded，
+    /// 有的版本不会（表现为"点不动"）。这里先记下点击时的状态，下一拍再比对 ——
+    /// 状态变了说明框架已经切过（不重复切，避免抵消成"点了没反应"），
+    /// 没变则由我们补上切换。两种行为下结果一致。
+    /// </summary>
+    private void ToggleChannelMenu()
+    {
+        var parent = ChannelsNavItem;
+        var wasExpanded = parent.IsExpanded;
+
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (parent.IsExpanded == wasExpanded)
+            {
+                parent.IsExpanded = !wasExpanded;
+            }
+
+            if (parent.IsExpanded)
+            {
+                PlayChannelMenuEntrance();
+            }
+        });
+    }
+
+    /// <summary>
+    /// 展开时给子项来一段级联入场动画（淡入 + 从上方轻微下滑）。
+    ///
+    /// 为什么要自己播：NavigationView 自带的只有面板高度撑开和 chevron 旋转，
+    /// 子项是"凭空出现"的，通道一多就很生硬。按索引错开、时长压到 180ms，不挡操作。
+    /// 只在用户点父项展开时播 —— 子菜单因会话变化重建（跑任务时很频繁）不播，否则菜单会一直闪。
+    /// </summary>
+    private void PlayChannelMenuEntrance()
+    {
+        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+        var duration = new Duration(TimeSpan.FromMilliseconds(MenuEntranceDurationMs));
+        var index = 0;
+
+        foreach (var entry in ChannelsNavItem.MenuItems)
+        {
+            if (entry is not UIElement element)
+            {
+                continue;
+            }
+
+            var delay = TimeSpan.FromMilliseconds(Math.Min(index * MenuEntranceStepMs, MenuEntranceMaxDelayMs));
+            index++;
+
+            var transform = new CompositeTransform { TranslateY = -12 };
+            element.RenderTransform = transform;
+            element.Opacity = 0;
+
+            var board = new Storyboard();
+
+            var fade = new DoubleAnimation
+            {
+                To = 1,
+                Duration = duration,
+                BeginTime = delay,
+                EasingFunction = ease,
+            };
+
+            Storyboard.SetTarget(fade, element);
+            Storyboard.SetTargetProperty(fade, "Opacity");
+
+            // 位移属于"依赖动画"（要 UI 线程逐帧算），不开这个开关整段会被静默跳过
+            var slide = new DoubleAnimation
+            {
+                To = 0,
+                Duration = duration,
+                BeginTime = delay,
+                EasingFunction = ease,
+                EnableDependentAnimation = true,
+            };
+
+            Storyboard.SetTarget(slide, transform);
+            Storyboard.SetTargetProperty(slide, "TranslateY");
+
+            board.Children.Add(fade);
+            board.Children.Add(slide);
+
+            // 收尾卸掉动画值：HoldEnd 会让动画值长期压住属性，之后谁再改 Opacity 都不生效
+            board.Completed += (_, _) =>
+            {
+                element.Opacity = 1;
+                transform.TranslateY = 0;
+                board.Stop();
+            };
+
+            board.Begin();
+        }
+    }
+
+    /// <summary>
     /// 菜子里该列哪些通道：① 配置里启用中的通道（不跑任务也能点进去手动连画面看）；
     /// ② 本轮在跑的通道（含配置里已删 / 已停用的 —— 在跑就必须看得见）。
     /// </summary>
@@ -343,20 +445,36 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// 带子项的父项（「会话通道」）被点击时**不改变选中态**，只会展开并触发这里。
-    /// 不接这个事件的话，父项就真的"点不动"。
-    /// （叶子项两个事件都会来，<see cref="NavigateTo"/> 按 tag 去重，不会重复导航。）
+    /// 父项（「会话通道」）与叶子项都会触发这里：父项只做展开，**不导航也不改选中态**；
+    /// 叶子项才导航（<see cref="NavigateTo"/> 按 tag 去重，SelectionChanged 同时来也不会重复导航）。
     /// </summary>
     private void OnNavigationItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)
     {
-        if (args.InvokedItemContainer is NavigationViewItem item && item.Tag is string tag && tag.Length > 0)
+        if (args.InvokedItemContainer is not NavigationViewItem item || item.Tag is not string tag || tag.Length == 0)
         {
-            NavigateTo(tag);
+            return;
         }
+
+        // 父项与子项各开各的页会让人以为功能重合 —— 父项点击只展开/收起子菜单，
+        // 多画面入口由子项「多画面（全部通道）」独自承担。
+        if (item == ChannelsNavItem)
+        {
+            ToggleChannelMenu();
+            return;
+        }
+
+        NavigateTo(tag);
     }
 
     private void NavigateTo(string tag)
     {
+        // 旧 tag "channels"（原「会话通道」父项入口，ChannelsPage「打开多画面」还在用）
+        // 统一落到「多画面」子项：父项不再作为导航目标，选中态也要落在子项上。
+        if (string.Equals(tag, "channels", StringComparison.Ordinal))
+        {
+            tag = MultiViewTag;
+        }
+
         if (string.Equals(_currentTag, tag, StringComparison.Ordinal))
         {
             return;
@@ -385,9 +503,8 @@ public sealed partial class MainWindow : Window
             case "logs":
                 ContentFrame.Navigate(typeof(Views.LogsPage));
                 break;
-            case "channels":
             case MultiViewTag:
-                // 「会话通道」父项与它的「多画面」子项：同一个页面
+                // 「多画面（全部通道）」子项：多画面页（父项点击不走这里，见 OnNavigationItemInvoked）
                 ContentFrame.Navigate(typeof(Views.RdpMultiViewPage));
                 break;
             case ChannelMgmtTag:

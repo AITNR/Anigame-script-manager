@@ -54,7 +54,7 @@
                 <NavigationViewItem Tag="stats" Content="耗时统计" Icon="Clock" />
                 <NavigationViewItem Tag="logs" Content="运行日志" Icon="Document" />
 
-                <!-- 「会话通道」= 父项：点它本身 = 多画面（全部通道网格）；
+                <!-- 「会话通道」= 父项：点它本身只展开/收起子菜单，不导航（多画面入口在子项）；
                      它下面的子菜单才是各条通道单独的画面 + 通道管理。
                      子项由 MainWindow.RebuildChannelMenuItems() 按已配置/在跑的通道重建，
                      这里留一个「通道管理…」兜底，保证它一上来就是「带子项的父项」形态。 -->

@@ -21,6 +21,9 @@ namespace YukinoChan.ViewModels;
 
 public sealed class StatRow
 {
+    /// <summary>这条统计是从哪来的：本机 / 某个会话通道的显示名。</summary>
+    public string Source { get; set; } = string.Empty;
+
     public string Name { get; set; } = string.Empty;
     public int Count { get; set; }
     public string AverageText { get; set; } = "00:00";
@@ -174,6 +177,10 @@ public sealed class MainViewModel : ObservableObject
     public ObservableCollection<string> LogLines { get; }
 
     public ObservableCollection<StatRow> StatRows { get; }
+
+    /// <summary>统计页的空状态提示（有数据就收起来）。表格全空时界面一片空白，容易被当成模块坏了。</summary>
+    public Visibility StatsEmptyVisibility =>
+        StatRows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
     // ---------------- 看板娘 ----------------
 
@@ -1021,27 +1028,38 @@ public sealed class MainViewModel : ObservableObject
 
     // ---------------- 统计 ----------------
 
+    /// <summary>
+    /// 汇总各路耗时统计：主控端自己跑的（runtime_stats）以及各会话通道里代理跑完发布的（桥里的 stats.json）。
+    ///
+    /// 以前只读主控端那份目录 —— 可任务大多交给会话通道执行，统计全落在目标账户那边，
+    /// 于是这一页永远空白（见 StatsSourcePlanner 的说明）。
+    /// </summary>
     public void RefreshStats()
     {
         StatRows.Clear();
 
         try
         {
-            var history = _statsManager.LoadHistory();
             var rows = new List<StatRow>();
-            foreach (var item in history)
+
+            AddStatRows(rows, StatsSourcePlanner.LocalLabel, _statsManager.LoadHistory());
+
+            var sources = StatsSourcePlanner.Plan(Config.Rdp, RdpSessionService.PayloadSlotDirs());
+            foreach (var (label, history) in StatsSourcePlanner.Collect(sources))
             {
-                rows.Add(new StatRow
-                {
-                    Name = item.Key,
-                    Count = item.Value.Count,
-                    AverageText = FormatHelper.FormatSeconds((long)item.Value.AverageSeconds),
-                    LastText = FormatHelper.FormatSeconds(item.Value.LastSeconds),
-                    LastTime = item.Value.LastTime,
-                });
+                AddStatRows(rows, label, history);
             }
 
-            rows.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase));
+            // 同一个脚本可能在不同通道 / 本机都跑过：先按脚本名排，再按来源排，
+            // 这样同名脚本的几行挨在一起，方便横向比各账户的耗时。
+            rows.Sort((a, b) =>
+            {
+                var byName = string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase);
+                return byName != 0
+                    ? byName
+                    : string.Compare(a.Source, b.Source, StringComparison.CurrentCultureIgnoreCase);
+            });
+
             foreach (var row in rows)
             {
                 StatRows.Add(row);
@@ -1050,6 +1068,25 @@ public sealed class MainViewModel : ObservableObject
         catch (Exception ex)
         {
             AppendLog($"读取统计失败：{ex.Message}");
+        }
+
+        OnPropertyChanged(nameof(StatsEmptyVisibility));
+    }
+
+    private static void AddStatRows(
+        List<StatRow> rows, string source, IReadOnlyDictionary<string, RuntimeHistoryItem> history)
+    {
+        foreach (var item in history)
+        {
+            rows.Add(new StatRow
+            {
+                Source = source,
+                Name = item.Key,
+                Count = item.Value.Count,
+                AverageText = FormatHelper.FormatSeconds((long)item.Value.AverageSeconds),
+                LastText = FormatHelper.FormatSeconds(item.Value.LastSeconds),
+                LastTime = item.Value.LastTime,
+            });
         }
     }
 

@@ -153,16 +153,25 @@ public sealed class RuntimeStatsManager
         return new List<string> { sessionJson, sessionCsv, HistoryPath, SummaryPath };
     }
 
-    public Dictionary<string, RuntimeHistoryItem> LoadHistory()
+    public Dictionary<string, RuntimeHistoryItem> LoadHistory() => ReadHistoryFile(HistoryPath);
+
+    /// <summary>
+    /// 读任意一份历史统计文件，读不到（不存在 / 空 / 坏 JSON）就给空字典。
+    ///
+    /// 抽成静态是为了让主控端能读**别人的**统计目录：会话通道里的任务是代理在跑，
+    /// 统计落在代理副本的 runtime_stats\&lt;账户&gt; 下，主控端要汇总展示就得按路径去读，
+    /// 而不是只能读自己那个 RuntimeStatsManager 实例（它还会顺手建目录，不适合拿来做探测）。
+    /// </summary>
+    public static Dictionary<string, RuntimeHistoryItem> ReadHistoryFile(string path)
     {
-        if (!File.Exists(HistoryPath))
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
         {
             return new Dictionary<string, RuntimeHistoryItem>();
         }
 
         try
         {
-            var text = File.ReadAllText(HistoryPath, Encoding.UTF8);
+            var text = File.ReadAllText(path, Encoding.UTF8);
             return JsonSerializer.Deserialize<Dictionary<string, RuntimeHistoryItem>>(text, Options)
                    ?? new Dictionary<string, RuntimeHistoryItem>();
         }

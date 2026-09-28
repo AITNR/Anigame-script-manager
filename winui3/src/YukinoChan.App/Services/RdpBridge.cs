@@ -20,6 +20,7 @@ namespace YukinoChan.Services;
 ///   command.json  主控端写、Agent 读（要执行的任务快照）
 ///   status.json   Agent 写、主控端读（进度 + 事件流）
 ///   stop.json     主控端写、Agent 读（请求停止 / 紧急停止）
+///   stats.json    Agent 写、主控端读（本轮跑完后发布的耗时统计快照）
 /// 写入一律走"临时文件 + 原子替换"，读取容忍并发 IOException 并重试，
 /// 避免主控端正在读时 Agent 正好重写导致解析到半个文件。
 ///
@@ -31,6 +32,9 @@ public sealed class RdpBridge
 {
     private const int MaxEvents = 500;
     private const int ReadRetry = 5;
+
+    /// <summary>耗时统计快照的文件名（Agent 写、主控端读）。</summary>
+    public const string StatsFileName = "stats.json";
 
     private static readonly object CacheGate = new();
     private static readonly Dictionary<string, RdpBridge> Cache = new(StringComparer.OrdinalIgnoreCase);
@@ -74,6 +78,9 @@ public sealed class RdpBridge
 
     /// <summary>停止请求文件：主控端写、Agent 读。老版本 Agent 不认识它，写了也不会响应（无害）。</summary>
     public string StopPath => Path.Combine(BridgeDir, "stop.json");
+
+    /// <summary>耗时统计快照文件：Agent 写、主控端读。老版本 Agent 不写它，主控端读不到就退回复本目录兜底。</summary>
+    public string StatsPath => Path.Combine(BridgeDir, StatsFileName);
 
     // ---------------- 桥实例的选取 ----------------
 
@@ -317,6 +324,59 @@ public sealed class RdpBridge
         return events.Count <= MaxEvents
             ? events
             : events.GetRange(events.Count - MaxEvents, MaxEvents);
+    }
+
+    // ---------------- Agent：发布耗时统计快照 ----------------
+
+    /// <summary>
+    /// Agent 侧：把本账户累积的耗时统计（已合并的历史平均值）发布到桥目录。
+    ///
+    /// 为什么非要走这一步：耗时统计写在**代理自己那份副本**的 runtime_stats\&lt;账户&gt; 下
+    /// （见 AppPaths.AgentMode）。主控端既不知道副本落在了 agent 还是 agent_b 槽，
+    /// 目标是远程主机时更是根本读不到对方的 ProgramData —— 于是"耗时统计"页永远空白。
+    /// 桥是两端唯一约定的共享位置，发布到这里主控端才有得可读。
+    ///
+    /// 发布的是**合并后的全量历史**而不是本次会话：这样重发同一份内容的多次写入是幂等的，
+    /// 主控端也不必自己去重。
+    /// </summary>
+    public bool WriteStatsSnapshot(Dictionary<string, RuntimeHistoryItem> history)
+    {
+        EnsureDirectory();
+        try
+        {
+            LastError = string.Empty;
+            return WriteAtomic(StatsPath, JsonSerializer.Serialize(history, WriteOptions));
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+            return false;
+        }
+    }
+
+    /// <summary>主控端侧：读本桥的统计快照。文件不存在 / 空内容 / 解析失败一律返回 null。</summary>
+    public Dictionary<string, RuntimeHistoryItem>? TryReadStatsSnapshot()
+    {
+        try
+        {
+            if (!File.Exists(StatsPath))
+            {
+                return null;
+            }
+
+            var text = ReadTextWithRetry(StatsPath);
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return null;
+            }
+
+            var history = JsonSerializer.Deserialize<Dictionary<string, RuntimeHistoryItem>>(text, ReadOptions);
+            return history is { Count: > 0 } ? history : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     public static RdpTaskEvent MakeEvent(RdpStatus current, string kind, string message, string taskName = "",

@@ -79,6 +79,10 @@ public sealed class RdpAgentRunner
     {
         Log($"RDP 会话代理已启动：目标账户 {Environment.UserName}，指令 {_command.Id}。");
 
+        // 先补发一次历史快照：本轮跑之前主控端就该看到"这个账户以前跑过什么"，
+        // 否则刚重启 / 刚部署完代理时统计页仍是空的，容易被当成故障。
+        PublishStatsSnapshot();
+
         var tasks = new List<TaskConfig>();
         for (var i = 0; i < _command.Tasks.Count; i++)
         {
@@ -225,7 +229,15 @@ public sealed class RdpAgentRunner
         };
 
         var hadError = false;
-        runner.Finished += (_, abnormal) => hadError = abnormal;
+        runner.Finished += (_, abnormal) =>
+        {
+            hadError = abnormal;
+
+            // 统计是在 RaiseFinished 之前刚写好的（ScriptRunner 先 SaveStatsQuietly 再 RaiseFinished），
+            // 所以这里正好能在会话收尾之前把合并后的历史发布到桥目录，供主控端的"耗时统计"页汇总。
+            // 必须赶在 FinishSession 之前：收尾方式若是注销，代理进程会被一起杀掉，之后就没机会写了。
+            PublishStatsSnapshot();
+        };
 
         try
         {
@@ -261,6 +273,38 @@ public sealed class RdpAgentRunner
             // 但排障时看到一份没人消费的 stop.json 非常误导）。
             stopWatch.Cancel();
             _bridge.ClearStop();
+        }
+    }
+
+    /// <summary>
+    /// 把本账户累积的耗时统计发布到桥目录，让主控端也能看到。
+    ///
+    /// 代理的统计落在自己那份副本的 runtime_stats\&lt;账户&gt; 下，主控端不知道副本在哪个槽、
+    /// 远程主机时更是读不到 —— 不发布出去，主控端的"耗时统计"页就永远是空白。
+    /// 发布失败只记日志：统计是锦上添花，绝不能因为它把整轮任务连坐判成异常。
+    /// </summary>
+    private void PublishStatsSnapshot()
+    {
+        try
+        {
+            var history = _stats.LoadHistory();
+            if (history.Count == 0)
+            {
+                return;
+            }
+
+            if (_bridge.WriteStatsSnapshot(history))
+            {
+                Log($"耗时统计快照已发布到桥目录（{history.Count} 个脚本）：{_bridge.StatsPath}");
+            }
+            else
+            {
+                Log($"耗时统计快照发布失败（不影响任务结果）：{_bridge.LastError}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"耗时统计快照发布失败（不影响任务结果）：{ex.Message}");
         }
     }
 
