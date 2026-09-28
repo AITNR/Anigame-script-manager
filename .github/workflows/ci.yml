@@ -81,6 +81,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
           ZIP: ${{ needs.build.outputs.zip_name }}
+          SETUP: ${{ needs.build.outputs.setup_name }}
           VER: ${{ needs.build.outputs.version }}
           EVENT: ${{ github.event_name }}
           PR_NUM: ${{ github.event.pull_request.number }}
@@ -133,15 +134,21 @@ jobs:
 
           ### 怎么用
 
-          1. 下载 \`$ZIP\`，解压到**固定目录**（不要放临时目录，日志会写在它旁边）；
-          2. 双击 \`YukinoChan.exe\`，首次运行自动生成 \`config.json\`；
-          3. 自动构建、**未经完整体验验收** —— 只用来抢先试新功能，别拿它跑重要的一轮任务。
+          两种下载方式，任选其一：
+
+          | 想要 | 下载 |
+          |---|---|
+          | 安装版 | \`$SETUP\` —— 装到 Program Files，有开始菜单和卸载入口，**需要管理员** |
+          | 绿色版 | \`$ZIP\` —— 解压到**固定目录**（不要放临时目录，日志会写在它旁边），双击 \`YukinoChan.exe\` |
+
+          首次运行会自动生成 \`config.json\`。自动构建、**未经完整体验验收** ——
+          只用来抢先试新功能，别拿它跑重要的一轮任务。
 
           > 只想要最新版？看 \`test-build\` 标签（跟着 main 的最新提交滚动）。
           > 正式版请等 \`正式版发布\` 工作流手动发。
           EOF
 
-          gh release create "$TAG" "dist/$ZIP" \
+          gh release create "$TAG" "dist/$SETUP" "dist/$ZIP" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$TITLE" \
             --notes-file notes.md \
@@ -151,7 +158,7 @@ jobs:
             echo "## 归档完成"
             echo ""
             echo "- 标签：\`$TAG\`"
-            echo "- 资产：\`$ZIP\`"
+            echo "- 资产：\`$SETUP\`、\`$ZIP\`"
             echo "- 地址：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -198,6 +205,7 @@ jobs:
           TAG: test-build
           ARCHIVE_TAG: ${{ needs.archive.outputs.tag }}
           ZIP: ${{ needs.build.outputs.zip_name }}
+          SETUP: ${{ needs.build.outputs.setup_name }}
           VER: ${{ needs.build.outputs.version }}
           COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
@@ -230,14 +238,20 @@ jobs:
 
           ### 怎么用
 
-          1. 下载下面的 \`$ZIP\`，解压到**固定目录**（不要放临时目录，日志会写在它旁边）；
-          2. 双击 \`YukinoChan.exe\`，首次运行自动生成 \`config.json\`；
-          3. 这是自动构建、**未经过完整体验验收** —— 只用来抢先试新功能，别拿它跑重要的一轮任务。
+          两种下载方式，任选其一：
+
+          | 想要 | 下载 |
+          |---|---|
+          | 安装版 | \`$SETUP\` —— 装到 Program Files，有开始菜单和卸载入口，**需要管理员** |
+          | 绿色版 | \`$ZIP\` —— 解压到**固定目录**（不要放临时目录，日志会写在它旁边），双击 \`YukinoChan.exe\` |
+
+          首次运行会自动生成 \`config.json\`。这是自动构建、**未经过完整体验验收** ——
+          只用来抢先试新功能，别拿它跑重要的一轮任务。
 
           > 需要正式版请等 \`正式版发布\` 工作流手动发。
           EOF
 
-          gh release create "$TAG" "dist/$ZIP" \
+          gh release create "$TAG" "dist/$SETUP" "dist/$ZIP" \
             --repo "$GITHUB_REPOSITORY" \
             --title "测试版（滚动更新）· $VER" \
             --notes-file notes.md \

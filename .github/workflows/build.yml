@@ -221,6 +221,7 @@ jobs:
     outputs:
       version: ${{ steps.ver.outputs.version }}
       zip_name: ${{ steps.pack.outputs.zip_name }}
+      setup_name: ${{ steps.setup.outputs.setup_name }}
       artifact_name: app-package
     steps:
       - uses: actions/checkout@v4
@@ -294,10 +295,42 @@ jobs:
           python @argv
           "zip_name=$name.zip" >> $env:GITHUB_OUTPUT
 
+      # 绿色版 ZIP 之外再出一个安装版：装到 Program Files，开始菜单 + 卸载入口都有。
+      # package_release.py 已经把要装的东西铺到 dist/app 了，这里直接打包它。
+      - name: 装 Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: 编译安装程序
+        id: setup
+        shell: pwsh
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: '1'
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) { throw "找不到 ISCC.exe（Inno Setup 没装上？）：$iscc" }
+
+          # ⚠️ 一律传绝对路径：ISCC 会把相对路径按「脚本所在目录」解析
+          # ⚠️ 别用 $args —— 那是 PowerShell 的自动变量，赋值会报错
+          $isccArgs = @(
+            'winui3/tools/installer.iss',
+            "/DMyAppVersion=${{ steps.ver.outputs.version }}",
+            "/DSrcDir=$(Join-Path $env:GITHUB_WORKSPACE 'dist\app')",
+            "/DOutDir=$(Join-Path $env:GITHUB_WORKSPACE 'dist')",
+            "/DIconFile=$(Join-Path $env:GITHUB_WORKSPACE 'assets\icon.ico')"
+          )
+          & $iscc @isccArgs
+          if ($LASTEXITCODE -ne 0) { throw "ISCC 编译失败（exit $LASTEXITCODE）" }
+
+          "setup_name=YukinoChan-${{ steps.ver.outputs.version }}-setup.exe" >> $env:GITHUB_OUTPUT
+
       - name: 上传发布包
         uses: actions/upload-artifact@v4
         with:
           name: app-package
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*.exe
           retention-days: ${{ inputs.retention_days }}
           if-no-files-found: error

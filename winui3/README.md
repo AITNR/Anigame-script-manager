@@ -122,6 +122,21 @@ CI 的每次构建都会建一个自己的预发布 tag，资产不会被下一�
 因为要为每个版本单独留档，`concurrency` 设的是 `cancel-in-progress: false` —— 连续 push 会排队而不是互相取消（取消掉的那一版就没有归档了，想省 minutes 再改回 `true`）。
 
 归档只增不减，自包含包一份几十 MB —— 攒多了用 `cleanup-builds.yml` 瘦身：默认**只演习**（把待删清单打进 job summary），确认没问题再勾「真的删除」重跑；保留规则是「最近 N 份 **或** 最近 N 天内」满足其一即留，且只认预发布、只处理 `build-` / `pr-` 前缀，`test-build` 与正式版 `vX.Y.Z` 都不会被碰。
+
+### 每次构建出两份：安装版 / 绿色版
+
+| 产物 | 用法 |
+|---|---|
+| `YukinoChan-<版本>-setup.exe` | **安装版**。默认装到 `%ProgramFiles%\YukinoChan\`，带开始菜单快捷方式与卸载入口；安装**需要管理员** |
+| `YukinoChan-winui3-<版本>-x64.zip` | **绿色版**。解压到**固定目录**（别放临时目录，日志会写在它旁边），双击 `YukinoChan.exe` 即用 |
+
+安装脚本是 `winui3/tools/installer.iss`（Inno Setup 6，CI 里用 `choco install innosetup` 装，本机要先装 Inno Setup 6 才能编译）。
+
+装到 Program Files 后，程序要往安装目录写 `config.json` / `logs` / `runtime_stats` —— 所以**主控端启动会自检提权**：
+非管理员时用 `runas` 重启自己（`Program.cs` 里的 `TryRelaunchElevated`），UAC 被拒就按原权限继续跑。
+会话代理（`--rdp-agent`）**不跟着提权**：它是目标账户登录时由启动目录快捷方式拉起的，弹 UAC 没人点。
+
+> 数据文件不在安装脚本的 `[Files]` 里 —— 覆盖安装会保留配置；卸载后 `config.json` / `logs` 仍留在安装目录，要清掉自己删。
 - 正式版会校验版本号格式，并**拒绝复用已存在的 tag**；可勾「先存为草稿」再公开；
 - 首次 CI 要现编 FreeRDP（约 20-40 分钟），之后命中缓存只需一两分钟；
   **只改 C# 时原生层整段直接跳过**（按 `ycn_rdp.c/h` + `CMakeLists.txt` 的哈希缓存）。

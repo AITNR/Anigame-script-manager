@@ -94,6 +94,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VER: ${{ needs.build.outputs.version }}
           ZIP: ${{ needs.build.outputs.zip_name }}
+          SETUP: ${{ needs.build.outputs.setup_name }}
           NOTES: ${{ inputs.notes }}
           DRAFT: ${{ inputs.draft }}
         run: |
@@ -115,7 +116,7 @@ jobs:
             args+=(--latest)
           fi
 
-          gh release create "v$VER" "dist/$ZIP" "${args[@]}"
+          gh release create "v$VER" "dist/$SETUP" "dist/$ZIP" "${args[@]}"
 
           echo "✅ 已发布 v$VER" >> "$GITHUB_STEP_SUMMARY"
-          echo "资产：$ZIP（自包含：${{ inputs.self_contained }}）" >> "$GITHUB_STEP_SUMMARY"
+          echo "资产：$SETUP（安装版）、$ZIP（绿色版，自包含：${{ inputs.self_contained }}）" >> "$GITHUB_STEP_SUMMARY"

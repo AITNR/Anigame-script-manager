@@ -1,5 +1,7 @@
 // -*- coding: utf-8 -*-
 using System;
+using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -25,6 +27,12 @@ public static class Program
 {
     /// <summary>agent 模式下把启动上下文写进该文件，便于排查「进程秒退」。</summary>
     private const string AgentBootLogName = "agent_boot.log";
+
+    /// <summary>
+    /// 提权重启标记：带它说明本进程已经是「提权重启后的那一轮」，不要再提一次。
+    /// 少了它，用户在 UAC 上点「否」会导致无限弹窗。
+    /// </summary>
+    private const string ElevatedFlag = "--elevated";
 
     /// <summary>M4 自检通道：--embed-auto <host> <user> <password> 启动时自动连接内嵌预览。
     /// 状态全走 VM.AppendLog（日志文件），供外部无人值守验收。</summary>
@@ -77,6 +85,11 @@ public static class Program
         {
             WriteAgentBootLog(args);
         }
+        else if (TryRelaunchElevated(args))
+        {
+            // 已经拉起提权实例，本实例到此为止（新实例会带 --elevated 走完剩下的流程）
+            return;
+        }
 
         // M5/M6 自检：--embed-vm host user password [--embed-nokeys]
         for (var i = 0; i < args.Length - 3; i++)
@@ -106,6 +119,63 @@ public static class Program
 
             // agent 模式下不要静默退出，留个非零退出码方便从外部观察启动失败
             Environment.Exit(1);
+        }
+    }
+
+    /// <summary>
+    /// 主控端以管理员重启自己（装到 Program Files 后要往安装目录写 config.json / logs / runtime_stats，
+    /// 部署会话代理也要写 ProgramData 与公共启动目录 —— 标准用户都做不了）。
+    ///
+    /// 只在主控模式用：代理是目标账户登录时由启动目录快捷方式拉起的，弹 UAC 没人点，
+    /// 所以它保持原权限启动。
+    /// </summary>
+    /// <returns>已拉起提权实例（调用方应直接退出）。</returns>
+    private static bool TryRelaunchElevated(string[] args)
+    {
+        try
+        {
+            if (RdpSessionService.IsElevated)
+            {
+                return false; // 本来就是管理员
+            }
+
+            if (Array.Exists(args, a => string.Equals(a, ElevatedFlag, StringComparison.OrdinalIgnoreCase)))
+            {
+                return false; // 上一轮提权没成功（多半是 UAC 被拒），别再弹了
+            }
+
+            var exe = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(exe) || !File.Exists(exe))
+            {
+                return false; // 单文件发布 / 拿不到自身路径时不折腾
+            }
+
+            var psi = new ProcessStartInfo(exe)
+            {
+                UseShellExecute = true,
+                Verb = "runas",
+                WorkingDirectory = AppContext.BaseDirectory,
+            };
+
+            foreach (var argument in args)
+            {
+                psi.ArgumentList.Add(argument);
+            }
+
+            psi.ArgumentList.Add(ElevatedFlag);
+
+            using var child = Process.Start(psi);
+            return child is not null;
+        }
+        catch (Win32Exception)
+        {
+            // 用户拒绝 UAC，或以非交互方式启动（弹不出 UAC）：按原权限继续跑
+            return false;
+        }
+        catch (Exception ex)
+        {
+            AppPaths.WriteStartupError(ex);
+            return false;
         }
     }
 
