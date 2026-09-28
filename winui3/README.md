@@ -1,7 +1,8 @@
 # YukinoChan WinUI 3 版（雪乃酱 · 二游脚本统合管理器）
 
-> 本目录是雪乃酱的 **C# / WinUI 3 重写版**，与仓库根目录的 Python + PySide6 版本（`main.py` / `core/` / `ui/`）功能等价。
-> Python 版进入 **legacy 维护状态**，不再新增功能；后续开发以本目录为准。
+> 本目录是雪乃酱的 **C# / WinUI 3 版**，也是仓库唯一的代码主线。
+> 原先仓库根目录的 Python + PySide6 版（`main.py` / `core/` / `ui/`）已于 2026-09-28 从仓库移除，
+> 需要的话可以从 Git 历史（移除前的提交）里取回。
 
 开发基线：**v2.0 WinUI 3**（原 Python 版基线 v31.17.1）
 
@@ -697,15 +698,14 @@ prompt for credentials:i:0  # 凭据走凭据管理器，不弹输入框
 
 ## 八、与 Python 版的关系
 
-| | Python 版（仓库根） | WinUI 3 版（`winui3/`） |
+| 用途 | 路径 | 说明 |
 |---|---|---|
-| 状态 | legacy，仅修 bug | 主线 |
-| 配置文件 | `config.json` | **同一个 `config.json`** |
-| 日志目录 | `logs/` | **同一个 `logs/`** |
-| 统计目录 | `runtime_stats/` | **同一个 `runtime_stats/`** |
-| 看板娘素材 | `assets/mascot/` | **同一个 `assets/mascot/`** |
+| 配置文件 | `config.json` | 位于程序根目录（向上回溯到有 `config.json` / `assets/` 的那一层） |
+| 日志目录 | `logs/` | 同上，按日期分文件 |
+| 统计目录 | `runtime_stats/` | 脚本耗时历史，按账户分家 |
+| 看板娘素材 | `assets/mascot/` | 缺失时看板娘区域留空，程序仍能跑 |
 
-两个版本共享同一份配置与数据目录，可以来回切换，**不需要重新配置**。
+Python + PySide6 版原先共用这几份数据；它已于 2026-09-28 从仓库移除，仅保留在 Git 历史里。
 
 ---
 

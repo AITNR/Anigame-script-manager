@@ -313,5 +313,6 @@ C# / Windows App SDK 重写，替换 Python + PySide6 版。功能等价，界�
 
 ### Notes
 
-- 与 Python 版**共用同一份** `config.json` / `logs/` / `runtime_stats/` / `assets/mascot/`，可来回切换无需重配。
-- Python 版进入 legacy 维护状态。
+- 沿用 Python 版留下的目录约定：程序根目录（向上回溯到有 `config.json` / `assets/` 的那一层）
+  下的 `config.json` / `logs/` / `runtime_stats/` / `assets/mascot/`。
+- Python + PySide6 版（v1.0 RC1）已于 2026-09-28 从仓库移除，仅保留在 Git 历史里。
