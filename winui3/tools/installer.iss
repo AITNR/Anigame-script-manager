@@ -43,7 +43,8 @@ AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}/issues
-UpdatesInfoURL={#MyAppURL}/releases
+; ⚠️ 别写 UpdatesInfoURL / AppUpdatesInfoURL —— 这指令在新版 Inno 才有，
+;    runner 上装的版本（6.2.x）不认，编译直接 abort。
 
 ; 公共目录（Program Files）—— 装这里必须管理员，下面显式要求
 DefaultDirName={pf}\YukinoChan
