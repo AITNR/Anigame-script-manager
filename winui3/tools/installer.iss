@@ -30,6 +30,13 @@
   #define IconFile ""
 #endif
 
+; 留空 = 不加载语言文件（向导用默认英文）。
+; Inno Setup 6.7 的 choco 包不带 Languages 目录，中文 isl 得另外下载 ——
+; CI 里下载到了才传这个参数，下载不到就退回英文，别让这一步把构建搞红。
+#ifndef LangFile
+  #define LangFile ""
+#endif
+
 #define MyAppName "雪乃酱"
 #define MyAppExe "YukinoChan.exe"
 #define MyAppPublisher "AITNR"
@@ -75,8 +82,10 @@ SetupLogging=yes
 SetupIconFile={#IconFile}
 #endif
 
+#if LangFile != ""
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "chinesesimplified"; MessagesFile: "{#LangFile}"
+#endif
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加图标："

@@ -311,6 +311,20 @@ jobs:
           $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
           if (-not (Test-Path $iscc)) { throw "找不到 ISCC.exe（Inno Setup 没装上？）：$iscc" }
 
+          # Inno 6.7 的 choco 包不带 Languages 目录，中文语言文件要另外取；
+          # 取不到就用默认英文向导（不给 LangFile 参数），别因此判红
+          $langDir = Join-Path $env:GITHUB_WORKSPACE 'isl'
+          $lang = Join-Path $langDir 'ChineseSimplified.isl'
+          $haveLang = $false
+          try {
+            New-Item -ItemType Directory -Force $langDir | Out-Null
+            Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl' `
+              -OutFile $lang -UseBasicParsing -ErrorAction Stop
+            $haveLang = (Test-Path $lang) -and ((Get-Item $lang).Length -gt 5000)
+          } catch {
+            Write-Host '::warning::中文语言文件没取到，安装向导用默认英文'
+          }
+
           # ⚠️ 一律传绝对路径：ISCC 会把相对路径按「脚本所在目录」解析
           # ⚠️ 别用 $args —— 那是 PowerShell 的自动变量，赋值会报错
           $isccArgs = @(
@@ -320,6 +334,7 @@ jobs:
             "/DOutDir=$(Join-Path $env:GITHUB_WORKSPACE 'dist')",
             "/DIconFile=$(Join-Path $env:GITHUB_WORKSPACE 'assets\icon.ico')"
           )
+          if ($haveLang) { $isccArgs += "/DLangFile=$lang" }
           & $iscc @isccArgs
           if ($LASTEXITCODE -ne 0) { throw "ISCC 编译失败（exit $LASTEXITCODE）" }
 
