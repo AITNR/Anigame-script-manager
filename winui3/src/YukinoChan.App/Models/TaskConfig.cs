@@ -200,10 +200,13 @@ public sealed class TaskConfig : ObservableObject, ICloneable
         set
         {
             var normalized = KeywordHelper.Normalize(value);
-            if (SetProperty(ref _processKeywords, normalized))
-            {
-                OnPropertyChanged(nameof(ProcessKeywords));
-            }
+
+            // ⚠️ 别顺手补 OnPropertyChanged(ProcessKeywords)：这个 setter 是**两向绑定**的落点，
+            // TextBox 每次失焦/回车都会写回来。再补一次 ProcessKeywords 通知，
+            // 绑在它上面的控件会重新计算并再写回来 —— 两轮回写互相触发，
+            // 在集合被整体替换（导入配置）时足以把 UI 线程拖进死循环。
+            // ProcessKeywords 与本属性在同一个类上，绑定系统自己会监听到它的通知。
+            SetProperty(ref _processKeywords, normalized);
         }
     }
 
@@ -214,10 +217,7 @@ public sealed class TaskConfig : ObservableObject, ICloneable
         set
         {
             var normalized = KeywordHelper.Normalize(value);
-            if (SetProperty(ref _windowKeywords, normalized))
-            {
-                OnPropertyChanged(nameof(WindowKeywords));
-            }
+            SetProperty(ref _windowKeywords, normalized);
         }
     }
 

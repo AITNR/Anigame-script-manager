@@ -474,6 +474,15 @@ public sealed class MainViewModel : ObservableObject
 
     public async Task ImportConfigAsync()
     {
+        // 执行中导入会把「正在跑的任务对象」从集合里换掉，通道侧的会话/代理状态与它对不上。
+        // 与其让人卡在不知情的状态里，不如直接拦住（开始执行那里已有同样的守卫）。
+        if (IsRunning)
+        {
+            AppendLog("导入配置失败：任务正在执行，请先停止再导入。");
+            await DialogHelper.ShowMessageAsync("导入失败", "任务正在执行，请先点「停止」再导入配置。");
+            return;
+        }
+
         var path = await DialogHelper.PickOpenFileAsync(("JSON 配置文件", ".json"), ("所有文件", "."));
         if (string.IsNullOrEmpty(path))
         {
@@ -496,6 +505,23 @@ public sealed class MainViewModel : ObservableObject
             }
 
             imported.Sanitize();
+
+            // ⚠️ 顺序要紧：先解掉旧选中态，再动集合。
+            //
+            // 之前是「Tasks.Clear() → 填新任务 → RefreshChannelScopes() → 赋 SelectedTask」，
+            // 于是 SelectedTask 在中途一直指着**已被 Clear 掉的旧 TaskConfig**（孤儿引用）。
+            // 任务执行页监听着 VM.PropertyChanged：ScopeTasks 一变就 SyncTaskSelection()，
+            // 把这个不在 ItemsSource 里的对象赋给 ListView.SelectedItem ——
+            // ListView 选中项不在集合内 + 集合正在被整体替换时，WinUI 会陷入
+            // 测量/布局失效的死循环，UI 线程再也不返回，表现为整个窗口无响应。
+            //
+            // 同一个对象还被 FormHost.DataContext 绑着两向 TextBox
+            // （ProcessKeywordsText 的 setter 还会连带 OnPropertyChanged(ProcessKeywords)），
+            // 一次赋值触发两轮回写，把这串放大。
+            //
+            // 现在：先把选中态置空（旧引用当场断开），再换集合，最后按新集合重建选中态。
+            SelectedTask = null;
+            _selectedScope = null;
 
             // 只导入任务配置；自动关机、开机自启动、截图开关等本机设置保持不变。
             Tasks.Clear();

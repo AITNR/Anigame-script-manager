@@ -141,7 +141,17 @@ public sealed partial class TasksPage : Page
         _syncing = true;
         try
         {
-            ScopeList.SelectedItem = VM.SelectedScope;
+            // 同 SyncTaskSelection：ChannelScopes 每次刷新都被整体重建，
+            // 旧引用必然不在集合里 —— 绝不能把它直接塞给 ListView.SelectedItem。
+            var scope = VM.SelectedScope;
+            if (scope is null || !VM.ChannelScopes.Contains(scope))
+            {
+                ScopeList.SelectedItem = null;
+            }
+            else
+            {
+                ScopeList.SelectedItem = scope;
+            }
         }
         finally
         {
@@ -154,7 +164,19 @@ public sealed partial class TasksPage : Page
         _syncing = true;
         try
         {
-            TaskList.SelectedItem = VM.SelectedTask;
+            // ⚠️ 赋一个「不在 ItemsSource 里」的对象给 ListView.SelectedItem，
+            //    WinUI 会反复测量/布局失效把 UI 线程拖进死循环（2026-10-04 导入配置后卡死）。
+            //    集合刚被整体替换（增删 / 排序 / 改派 / 导入）时旧引用必然已失效，
+            //    所以这里先置空再设 —— 让列表始终回到一个自洽的选中态。
+            var selected = VM.SelectedTask;
+            if (selected is null || !VM.ScopeTasks.Contains(selected))
+            {
+                TaskList.SelectedItem = null;
+            }
+            else
+            {
+                TaskList.SelectedItem = selected;
+            }
         }
         finally
         {
