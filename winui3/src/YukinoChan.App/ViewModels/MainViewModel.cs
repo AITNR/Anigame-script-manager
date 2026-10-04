@@ -510,29 +510,41 @@ public sealed class MainViewModel : ObservableObject
             //
             // 之前是「Tasks.Clear() → 填新任务 → RefreshChannelScopes() → 赋 SelectedTask」，
             // 于是 SelectedTask 在中途一直指着**已被 Clear 掉的旧 TaskConfig**（孤儿引用）。
-            // 任务执行页监听着 VM.PropertyChanged：ScopeTasks 一变就 SyncTaskSelection()，
-            // 把这个不在 ItemsSource 里的对象赋给 ListView.SelectedItem ——
-            // ListView 选中项不在集合内 + 集合正在被整体替换时，WinUI 会陷入
-            // 测量/布局失效的死循环，UI 线程再也不返回，表现为整个窗口无响应。
-            //
             // 同一个对象还被 FormHost.DataContext 绑着两向 TextBox
-            // （ProcessKeywordsText 的 setter 还会连带 OnPropertyChanged(ProcessKeywords)），
+            //（ProcessKeywordsText 的 setter 还会连带 OnPropertyChanged(ProcessKeywords)），
             // 一次赋值触发两轮回写，把这串放大。
             //
-            // 现在：先把选中态置空（旧引用当场断开），再换集合，最后按新集合重建选中态。
-            SelectedTask = null;
-            _selectedScope = null;
-
-            // 只导入任务配置；自动关机、开机自启动、截图开关等本机设置保持不变。
-            Tasks.Clear();
-            foreach (var task in imported.Tasks)
+            // ⚠️⚠️ 但更要紧的是**线程**——2026-10-04 真正的根因，抛 0x8001010E：
+            // 上面 `await DialogHelper.PickOpenFileAsync(...)` 用的是 Windows App SDK 1.8 的
+            // FileOpenPicker，它返回的 awaitable **不捕获 SynchronizationContext**，
+            // await 之后这段代码**不一定还在 UI 线程上**。而主页有
+            // `x:Bind VM.Tasks.Count`，x:Bind 生成的 setter 就是 `TextBlock.set_Text`，
+            // WinRT 对象只能在它所属的 UI 线程上碰。于是
+            // `Tasks.Clear()` → `ClearItems()` → 触发 `Update_VM_Tasks_Count`
+            // → `TextBlock.set_Text` → COMException 0x8001010E (RPC_E_WRONG_THREAD)。
+            // 现场栈（startup_error.log，2026-10-04 21:15:18）：
+            //   ImportConfigAsync → Tasks.Clear() → ClearItems()
+            //   → HomePage.g.cs Update_VM_Tasks_Count → TextBlock.set_Text
+            // 所以下面**凡是会动集合 / 触发绑定刷新的操作一律包进 RunOnUiThreadAsync**，
+            // 不靠"我这里看起来是 UI 线程"的运气。
+            await RunOnUiThreadAsync(() =>
             {
-                Tasks.Add(task);
-            }
+                // 先解掉旧选中态（旧引用当场断开），再换集合，最后按新集合重建选中态。
+                SelectedTask = null;
+                _selectedScope = null;
 
-            TaskScopePlanner.NormalizeOrdersByChannel(Tasks, Config.Rdp.Channels);
-            RefreshChannelScopes();
-            SelectedTask = ScopeTasks.FirstOrDefault();
+                // 只导入任务配置；自动关机、开机自启动、截图开关等本机设置保持不变。
+                Tasks.Clear();
+                foreach (var task in imported.Tasks)
+                {
+                    Tasks.Add(task);
+                }
+
+                TaskScopePlanner.NormalizeOrdersByChannel(Tasks, Config.Rdp.Channels);
+                RefreshChannelScopes();
+                SelectedTask = ScopeTasks.FirstOrDefault();
+            });
+
             SaveConfig();
 
             AppendLog($"配置已导入并保存：{path}");
@@ -1301,6 +1313,16 @@ public sealed class MainViewModel : ObservableObject
             return;
         }
 
+        // ⚠️ BubbleKind / BubbleText 是 x:Bind 到看板娘 UI 的，WinRT 对象只能在 UI 线程碰。
+        // 调用方五花八门（导入后提示、后台任务完成、RDP 事件…），一旦有谁从工作线程进来
+        // 就是 0x8001010E。跟 ImportConfigAsync 里 Tasks.Clear() 撞的是同一类问题。
+        // 这里统一在 SetBubble 这一个入口收口，谁都不用记得自己 Post。
+        if (!_dispatcher.HasThreadAccess)
+        {
+            Post(() => SetBubble(text, priority, durationSeconds, force, bubbleKind));
+            return;
+        }
+
         _bubblePriority = priority;
         BubbleKind = bubbleKind;
         BubbleText = MascotService.NormalizeBubbleText(text, GuideBubbleTexts);
@@ -1444,6 +1466,54 @@ public sealed class MainViewModel : ObservableObject
         }
 
         _dispatcher.TryEnqueue(() => action());
+    }
+
+    /// <summary>
+    /// <see cref="Post"/> 的可等待版本：把一段代码**保证**跑在 UI 线程上并等它做完。
+    ///
+    /// 什么时候必须用它：<b>动 <c>ObservableCollection</c>（Tasks / ChannelScopes / ScopeTasks）</b>。
+    /// 主页有 <c>x:Bind VM.Tasks.Count</c>，x:Bind 生成的 setter 是
+    /// <c>TextBlock.set_Text</c> —— WinRT 对象<b>只能在它所属的 UI 线程上碰</b>，
+    /// 从别的线程调用直接抛 <c>COMException 0x8001010E (RPC_E_WRONG_THREAD)</c>。
+    ///
+    /// 为什么会跑到别的线程去：<c>async</c> 方法在 <c>await</c> 一个<b>不捕获
+    /// SynchronizationContext</b> 的 awaitable（Windows App SDK 1.8 的
+    /// <c>FileOpenPicker.PickSingleFileAsync</c> 就是这种）之后，续体不一定回到 UI 线程。
+    /// 于是「await 选完文件 → 直接 Tasks.Clear()」这一段就可能在工作线程上跑，
+    /// 集合一清就把绑定的 TextBlock 戳炸。
+    ///
+    /// 触发链路（现场栈，2026-10-04）：
+    /// <c>ImportConfigAsync → Tasks.Clear() → ClearItems()
+    /// → HomePage.g.cs Update_VM_Tasks_Count → TextBlock.set_Text → 0x8001010E</c>
+    /// </summary>
+    private Task RunOnUiThreadAsync(Action action)
+    {
+        if (_dispatcher.HasThreadAccess)
+        {
+            action();
+            return Task.CompletedTask;
+        }
+
+        var tcs = new TaskCompletionSource();
+        if (!_dispatcher.TryEnqueue(() =>
+            {
+                try
+                {
+                    action();
+                    tcs.SetResult();
+                }
+                catch (Exception ex)
+                {
+                    // 异常必须在这里接住并搬回调用方，否则 tcs 永远挂着 = 死等。
+                    tcs.SetException(ex);
+                }
+            }))
+        {
+            // 队列已关闭（窗口正在关）：直接失败，别 await 一个永远不会完成的 Task。
+            tcs.SetException(new InvalidOperationException("UI 线程队列已关闭，无法继续导入配置。"));
+        }
+
+        return tcs.Task;
     }
 
     // ==================================================================
