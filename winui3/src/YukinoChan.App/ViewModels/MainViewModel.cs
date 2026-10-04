@@ -549,9 +549,46 @@ public sealed class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            AppendLog($"导入配置失败：{ex.Message}");
+            // ⚠️ 别只记 ex.Message：WinRT/COM 异常的 Message 经常是空串或一句没信息量的
+            // 「该操作尝试访问的数据超出了有效范围」，落到日志里就是光秃秃一行
+            // 「导入配置失败：」，完全看不出是哪一步炸的。类型名 + 栈 + 聚合内层一起记。
+            var detail = DescribeException(ex);
+            AppendLog($"导入配置失败：{detail}");
             await DialogHelper.ShowMessageAsync("导入失败", $"导入配置失败：{ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// 把异常摊开成能定位的一行串：类型 + 消息 + 栈 + AggregateException 内层。
+    /// 栈只取本进程内的帧（WinRT 帧会淹掉真正的落点）。
+    /// </summary>
+    internal static string DescribeException(Exception ex)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append(ex.GetType().FullName).Append(": ").AppendLine(ex.Message);
+
+        if (ex is AggregateException agg && agg.InnerExceptions.Count > 0)
+        {
+            foreach (var inner in agg.InnerExceptions)
+            {
+                sb.Append("  -- 内层 --> ").AppendLine(inner.GetType().FullName + ": " + inner.Message);
+            }
+        }
+        else if (ex.InnerException is not null)
+        {
+            sb.Append("  -- 内层 --> ").AppendLine(ex.InnerException.GetType().FullName + ": " + ex.InnerException.Message);
+        }
+
+        if (!string.IsNullOrWhiteSpace(ex.StackTrace))
+        {
+            sb.AppendLine(ex.StackTrace);
+        }
+
+        // 出错现场直接落一份到 startup_error.log —— 主日志会被后续行淹没，
+        // 而这个文件是追加的、只记异常，不会被业务日志冲掉。
+        AppPaths.WriteStartupError(ex);
+
+        return sb.ToString();
     }
 
     // ---------------- 执行控制 ----------------

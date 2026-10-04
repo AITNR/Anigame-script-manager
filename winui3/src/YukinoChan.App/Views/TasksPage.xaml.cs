@@ -1,6 +1,7 @@
 // -*- coding: utf-8 -*-
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -24,6 +25,19 @@ public sealed partial class TasksPage : Page
 {
     private bool _syncing;
 
+    /// <summary>
+    /// VM.PropertyChanged 的处理器 —— **必须是具名字段并在 Unloaded 里退订**。
+    ///
+    /// ⚠️ 这里以前是 `VM.PropertyChanged += (_, args) => {...}` 匿名 lambda：无法退订。
+    /// 而 VM 是全局单例、活到进程结束，页面每次导航都新建（MainWindow 用
+    /// <c>ContentFrame.Navigate</c>，不做缓存），于是**每进一次任务页就多一个订阅者**，
+    /// 旧的全都还活着。导入配置时 <c>Tasks.Clear()</c> + 逐个 Add + 多次 RefreshScopeTasks()
+    /// 会广播给所有累积的僵尸订阅者，每个都去碰一个早已离开可视树、甚至已被
+    /// Frame 换掉的 ListView —— 轻则抛 WinRT 异常（Message 常为空串，日志里只留
+    /// 一句「导入配置失败：」），重则把 UI 线程拖进死循环。
+    /// </summary>
+    private readonly PropertyChangedEventHandler _vmPropertyChanged;
+
     public TasksPage()
     {
         InitializeComponent();
@@ -32,31 +46,45 @@ public sealed partial class TasksPage : Page
         WaitModeBox.ItemsSource = VM.WaitModeItems;
         ConcurrentPolicyBox.ItemsSource = VM.ConcurrentPolicyItems;
 
-        VM.PropertyChanged += (_, args) =>
+        _vmPropertyChanged = OnViewModelPropertyChanged;
+        VM.PropertyChanged += _vmPropertyChanged;
+
+        // 页面离开可视树就退订。Frame 可能缓存页面，所以 Loaded 时要重新挂上，
+        // 否则从别的页返回时选中态再也不跟着 VM 走。
+        // 退订后再挂是幂等的（同一 handler 挂两次也会被去重），这里仍写成
+        // 「先 - 再 +」是为了让「任何时候最多只有一个订阅」的意图显式。
+        Loaded += (_, _) =>
         {
-            switch (args.PropertyName)
-            {
-                case nameof(MainViewModel.SelectedTask):
-                    SyncTaskSelection();
-                    SyncForm();
-                    break;
-
-                case nameof(MainViewModel.SelectedScope):
-                    SyncScopeSelection();
-                    SyncTaskSelection();
-                    SyncForm();
-                    break;
-
-                // 任务视图被重建（增删 / 排序 / 改派）后要把列表选中态对回去
-                case nameof(MainViewModel.ScopeTasks):
-                    SyncTaskSelection();
-                    break;
-            }
+            VM.PropertyChanged -= _vmPropertyChanged;
+            VM.PropertyChanged += _vmPropertyChanged;
         };
+        Unloaded += (_, _) => VM.PropertyChanged -= _vmPropertyChanged;
 
         SyncScopeSelection();
         SyncTaskSelection();
         SyncForm();
+    }
+
+    private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs args)
+    {
+        switch (args.PropertyName)
+        {
+            case nameof(MainViewModel.SelectedTask):
+                SyncTaskSelection();
+                SyncForm();
+                break;
+
+            case nameof(MainViewModel.SelectedScope):
+                SyncScopeSelection();
+                SyncTaskSelection();
+                SyncForm();
+                break;
+
+            // 任务视图被重建（增删 / 排序 / 改派）后要把列表选中态对回去
+            case nameof(MainViewModel.ScopeTasks):
+                SyncTaskSelection();
+                break;
+        }
     }
 
     public MainViewModel VM => App.ViewModel;
