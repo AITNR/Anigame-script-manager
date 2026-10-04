@@ -90,9 +90,21 @@ public sealed class AppConfig : ObservableObject
     [JsonPropertyName("rdp")]
     public RdpConfig Rdp { get; set; } = new();
 
-    /// <summary>主窗口位置/尺寸，用于"记住上次窗口大小"。整段缺失时按默认尺寸启动。</summary>
+    /// <summary>
+    /// 主窗口位置/尺寸，用于"记住上次窗口大小"。整段缺失时按默认尺寸启动。
+    /// </summary>
     [JsonPropertyName("window")]
     public WindowConfig Window { get; set; } = new();
+
+    /// <summary>
+    /// <b>只有导出文件里才有</b>：这次导出了哪些内容类别、密码是不是明文。
+    ///
+    /// 正常 config.json 不写它（<see cref="Models.ExportOptions"/> 默认值不写就是 null）。
+    /// 留着它是为了让接手的人打开文件就知道"为什么这台机器没配开机自启"，
+    /// 而不是以为是导出坏了。
+    /// </summary>
+    [JsonPropertyName("export_options")]
+    public ExportOptions? ExportOptions { get; set; }
 
     /// <summary>规范化：主题兜底、按 order 排序并重写连续序号。</summary>
     public void Sanitize()

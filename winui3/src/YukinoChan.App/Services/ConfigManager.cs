@@ -82,8 +82,31 @@ public sealed class ConfigManager
         }
 
         config.Sanitize();
+
+        // 最后一道保险：明文密码只允许出现在**导出文件**里。
+        // 万一运行期的配置对象上还挂着 ExportPassword（比如刚从导出文件反序列化过来
+        // 就被 Save 了），绝不能让它进 config.json —— 那会把"密码只存在凭据管理器"
+        // 这条底线破掉。导入流程已经在 SaveImportedCredentials 里清过一遍，
+        // 这里再兜一次底，代价只是两个字符串赋值。
+        StripExportSecrets(config);
+
         var json = JsonSerializer.Serialize(config, SerializeOptions);
         File.WriteAllText(ConfigPath, json, new UTF8Encoding(false));
+    }
+
+    /// <summary>剥掉只属于导出产物的字段（当前就是明文密码与导出说明块）。</summary>
+    public static void StripExportSecrets(AppConfig config)
+    {
+        if (config.Rdp is { } rdp)
+        {
+            rdp.ExportPassword = string.Empty;
+            foreach (var channel in rdp.Channels)
+            {
+                channel.ExportPassword = string.Empty;
+            }
+        }
+
+        config.ExportOptions = null;
     }
 
     /// <summary>把历史配置键迁移到当前键名，保证旧配置文件可直接沿用。</summary>

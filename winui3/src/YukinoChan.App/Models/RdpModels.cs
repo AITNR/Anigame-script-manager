@@ -518,6 +518,13 @@ public sealed class RdpConfig : ObservableObject, ICloneable
         set => SetProperty(ref _credentialSaved, value);
     }
 
+    /// <summary>
+    /// <b>仅用于导出</b>：旧版单通道布局（顶层 <c>target_user</c>，无 <c>channels</c>）的明文密码。
+    /// 语义与 <see cref="RdpChannel.ExportPassword"/> 一致，见那里的说明。
+    /// </summary>
+    [JsonPropertyName("password")]
+    public string ExportPassword { get; set; } = string.Empty;
+
     [JsonPropertyName("session_finish")]
     public string SessionFinish
     {
@@ -749,6 +756,9 @@ public sealed class RdpConfig : ObservableObject, ICloneable
         var copy = (RdpConfig)MemberwiseClone();
         // 通道是可变对象，浅拷贝会让两份配置共享同一条通道 —— 必须逐个复制
         copy._channels = _channels.Select(c => c.Clone()).ToList();
+        // 同 RdpChannel.Clone：明文密码只属于导出产物，运行期的副本一律清空，
+        // 免得被 SaveConfig 写进 config.json
+        copy.ExportPassword = string.Empty;
         return copy;
     }
 }

@@ -16,6 +16,7 @@ using Microsoft.UI.Xaml.Media.Imaging;
 using YukinoChan.Helpers;
 using YukinoChan.Models;
 using YukinoChan.Services;
+using YukinoChan.Views;
 
 namespace YukinoChan.ViewModels;
 
@@ -434,17 +435,13 @@ public sealed class MainViewModel : ObservableObject
     {
         TaskScopePlanner.NormalizeOrdersByChannel(Tasks, Config.Rdp.Channels);
 
-        // 分享配置不携带开机自启动，避免导入者误开。
-        var export = new AppConfig(new List<TaskConfig>(Tasks))
+        // 先问要带走什么，别一把梭全导 —— 分享文件时最容易出事的就是把本机的
+        // 开机自启、窗口大小、密码一起发出去。
+        var dialog = new ExportOptionsDialog();
+        if (!await dialog.ShowDialogAsync() || dialog.Result is not { } options)
         {
-            Theme = Config.Theme,
-            ShutdownAfterDone = Config.ShutdownAfterDone,
-            ShutdownDelaySeconds = Config.ShutdownDelaySeconds,
-            AutoExitAfterDone = Config.AutoExitAfterDone,
-            AutoStartTasks = Config.AutoStartTasks,
-            WindowsStartup = false,
-            EnableTimeoutScreenshot = Config.EnableTimeoutScreenshot,
-        };
+            return;
+        }
 
         var path = await DialogHelper.PickSaveFileAsync(
             "auto_script_config_share.json",
@@ -458,18 +455,133 @@ public sealed class MainViewModel : ObservableObject
 
         try
         {
-            File.WriteAllText(path, JsonSerializer.Serialize(export, new JsonSerializerOptions
+            File.WriteAllText(path, JsonSerializer.Serialize(BuildExport(options), new JsonSerializerOptions
             {
                 WriteIndented = true,
                 Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
             }), new System.Text.UTF8Encoding(false));
 
-            AppendLog($"配置已导出：{path}");
+            AppendLog($"配置已导出：{path}（{options.BuildNote()}）");
         }
         catch (Exception ex)
         {
             AppendLog($"导出配置失败：{ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// 按勾选项拼出要导出的配置。
+    ///
+    /// 关键约束：**绝不改动运行期的 <see cref="Config"/>**。
+    /// 密码是从凭据管理器现读、临时填进副本的；一旦就地改 Config，
+    /// 后续任何一次 <c>SaveConfig()</c> 都会把明文密码写进 config.json —— 那就彻底破了
+    /// "密码只存在凭据管理器里"这条底线。所以全程操作副本。
+    /// </summary>
+    private AppConfig BuildExport(ExportOptions options)
+    {
+        options.Normalize();
+
+        var export = new AppConfig(options.IncludeTasks ? new List<TaskConfig>(Tasks) : new List<TaskConfig>())
+        {
+            ExportOptions = new ExportOptions
+            {
+                IncludeAppSettings = options.IncludeAppSettings,
+                IncludeTasks = options.IncludeTasks,
+                IncludeRemoteAccounts = options.IncludeRemoteAccounts,
+                IncludePasswords = options.IncludePasswords,
+            },
+        };
+
+        export.ExportOptions.Note = options.BuildNote();
+
+        if (options.IncludeAppSettings)
+        {
+            export.Theme = Config.Theme;
+            export.ShutdownAfterDone = Config.ShutdownAfterDone;
+            export.ShutdownDelaySeconds = Config.ShutdownDelaySeconds;
+            export.AutoExitAfterDone = Config.AutoExitAfterDone;
+            export.AutoStartTasks = Config.AutoStartTasks;
+            export.EnableTimeoutScreenshot = Config.EnableTimeoutScreenshot;
+            export.Window = Config.Window;
+        }
+        else
+        {
+            // 本体设置不带走时给一组无害的默认值，别沿用运行期的值：
+            // 对方的导入会"只导入任务与远程设置"，但这份文件本身应该自洽。
+            export.Theme = "system";
+            export.ShutdownDelaySeconds = 60;
+            export.EnableTimeoutScreenshot = true;
+            export.Window = new WindowConfig();
+        }
+
+        // 开机自启动永远是「关」—— 分享配置时带上它，等于替别人把自启打开。
+        export.WindowsStartup = false;
+
+        export.Rdp = BuildExportRdp(options);
+
+        return export;
+    }
+
+    /// <summary>
+    /// 导出用的 RDP 块。
+    ///
+    /// 不勾「远程用户设置」时也要保留主机与账户名（用户明确要求：对方至少知道该连谁），
+    /// 但密码一律不带。
+    /// </summary>
+    private RdpConfig BuildExportRdp(ExportOptions options)
+    {
+        if (!options.IncludeRemoteAccounts)
+        {
+            // 只留身份信息，行为相关的设置全部回到默认，避免把本机的行为带给别人。
+            return new RdpConfig
+            {
+                Enabled = false,
+                TargetHost = Config.Rdp.TargetHost,
+                TargetUser = Config.Rdp.TargetUser,
+                BridgePath = Config.Rdp.BridgePath,
+                Channels = Config.Rdp.Channels
+                    .Select(c => new RdpChannel
+                    {
+                        Id = c.Id,
+                        Name = c.Name,
+                        Host = c.Host,
+                        User = c.User,
+                        BridgePath = c.BridgePath,
+                        // 凭据"已保存"是本机状态，不该让对方以为密码已经在这儿了
+                        CredentialSaved = false,
+                        Enabled = false,
+                    })
+                    .ToList(),
+            };
+        }
+
+        var rdp = Config.Rdp.Clone() as RdpConfig ?? new RdpConfig();
+
+        if (options.IncludePasswords)
+        {
+            // 从凭据管理器现取明文密码，填进副本。Clone 里已经清过一次了，
+            // 这里填的是**只用于导出、随后就丢**的那份。
+            rdp.ExportPassword = RdpCredentialStore.Read(rdp.TargetHost, rdp.TargetUser) ?? string.Empty;
+
+            foreach (var channel in rdp.Channels)
+            {
+                channel.ExportPassword = RdpCredentialStore.Read(channel.Host, channel.User) ?? string.Empty;
+            }
+        }
+        else
+        {
+            rdp.ExportPassword = string.Empty;
+            foreach (var channel in rdp.Channels)
+            {
+                channel.ExportPassword = string.Empty;
+                // 没带密码就别声称"凭据已存"，否则导入方会以为可以直接连
+                channel.CredentialSaved = false;
+            }
+
+            rdp.CredentialSaved = false;
+        }
+
+        return rdp;
     }
 
     public async Task ImportConfigAsync()
@@ -533,22 +645,38 @@ public sealed class MainViewModel : ObservableObject
                 SelectedTask = null;
                 _selectedScope = null;
 
-                // 只导入任务配置；自动关机、开机自启动、截图开关等本机设置保持不变。
-                Tasks.Clear();
-                foreach (var task in imported.Tasks)
+                // 任务清单。导出时没勾「任务设置」的话这份就是空的，
+                // 那就**别把现有任务清掉** —— 空文件不该等价于"清空一切"。
+                if (HasImportedTasks(imported))
                 {
-                    Tasks.Add(task);
+                    Tasks.Clear();
+                    foreach (var task in imported.Tasks)
+                    {
+                        Tasks.Add(task);
+                    }
+                }
+
+                // 远程用户设置：导出时勾了才带，才导入。
+                // 开机自启动永远不导入（分享文件里也永远是关的，兜个底）。
+                if (imported.ExportOptions?.IncludeRemoteAccounts == true)
+                {
+                    ApplyImportedRdp(imported.Rdp);
                 }
 
                 TaskScopePlanner.NormalizeOrdersByChannel(Tasks, Config.Rdp.Channels);
                 RefreshChannelScopes();
+                ReloadChannels(refreshReadiness: false);
                 SelectedTask = ScopeTasks.FirstOrDefault();
             });
+
+            // 密码写进 Windows 凭据管理器，不进 config.json —— 这步**不能**放进上面的
+            // UI 线程块（CredWrite 是同步 IO），也不能在 UI 线程外碰任何绑定属性。
+            var savedCredentials = SaveImportedCredentials(imported);
 
             SaveConfig();
 
             AppendLog($"配置已导入并保存：{path}");
-            AppendLog("导入说明：仅导入任务配置；自动关机、开机自启动、截图开关等本机设置保持不变。");
+            AppendLog(DescribeImport(imported, savedCredentials));
 
             if (HasUsableTaskConfig())
             {
@@ -568,6 +696,181 @@ public sealed class MainViewModel : ObservableObject
             AppendLog($"导入配置失败：{detail}");
             await DialogHelper.ShowMessageAsync("导入失败", $"导入配置失败：{ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// 导入文件里是否真的带了任务。
+    ///
+    /// 老版本导出、以及导出时没勾「任务设置」的文件，<c>tasks</c> 会是空数组。
+    /// 那时**不能**把它当成"清空现有任务" —— 现在的做法是保持原样，
+    /// 否则一次只想导入远程设置的操作会把任务清空。
+    /// </summary>
+    private static bool HasImportedTasks(AppConfig imported) =>
+        imported.Tasks is { Count: > 0 };
+
+    /// <summary>
+    /// 把导入文件里的远程用户设置搬进 <see cref="Config"/>。
+    /// 必须在 UI 线程调用（会动 Channels 集合与相关绑定）。
+    /// </summary>
+    private void ApplyImportedRdp(RdpConfig? source)
+    {
+        if (source is null)
+        {
+            return;
+        }
+
+        var rdp = Config.Rdp;
+
+        rdp.Enabled = source.Enabled;
+        rdp.TargetHost = source.TargetHost;
+        rdp.BridgePath = source.BridgePath;
+        rdp.TargetUser = source.TargetUser;
+        rdp.SessionFinish = source.SessionFinish;
+        rdp.NotifyOnTaskDone = source.NotifyOnTaskDone;
+        rdp.NotifyOnAllDone = source.NotifyOnAllDone;
+        rdp.NotifyLocalTaskDone = source.NotifyLocalTaskDone;
+        rdp.ConnectTimeoutSeconds = source.ConnectTimeoutSeconds;
+        rdp.EmbedRemoteDesktop = source.EmbedRemoteDesktop;
+        rdp.ClientMode = source.ClientMode;
+        rdp.AudioEnabled = source.AudioEnabled;
+        rdp.GfxEnabled = source.GfxEnabled;
+        rdp.DesktopWidth = source.DesktopWidth;
+        rdp.DesktopHeight = source.DesktopHeight;
+
+        // 开机自启动属于本机行为，分享文件里永远是关的，别跟着打开
+        rdp.CredentialSaved = false;
+
+        if (source.Channels is { Count: > 0 })
+        {
+            rdp.Channels = source.Channels
+                .Select(c => new RdpChannel
+                {
+                    Id = c.Id,
+                    Name = c.Name,
+                    Host = c.Host,
+                    User = c.User,
+                    BridgePath = c.BridgePath,
+                    SessionFinish = c.SessionFinish,
+                    DesktopWidth = c.DesktopWidth,
+                    DesktopHeight = c.DesktopHeight,
+                    Enabled = c.Enabled,
+                    // 密码下一步才写进凭据管理器，这里先别声称已存
+                    CredentialSaved = false,
+                })
+                .ToList();
+        }
+    }
+
+    /// <summary>
+    /// 把导入文件里的明文密码写进 Windows 凭据管理器（按 host|user 一条）。
+    ///
+    /// 返回成功保存的条数，用于给用户一句明确交代 ——
+    /// "密码没保存进去"和"文件里根本没密码"是两回事，不说清楚会让人以为能直接连。
+    /// 写完后导出用的临时字段要清掉，免得被后面的 <c>SaveConfig()</c> 带进 config.json。
+    /// </summary>
+    private int SaveImportedCredentials(AppConfig imported)
+    {
+        if (imported.ExportOptions?.IncludePasswords != true)
+        {
+            return 0;
+        }
+
+        var saved = 0;
+
+        try
+        {
+            var rdp = imported.Rdp;
+            if (rdp is null)
+            {
+                return 0;
+            }
+
+            if (!string.IsNullOrEmpty(rdp.ExportPassword)
+                && RdpCredentialStore.Write(rdp.TargetHost, rdp.TargetUser, rdp.ExportPassword))
+            {
+                rdp.CredentialSaved = true;
+                saved++;
+            }
+
+            foreach (var channel in rdp.Channels ?? new List<RdpChannel>())
+            {
+                if (string.IsNullOrEmpty(channel.ExportPassword))
+                {
+                    continue;
+                }
+
+                if (!RdpCredentialStore.Write(channel.Host, channel.User, channel.ExportPassword))
+                {
+                    continue;
+                }
+
+                saved++;
+
+                // 标记要落在**运行期那份**通道上（导入时 ApplyImportedRdp 已经把
+                // imported 的通道搬进 Config.Rdp.Channels 了，但这里按 id 找一份，
+                // 不假设两边是同一个对象）
+                var live = Config.Rdp.Channels.FirstOrDefault(c =>
+                    string.Equals(c.Id, channel.Id, StringComparison.OrdinalIgnoreCase));
+                if (live is not null)
+                {
+                    live.CredentialSaved = true;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // 密码保存失败不该让整个导入算失败：配置已经搬进来了，只是要重新输一次密码。
+            AppendLog($"导入的密码没能存进凭据管理器（需要手动重输一次）：{ex.Message}");
+        }
+        finally
+        {
+            // 清掉临时字段：它们只属于导出产物，绝不能进 config.json
+            imported.Rdp.ExportPassword = string.Empty;
+            foreach (var channel in imported.Rdp?.Channels ?? new List<RdpChannel>())
+            {
+                channel.ExportPassword = string.Empty;
+            }
+        }
+
+        return saved;
+    }
+
+    /// <summary>给用户一句"这次到底导入了什么"的实话，别让人猜。</summary>
+    private static string DescribeImport(AppConfig imported, int savedCredentials)
+    {
+        var options = imported.ExportOptions;
+        if (options is null)
+        {
+            return "导入说明：这份文件没有说明来源，只按旧规则导入任务配置；"
+                + "自动关机、开机自启动、截图开关等本机设置保持不变。";
+        }
+
+        var parts = new List<string>();
+        parts.Add(HasImportedTasks(imported)
+            ? $"任务配置（{imported.Tasks.Count} 条）"
+            : "未包含任务（本机任务保持不变）");
+
+        if (options.IncludeRemoteAccounts)
+        {
+            parts.Add("远程用户设置");
+        }
+
+        if (options.IncludeAppSettings)
+        {
+            parts.Add("本体设置");
+        }
+
+        var text = "导入说明：" + string.Join("、", parts)
+            + "。自动关机、开机自启动、截图开关等本机设置仍保持本机原值。";
+
+        if (options.IncludePasswords)
+        {
+            text += savedCredentials > 0
+                ? $"已把 {savedCredentials} 条密码存入 Windows 凭据管理器。"
+                : "文件里没有可用的密码，远程连接需手动重输一次密码。";
+        }
+
+        return text;
     }
 
     /// <summary>

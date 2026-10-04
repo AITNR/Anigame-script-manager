@@ -118,6 +118,18 @@ public sealed class RdpChannel : ObservableObject, ICloneable
         set => SetProperty(ref _sessionFinish, SessionFinishModes.Normalize(value));
     }
 
+    /// <summary>
+    /// <b>仅用于导出</b>：从 Windows 凭据管理器取出来的明文密码。
+    ///
+    /// 正常配置里**永远不写**它 —— 密码只存在凭据管理器（DPAPI 保护），
+    /// config.json 只留 <see cref="CredentialSaved"/> 标记。
+    /// 只有「导出配置」勾选了「远程用户设置（含密码）」时，
+    /// 才会临时把读到的密码填进来，让接收方导入即用。
+    /// 所以 <see cref="Clone"/> / 导入路径都不该碰这个字段。
+    /// </summary>
+    [JsonPropertyName("password")]
+    public string ExportPassword { get; set; } = string.Empty;
+
     /// <summary>远程桌面宽度，0 表示自适应。</summary>
     [JsonPropertyName("desktop_width")]
     public int DesktopWidth
@@ -174,7 +186,15 @@ public sealed class RdpChannel : ObservableObject, ICloneable
     [JsonIgnore]
     public bool IsConfigured => !string.IsNullOrWhiteSpace(User);
 
-    public RdpChannel Clone() => (RdpChannel)MemberwiseClone();
+    public RdpChannel Clone()
+    {
+        var copy = (RdpChannel)MemberwiseClone();
+        // MemberwiseClone 会把「仅导出用」的明文密码一起带走。克隆体是给运行期用的
+        // （切页、重连、代理下发），不能让密码在内存里到处复制，更不能被 SaveConfig 写进
+        // config.json —— 正常落盘只该有 credential_saved 标记。
+        copy.ExportPassword = string.Empty;
+        return copy;
+    }
 
     object ICloneable.Clone() => Clone();
 
