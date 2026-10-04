@@ -47,6 +47,8 @@ public sealed partial class RdpMultiViewPage : Page
         _cells.AddRange(new[] { Cell0, Cell1, Cell2, Cell3 });
         foreach (var cell in _cells)
         {
+            // 同通道页：把画面诊断日志接进运行日志，否则多画面下看不出渲染路径
+            cell.View.DiagnosticLog = App.ViewModel.AppendLog;
             cell.PopOutRequested += OnCellPopOut;
             // 双击 / F11 = 弹成独立窗口（多画面下没有全屏这一说）
             cell.FullScreenRequested += OnCellPopOut;

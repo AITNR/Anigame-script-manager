@@ -97,12 +97,36 @@ YCN_API int ycn_rdp_send_mouse(int session, uint32_t flags, uint16_t x, uint16_t
 YCN_API int ycn_rdp_send_key(int session, int down, int extended, uint16_t scancode);
 
 /* 取当前帧。成功返回 YCN_OK；out_data 有效期到下一次 grab / disconnect。
- * stride 单位字节，像素格式 BGRA32（与 D3D11 B8G8R8A8 / SoftwareBitmap Bgra8 对齐） */
+ * stride 单位字节，像素格式 BGRA32（与 D3D11 B8G8R8A8 / SoftwareBitmap Bgra8 对齐）
+ *
+ * ⚠️ 只返回内部缓冲的裸指针：读者在**锁外**读取，与 end_paint 的 memcpy 写入存在竞态，
+ * 高帧率动画下会读到「上下半不同帧」的画面（极轻的撕裂）。新代码请用 ycn_rdp_copy_frame。 */
 YCN_API int ycn_rdp_grab_frame(int session, uint32_t* out_width, uint32_t* out_height,
                                uint32_t* out_stride, const uint8_t** out_data);
 
+/* 取当前帧并**在 g_lock 内**拷贝到调用方缓冲（撕裂安全，推荐用这个）。
+ * dst_size 需 >= stride*height；不足时返回 YCN_ERR_NO_MEMORY（用 out_* 里的真实尺寸可判出差异）。
+ * 与 grab 的唯一区别就是拷贝发生在锁内，因此不会与 end_paint 的整帧写入交叠。 */
+YCN_API int ycn_rdp_copy_frame(int session, uint8_t* dst, uint32_t dst_size,
+                               uint32_t* out_width, uint32_t* out_height, uint32_t* out_stride);
+
 /* 取最近一次错误的可读描述（UTF-8）。session 未知时返回全局最后错误 */
 YCN_API void ycn_rdp_last_error(int session, char* buf, size_t buflen);
+
+/* 诊断：GFX 图形管线状态。
+ *   0 = use_gfx 关闭（没请求图形管线）
+ *   1 = 已请求并订阅了通道事件，但**始终没收到任何动态通道连接事件**（DVC 没协商上）
+ *   2 = GFX 通道已连上并接入了 GDI 管线（全帧模式已生效）
+ *   3 = 收到过通道连接事件，但没有一条叫 RDPGFX_DVC_CHANNEL_NAME（通道名不匹配）
+ *   4 = GFX 通道连上了，但 gdi_graphics_pipeline_init 返回失败（配 ycn_rdp_diag 的 gfx_init/codecs_null 看原因）
+ * 用来区分「服务器没给 GFX」和「我们没接住 GFX」。 */
+YCN_API int ycn_rdp_gfx_state(int session, uint32_t* out_dvc_count);
+
+/* 诊断：已连上的通道名（逗号分隔，UTF-8）。用来确认服务器到底给没给 rdpgfx。 */
+YCN_API void ycn_rdp_dvc_names(int session, char* buf, size_t buflen);
+
+/* 诊断：一次性输出通道加载状态（load_addins 返回值 / 静态与动态通道计数 / GFX 状态 / 通道名）。 */
+YCN_API void ycn_rdp_diag(int session, char* buf, size_t buflen);
 
 /* 版本串（诊断 + 冒烟断言用） */
 YCN_API const char* ycn_rdp_version(void);

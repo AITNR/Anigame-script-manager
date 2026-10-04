@@ -63,6 +63,11 @@ public sealed partial class RdpChannelPage : Page, System.ComponentModel.INotify
         Cell0.DisconnectRequested += OnCellDisconnect;
         Cell0.ConnectRequested += OnCellConnect;
 
+        // 画面诊断日志（D3D 初始化成功/失败、渲染路径、Present 失败）接进运行日志。
+        // 不接的话通道页——也就是用户真正看画面的地方——这些关键信息全被丢掉，
+        // 出撕裂时根本分不清走的是 D3D 还是软渲染回退。
+        Cell0.View.DiagnosticLog = App.ViewModel.AppendLog;
+
         // 画面上的双击 / F11 也走同一条全屏路径（浮层按钮只是显式入口）
         _fullScreen = new RdpFullScreenCoordinator(Cell0.View, App.ViewModel.AppendLog, OnFullScreenStateChanged);
 

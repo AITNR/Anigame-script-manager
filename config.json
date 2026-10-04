@@ -32,7 +32,7 @@
       "game_process": ""
     },
     {
-      "enabled": false,
+      "enabled": true,
       "name": "BetterGI.exe",
       "script_path": "C:/Program Files/BetterGI/BetterGI.exe",
       "order": 2,
@@ -56,34 +56,10 @@
       "game_process": ""
     },
     {
-      "enabled": true,
-      "name": "MaaEnd.exe",
-      "script_path": "D:\\Program Files\\MaaEnd\\MaaEnd.exe",
-      "order": 3,
-      "timeout_minutes": 300,
-      "timeout_action": "kill_and_continue",
-      "use_args": false,
-      "args": "",
-      "wait_mode": "process_name",
-      "wait_process_name": "MaaEnd.exe",
-      "confirm_enter_delay_seconds": 0,
-      "channel_id": "default",
-      "concurrent_group": "",
-      "concurrent_policy": "wait_all",
-      "enable_watchdog": true,
-      "process_keywords": [],
-      "window_keywords": [
-        "endfield"
-      ],
-      "launcher_process": "",
-      "main_process": "",
-      "game_process": ""
-    },
-    {
       "enabled": false,
       "name": "MAA.exe",
       "script_path": "",
-      "order": 4,
+      "order": 3,
       "timeout_minutes": 20,
       "timeout_action": "kill_and_continue",
       "use_args": false,
@@ -107,7 +83,7 @@
       "enabled": false,
       "name": "M9A.exe",
       "script_path": "",
-      "order": 5,
+      "order": 4,
       "timeout_minutes": 15,
       "timeout_action": "kill_and_continue",
       "use_args": false,
@@ -123,6 +99,28 @@
       "window_keywords": [
         "mumu"
       ],
+      "launcher_process": "",
+      "main_process": "",
+      "game_process": ""
+    },
+    {
+      "enabled": true,
+      "name": "March7th Assistant.exe",
+      "script_path": "C:\\Program Files\\March7thAssistant_v2.7.0\\March7th Launcher.exe",
+      "order": 5,
+      "timeout_minutes": 400,
+      "timeout_action": "kill_and_continue",
+      "use_args": true,
+      "args": "main -e",
+      "wait_mode": "window_title",
+      "wait_process_name": "星穹铁道",
+      "confirm_enter_delay_seconds": 0,
+      "channel_id": "5c24fe85",
+      "concurrent_group": "",
+      "concurrent_policy": "wait_all",
+      "enable_watchdog": false,
+      "process_keywords": [],
+      "window_keywords": [],
       "launcher_process": "",
       "main_process": "",
       "game_process": ""
@@ -151,22 +149,24 @@
     },
     {
       "enabled": true,
-      "name": "March7th Assistant.exe",
-      "script_path": "C:\\Program Files\\March7thAssistant_v2.7.0\\March7th Launcher.exe",
+      "name": "MaaEnd.exe",
+      "script_path": "D:\\Program Files\\MaaEnd\\MaaEnd.exe",
       "order": 7,
-      "timeout_minutes": 10,
+      "timeout_minutes": 300,
       "timeout_action": "kill_and_continue",
-      "use_args": true,
-      "args": "main -e",
-      "wait_mode": "window_title",
-      "wait_process_name": "星穹铁道",
+      "use_args": false,
+      "args": "",
+      "wait_mode": "process_name",
+      "wait_process_name": "MaaEnd.exe",
       "confirm_enter_delay_seconds": 0,
       "channel_id": "5c24fe85",
       "concurrent_group": "",
       "concurrent_policy": "wait_all",
-      "enable_watchdog": false,
+      "enable_watchdog": true,
       "process_keywords": [],
-      "window_keywords": [],
+      "window_keywords": [
+        "endfield"
+      ],
       "launcher_process": "",
       "main_process": "",
       "game_process": ""
@@ -217,10 +217,10 @@
     ]
   },
   "window": {
-    "x": 966,
-    "y": 428,
-    "width": 2344,
-    "height": 991,
+    "x": 825,
+    "y": 554,
+    "width": 2297,
+    "height": 1098,
     "maximized": false
   }
 }

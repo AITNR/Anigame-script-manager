@@ -2832,7 +2832,9 @@ public sealed class MainViewModel : ObservableObject
 
             long sum = 0;
             var samples = 0;
-            for (var i = 0; i + 2 < px.Length; i += 4096 * 4)
+            // px 是可复用的抓帧缓冲，长度可能大于本帧字节数 —— 按 stride*height 界定有效区间
+            var validBytes = checked((int)(st * h));
+            for (var i = 0; i + 2 < validBytes; i += 4096 * 4)
             {
                 sum += px[i] + px[i + 1] + px[i + 2];
                 samples += 3;

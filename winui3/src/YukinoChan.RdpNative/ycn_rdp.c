@@ -29,6 +29,14 @@
 #include <freerdp/client/cmdline.h>
 #include <freerdp/client/channels.h>
 #include <freerdp/channels/rdpgfx.h>
+#include <freerdp/channels/drdynvc.h>
+#include <freerdp/channels/rdpsnd.h>
+
+/* FREERDP_ADDIN_CHANNEL_* 的值照抄 freerdp/addin.h。
+ * ⚠️ 不能 #include <freerdp/addin.h>：它会拉进 rail.h/shellapi.h，
+ * 与 windows.h 的 NIIF_* 宏撞车（C2059，M0 已踩过同类坑）。 */
+#define YCN_ADDIN_CHANNEL_STATIC  0x00001000
+#define YCN_ADDIN_CHANNEL_ENTRYEX 0x00008000
 #include <freerdp/client.h>
 #include <winpr/wtypes.h>
 #include <winpr/synch.h>
@@ -126,6 +134,13 @@ typedef struct
 	int allow_selfsigned;
 	int enable_audio;
 	int use_gfx;
+	volatile LONG gfx_state;       /* 0/1/2/3，见 ycn_rdp_gfx_state */
+	volatile LONG dvc_connected;   /* 收到的动态通道连接事件累计数 */
+	char dvc_names[256];           /* 已连上的通道名（逗号分隔，诊断用） */
+	int addins_rc;                 /* freerdp_client_load_addins 返回值（0 成功 / -1 失败 / -2 未调用） */
+	int gfx_init_rc;               /* gdi_graphics_pipeline_init 返回值：0 未调用 / 1 成功 / 2 失败 */
+	int gfx_codecs_null;           /* 接入后 gfx->codecs 是否为 NULL（-1 未测）：1 = NULL（解码器没准备好） */
+	int gfx_progressive_null;      /* gfx->codecs->progressive 是否为 NULL：1 = NULL（GFX 帧处理会崩的嫌疑点） */
 } YcnSession;
 
 static YcnSession g_sessions[YCN_MAX_SESSIONS];
@@ -269,21 +284,298 @@ static BOOL ycn_end_paint(rdpContext* context)
 /* GFX 动态通道连上：把 RdpgfxClientContext 接到 GDI 图形管线（M6）。
  * 之后 GFX 解码帧经 gdi_OutputUpdate 自动 blit 进 primary_buffer 并触发
  * begin/end_paint —— ycn_end_paint 钩子照常收帧，且 EndFrame 语义保证整帧。 */
+/* 诊断落盘（定义在下面，这里先声明，回调要用） */
+static void ycn_debug_dump_gfx(const YcnSession* s, const char* tag);
+
+/* ---- 诊断：GFX 帧到底用的哪个编解码器 ----
+ * codecId：0=UNCOMPRESSED 1=AV1 8=CLEARCODEC 9=CAPROGRESSIVE 10=PLANAR
+ *          11=AVC420 13=CAPROGRESSIVE_V2 14=AVC444 15=AVC444v2
+ * 若日志里出现 11/14/15，而本机 freerdp 是 WITH_GFX_H264=OFF（没有 h264 解码器），
+ * 那就是崩溃的直接原因 —— 服务器无视 AVC_DISABLED 强推 AVC。 */
+static pcRdpgfxSurfaceCommand g_orig_gfx_surface = NULL;
+static volatile LONG g_gfx_last_codec = -1;
+
+/* 链式挂在 gdi 的实现之前：只记账（诊断已确认服务器发 CAPROGRESSIVE + CLEARCODEC），
+ * 不再每帧写文件 —— 同步 I/O 会拖垮帧率。 */
+static UINT ycn_gfx_surface_command(RdpgfxClientContext* ctx, const RDPGFX_SURFACE_COMMAND* cmd)
+{
+	if (cmd)
+		InterlockedExchange(&g_gfx_last_codec, (LONG)cmd->codecId);
+	if (g_orig_gfx_surface)
+		return g_orig_gfx_surface(ctx, cmd);
+	return CHANNEL_RC_OK;
+}
+
+/* ---- 诊断：GFX 各阶段「面包屑」----
+ * 崩溃点定位：钩住 ResetGraphics / StartFrame / EndFrame，进入与退出各落一行盘，
+ * 崩溃前最后一行就是元凶所在的那一步。 */
+static pcRdpgfxResetGraphics g_orig_reset_graphics = NULL;
+static pcRdpgfxStartFrame g_orig_start_frame = NULL;
+static pcRdpgfxEndFrame g_orig_end_frame = NULL;
+
+static void ycn_debug_dump_tag(const char* tag)
+{
+	char path[MAX_PATH] = WINPR_C_ARRAY_INIT;
+	FILE* f = NULL;
+	const DWORD n = GetTempPathA(MAX_PATH, path);
+	if (n == 0 || n >= MAX_PATH)
+		return;
+	strcat_s(path, sizeof(path), "ycn_gfx_debug.txt");
+	if (fopen_s(&f, path, "a") != 0 || !f)
+		return;
+	fprintf(f, "[tag] %s\n", tag);
+	fclose(f);
+}
+
+static UINT ycn_gfx_reset_graphics(RdpgfxClientContext* ctx, const RDPGFX_RESET_GRAPHICS_PDU* pdu)
+{
+	UINT rc = CHANNEL_RC_OK;
+	if (g_orig_reset_graphics)
+	{
+		/* ⚠️ gdi_ResetGraphics 在本机这份 freerdp 上**必然 AV**（已用面包屑钉死：
+		 * 进去就出不来，异常码 0xC0000005）。SEH 兜住之后 GFX 全帧管线照常工作
+		 * （实测帧到达 ~37 次/秒、codec = CAPROGRESSIVE + CLEARCODEC、画面正常），
+		 * 所以这里先兜底保证可用；治本要等定位到 gdi_ResetGraphics 内部的具体行。 */
+		__try
+		{
+			rc = g_orig_reset_graphics(ctx, pdu);
+		}
+		__except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION
+		              ? EXCEPTION_EXECUTE_HANDLER
+		              : EXCEPTION_CONTINUE_SEARCH)
+		{
+			ycn_debug_dump_tag("ResetGraphics-AV(0xC0000005) swallowed");
+			rc = CHANNEL_RC_OK; /* 假装成功，别让上层直接断链 */
+		}
+	}
+	return rc;
+}
+
+static UINT ycn_gfx_start_frame(RdpgfxClientContext* ctx, const RDPGFX_START_FRAME_PDU* pdu)
+{
+	UINT rc = CHANNEL_RC_OK;
+	if (g_orig_start_frame)
+	{
+		__try
+		{
+			rc = g_orig_start_frame(ctx, pdu);
+		}
+		__except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION
+		              ? EXCEPTION_EXECUTE_HANDLER
+		              : EXCEPTION_CONTINUE_SEARCH)
+		{
+			ycn_debug_dump_tag("StartFrame-AV swallowed");
+			rc = CHANNEL_RC_OK;
+		}
+	}
+	return rc;
+}
+
+static UINT ycn_gfx_end_frame(RdpgfxClientContext* ctx, const RDPGFX_END_FRAME_PDU* pdu)
+{
+	UINT rc = CHANNEL_RC_OK;
+	if (g_orig_end_frame)
+	{
+		__try
+		{
+			rc = g_orig_end_frame(ctx, pdu);
+		}
+		__except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION
+		              ? EXCEPTION_EXECUTE_HANDLER
+		              : EXCEPTION_CONTINUE_SEARCH)
+		{
+			ycn_debug_dump_tag("EndFrame-AV swallowed");
+			rc = CHANNEL_RC_OK;
+		}
+	}
+	return rc;
+}
+
 static void ycn_on_channel_connected(void* ctx, const ChannelConnectedEventArgs* e)
 {
-	freerdp* instance = (freerdp*)ctx;
+	/* ⚠️ 第一个参数是 **rdpContext***，不是 freerdp*！
+	 * FreeRDP 的触发点：PubSub_OnChannelConnected(pubSub, instance->context, &e)
+	 * （libfreerdp/core/client.c，官方客户端的 handler 也把首参命名为 context）。
+	 * 早期版本按 freerdp* 解释 → ((freerdp*)ctx)->context 是垃圾指针 →
+	 * 找不到 session → 事件全被丢掉 → rdpgfx 永远接不上 GDI（撕裂的真凶之二）。 */
+	rdpContext* context = (rdpContext*)ctx;
+	YcnSession* s = NULL;
+	int i;
 
-	if (!instance || !instance->context || !instance->context->gdi || !e || !e->name)
+	if (!context || !e || !e->name)
 	{
 		return;
 	}
 
-	if (strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) == 0)
+	/* 这里**不能**检查 context->gdi：早期连上的通道（drdynvc 等）可能发生在
+	 * PostConnect 的 gdi_init 之前，被 gdi 检查挡掉就什么诊断都看不到。 */
+	EnterCriticalSection(&g_lock);
+	for (i = 0; i < YCN_MAX_SESSIONS; i++)
 	{
-		gdi_graphics_pipeline_init(instance->context->gdi,
-		                           (RdpgfxClientContext*)e->pInterface);
-		WLog_INFO(TAG, "gfx pipeline: attached to GDI (full-frame mode)");
+		if (g_sessions[i].used && g_sessions[i].instance &&
+		    g_sessions[i].instance->context == context)
+		{
+			s = &g_sessions[i];
+			break;
+		}
 	}
+	if (s)
+	{
+		InterlockedIncrement(&s->dvc_connected);
+		if (s->dvc_names[0] != '\0' &&
+		    strlen(s->dvc_names) + strlen(e->name) + 2 < sizeof(s->dvc_names))
+		{
+			strcat_s(s->dvc_names, sizeof(s->dvc_names), ",");
+		}
+		if (strlen(s->dvc_names) + strlen(e->name) + 1 < sizeof(s->dvc_names))
+		{
+			strcat_s(s->dvc_names, sizeof(s->dvc_names), e->name);
+		}
+		if (s->gfx_state == 1 && strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) != 0)
+		{
+			s->gfx_state = 3; /* 通道建了，但没有 GFX 那条 */
+		}
+	}
+	LeaveCriticalSection(&g_lock);
+
+	if (strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) == 0 && context->gdi)
+	{
+		RdpgfxClientContext* gfx = (RdpgfxClientContext*)e->pInterface;
+		const BOOL ok = gdi_graphics_pipeline_init(context->gdi, gfx);
+		WLog_INFO(TAG, "gfx pipeline: attached to GDI (full-frame mode)");
+		if (s)
+		{
+			s->gfx_init_rc = ok ? 1 : 2;
+			s->gfx_codecs_null = (gfx && gfx->codecs) ? 0 : 1;
+			s->gfx_progressive_null = (gfx && gfx->codecs && gfx->codecs->progressive) ? 0 : 1;
+			InterlockedExchange(&s->gfx_state, ok ? 2 : 4);
+			ycn_debug_dump_gfx(s, ok ? "attach-ok" : "attach-fail"); /* 崩溃前落盘 */
+
+			if (ok)
+			{
+				/* 链式挂钩：记录收到的 GFX 帧用的编解码器（判断是不是 AVC） */
+				g_orig_gfx_surface = gfx->SurfaceCommand;
+				gfx->SurfaceCommand = ycn_gfx_surface_command;
+
+				/* 面包屑：把崩溃点夹到具体某一步 */
+				g_orig_reset_graphics = gfx->ResetGraphics;
+				gfx->ResetGraphics = ycn_gfx_reset_graphics;
+				g_orig_start_frame = gfx->StartFrame;
+				gfx->StartFrame = ycn_gfx_start_frame;
+				g_orig_end_frame = gfx->EndFrame;
+				gfx->EndFrame = ycn_gfx_end_frame;
+			}
+		}
+	}
+}
+
+/* FreeRDP 的正式通道加载入口（instance->LoadChannels）。**通道必须在这里加载。**
+ *
+ * 为什么不能像最初那样在 PreConnect 里调 freerdp_client_load_addins：
+ *   freerdp_connect_begin() 的顺序是
+ *       line 120  IFCALLRET(instance->PreConnect, ...)      ← 我们原来在这里 load_addins
+ *       line 136  utils_reload_channels(instance->context)  ← 之后才真正定 channels
+ *   而 utils_reload_channels 会把 context->channels **整个 disconnect/close/free 再重建**，
+ *   然后回调 instance->LoadChannels 重新加载。
+ *   → 在 PreConnect 里加载 = 往一个马上要被释放的对象上加载，重建后一条通道都不剩：
+ *     clientDataCount == 0 → freerdp_channels_post_connect 的循环空转 →
+ *     没有任何 ChannelConnected 事件 → rdpgfx 永远接不到 GDI →
+ *     服务器只能走 legacy 条带更新（实测 ~800 个碎帧/秒）= 画面撕裂的真正来源。
+ *
+ * 时机正好：本回调在 PreConnect 之后执行，所以 PreConnect 里设的
+ * SupportGraphicsPipeline / SupportDynamicChannels 已经生效，
+ * freerdp_client_load_addins 才能自行把 rdpgfx（dynamic）与 drdynvc（static）挂上。 */
+static BOOL ycn_load_channels(freerdp* instance)
+{
+	rdpSettings* settings;
+	YcnSession* s = NULL;
+	int i;
+	BOOL wantAudio;
+
+	if (!instance || !instance->context || !instance->context->channels)
+	{
+		return FALSE;
+	}
+	settings = instance->context->settings;
+	if (!settings)
+	{
+		return FALSE;
+	}
+
+	/* 取本会话的音频开关（用户配置的 rdp.audio_enabled） */
+	EnterCriticalSection(&g_lock);
+	for (i = 0; i < YCN_MAX_SESSIONS; i++)
+	{
+		if (g_sessions[i].used && g_sessions[i].instance &&
+		    g_sessions[i].instance->context == instance->context)
+		{
+			s = &g_sessions[i];
+			break;
+		}
+	}
+	wantAudio = (s && s->enable_audio) ? TRUE : FALSE;
+	LeaveCriticalSection(&g_lock);
+
+	/* 放行 GFX 需要的两条通道：
+	 *   rdpgfx  —— load_addins 的 step 1 按 SupportGraphicsPipeline 自行挂为动态通道
+	 *   drdynvc —— step 4 按 SupportDynamicChannels 自行加载（DVC 管理器）
+	 *
+	 * AudioPlayback 按用户配置放行：rdpsnd 一旦挂上，load_addins 的 step 2 会自己把
+	 * DeviceRedirection 拉回 TRUE 并加载 rdpdr（rdpsnd 硬依赖它）—— 这是 FreeRDP 的既定
+	 * 行为，不是我们能绕过的。早期版本为避免 rdpdr 干扰画面把音频一起关了（那时候 GFX
+	 * 还没通、现象分不清），GFX 修好后重新放开，靠自检确认帧率是否仍稳。 */
+	freerdp_settings_set_bool(settings, FreeRDP_AudioPlayback, wantAudio);
+	freerdp_settings_set_bool(settings, FreeRDP_AudioCapture, FALSE);
+	freerdp_settings_set_bool(settings, FreeRDP_DeviceRedirection, FALSE);
+	freerdp_settings_set_bool(settings, FreeRDP_RedirectClipboard, FALSE);
+	freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, TRUE);
+	freerdp_settings_set_bool(settings, FreeRDP_SupportDynamicChannels, TRUE);
+
+	/* 关掉 disp（Microsoft::Windows::RDS::DisplayControl，动态分辨率）：
+	 * 我们固定 1920×1080，不需要它；多一条通道只会多几次 ResetGraphics 协商，
+	 * 而 gdi_ResetGraphics 在本机这份 freerdp 上是要靠 SEH 兜 AV 的（见钩子注释）。 */
+	freerdp_settings_set_bool(settings, FreeRDP_SupportDisplayControl, FALSE);
+	freerdp_settings_set_bool(settings, FreeRDP_UseMultimon, FALSE);
+
+	return freerdp_client_load_addins(instance->context->channels, settings);
+}
+
+/* ---- 诊断：把 GFX 接入结果**立刻落盘** ----
+ * 为什么不用 last_error / 导出接口：GFX 半初始化会直接 AV 把进程打死，
+ * C# 那边 5 秒一拍的日志根本来不及写。写文件是同步的，崩溃前一定落盘。
+ * 只在异常分支调用，正常路径零 I/O（否则同步磁盘写会拖垮帧率）。 */
+static void ycn_debug_dump_gfx(const YcnSession* s, const char* tag)
+{
+	char path[MAX_PATH] = WINPR_C_ARRAY_INIT;
+	char line[640] = WINPR_C_ARRAY_INIT;
+	FILE* f = NULL;
+
+	if (!s)
+		return;
+	const DWORD n = GetTempPathA(MAX_PATH, path);
+	if (n == 0 || n >= MAX_PATH)
+		return;
+	strcat_s(path, sizeof(path), "ycn_gfx_debug.txt");
+
+	if (fopen_s(&f, path, "a") != 0 || !f)
+		return;
+
+	_snprintf_s(line, sizeof(line), _TRUNCATE,
+	            "[%s] gfx_init=%d codecs_null=%d prog_null=%d gfx_state=%d dvc=%u static_ch=%u dyn_ch=%u "
+	            "load_addins=%d names=[%s]\n",
+	            tag, s->gfx_init_rc, s->gfx_codecs_null, s->gfx_progressive_null, (int)s->gfx_state,
+	            (unsigned)s->dvc_connected,
+	            s->instance && s->instance->context && s->instance->context->settings
+	                ? (unsigned)freerdp_settings_get_uint32(s->instance->context->settings,
+	                                                         FreeRDP_StaticChannelCount)
+	                : 0u,
+	            s->instance && s->instance->context && s->instance->context->settings
+	                ? (unsigned)freerdp_settings_get_uint32(s->instance->context->settings,
+	                                                         FreeRDP_DynamicChannelCount)
+	                : 0u,
+	            s->addins_rc, s->dvc_names);
+	fputs(line, f);
+	fclose(f);
 }
 
 static BOOL ycn_pre_connect(freerdp* instance)
@@ -327,9 +619,39 @@ static BOOL ycn_pre_connect(freerdp* instance)
 	freerdp_settings_set_bool(settings, FreeRDP_RedirectSerialPorts, FALSE);
 	freerdp_settings_set_bool(settings, FreeRDP_RedirectClipboard, FALSE);
 
-	/* 加载客户端通道（rdpsnd 音频等）。失败不阻断连接，仅记错误 */
-	if (!freerdp_client_load_addins(instance->context->channels, instance->context->settings))
-		freerdp_set_last_error_log(instance->context, ERRCONNECT_CONNECT_FAILED);
+	/* ---- 动态虚拟通道：GFX 全帧管线的地基 ----
+	 *
+	 * ⚠️ 这里**只开开关**，不要调 freerdp_client_load_addins ——
+	 * 真正的加载必须放在 instance->LoadChannels（见 ycn_load_channels 的注释：
+	 * PreConnect 之后 utils_reload_channels 会重建 channels，在这里加载等于白加载）。
+	 *
+	 * 也不要自己 add_static/dynamic_channel 去加 "drdynvc"/"rdpgfx"：
+	 * load_addins 内部已按 SupportGraphicsPipeline/SupportDynamicChannels 自行处理，
+	 * 手动再加一遍会重名失败，进而让 load_addins 提前 return FALSE。 */
+	freerdp_settings_set_bool(settings, FreeRDP_SupportDynamicChannels, TRUE);
+
+	/* 通道连接事件就在 PreConnect 订阅（早于 utils_reload_channels / post_connect）。
+	 * GFX 全靠它把 RdpgfxClientContext 接到 GDI 图形管线。 */
+	if (s)
+	{
+		int code = 0;
+		if (PubSub_SubscribeChannelConnected(instance->context->pubSub,
+		                                     ycn_on_channel_connected) >= 0)
+		{
+			code |= 2;
+		}
+		if (freerdp_channels_load_static_addin_entry("rdpgfx", NULL, NULL,
+		        YCN_ADDIN_CHANNEL_STATIC | YCN_ADDIN_CHANNEL_ENTRYEX))
+		{
+			code |= 4;
+		}
+		if (freerdp_channels_load_static_addin_entry("drdynvc", NULL, NULL,
+		        YCN_ADDIN_CHANNEL_STATIC | YCN_ADDIN_CHANNEL_ENTRYEX))
+		{
+			code |= 8;
+		}
+		s->addins_rc = code;
+	}
 
 	/* 强制 slowpath 输入：标准 RDP 安全（SecurityLayer=0 服务器）+ 重连会话场景下，
 	 * fastpath 输入 PDU 在连接后 N 秒发出会被服务器判「协议流错误」并断开
@@ -386,12 +708,20 @@ static BOOL ycn_post_connect(freerdp* instance)
 	s->connected_at = GetTickCount64();
 	s->refresh_requested = 0;
 
-	/* GFX 全帧管线：订阅动态通道连接事件（M6）。GFX 通道握手完成后框架把
-	 * RdpgfxClientContext 交给我们，接到 GDI 管线后解码帧自动 blit 进
-	 * primary_buffer 并走 begin/end_paint —— 帧回调链路零改动 */
-	if (s->use_gfx)
+	/* GFX 通道连接事件的订阅已移到 PreConnect（更早，见那里注释）——
+	 * 这里只做加载结果自检：通道有没有真的进 channels（诊断位 addins_rc 的 bit4/bit5）。 */
+	if (s)
 	{
-		PubSub_SubscribeChannelConnected(instance->context->pubSub, ycn_on_channel_connected);
+		if (freerdp_channels_get_static_channel_interface(instance->context->channels,
+		                                                  DRDYNVC_SVC_CHANNEL_NAME))
+		{
+			s->addins_rc |= 16;
+		}
+		if (freerdp_channels_get_static_channel_interface(instance->context->channels,
+		                                                  RDPSND_CHANNEL_NAME))
+		{
+			s->addins_rc |= 32;
+		}
 	}
 
 	InterlockedExchange(&s->state, YCN_STATE_RUNNING);
@@ -639,6 +969,13 @@ YCN_API int ycn_rdp_connect(const ycn_rdp_params* params, const ycn_rdp_callback
 	s->allow_selfsigned = params->allow_selfsigned;
 	s->enable_audio = params->enable_audio;
 	s->use_gfx = params->use_gfx;
+	s->gfx_state = params->use_gfx ? 1 : 0;
+	s->dvc_connected = 0;
+	s->dvc_names[0] = '\0';
+	s->addins_rc = -2; /* 尚未调用 load_addins */
+	s->gfx_init_rc = 0;
+	s->gfx_codecs_null = -1;
+	s->gfx_progressive_null = -1;
 	s->cb = *callbacks;
 	s->user = user;
 	s->frame_valid = FALSE;
@@ -661,6 +998,26 @@ YCN_API int ycn_rdp_connect(const ycn_rdp_params* params, const ycn_rdp_callback
 	s->instance = instance;
 	instance->PreConnect = ycn_pre_connect;
 	instance->PostConnect = ycn_post_connect;
+	/* ⚠️ GFX 全帧管线（instance->LoadChannels）**暂时不挂**，回退到 legacy 更新。
+	 *
+	 * 已查实的事实链（2026-10-04）：
+	 *   1) 挂上它之后通道确实能加载（load_addins 成功、drdynvc 就位），
+	 *      服务器也确实切到了 GFX 编码 —— 但帧一帧都进不来（帧到达 0/秒，画面静止）。
+	 *   2) gdi_graphics_pipeline_init 内部用 FREERDP_CODEC_ALL 调
+	 *      freerdp_client_codecs_prepare；本机 vcpkg 的 freerdp **没编 H.264 解码器**
+	 *      （端口无 h264 feature），这一步大概率直接失败 → GFX 接不上 GDI。
+	 *   3) 于是"声明了 GFX 能力 + 建了 DVC"反而让服务器不再走 legacy，退化成零帧。
+	 *
+	 * 结论：要真正打开 GFX，得先在 vcpkg 里重装带 h264 的 freerdp 再编原生层，
+	 * 属于独立一步（不是改几行代码能收口的）。在此之前保持通道不加载 =
+	 * 服务器走 legacy bitmap 更新（有画面），撕裂由 C# 侧的**锁内整帧拷贝**兜住。
+	 *
+	 * 【2026-10-04 00:48 验证结果】挂上它之后进程在连接建立数秒内 **AV 崩溃**
+	 * （退出码 0xC0000005），不是"解码器为空"这么温和 —— GFX 路径在本机这份
+	 * freerdp 上有更硬的兼容问题（大概率就是缺 H.264/AVC 解码器，GFX 帧处理时踩到
+	 * 半初始化的编解码上下文）。下次要动这块，先 vcpkg 装 h264 再复测。 */
+	/* ⚠️ 这一行是 GFX 全帧管线的**命门**：不挂它 = 通道一条都加载不上（见 ycn_load_channels 注释） */
+	instance->LoadChannels = ycn_load_channels;
 	instance->VerifyX509Certificate = ycn_verify_x509;
 	instance->AuthenticateEx = ycn_authenticate_ex;
 
@@ -921,6 +1278,102 @@ YCN_API int ycn_rdp_grab_frame(int session, uint32_t* out_width, uint32_t* out_h
 	}
 	LeaveCriticalSection(&g_lock);
 	return rc;
+}
+
+YCN_API int ycn_rdp_copy_frame(int session, uint8_t* dst, uint32_t dst_size,
+                               uint32_t* out_width, uint32_t* out_height, uint32_t* out_stride)
+{
+	YcnSession* s;
+	int rc = YCN_ERR_NOT_CONNECTED;
+	size_t need;
+
+	if (!dst || dst_size == 0)
+		return YCN_ERR_INVALID_ARG;
+
+	/* 拷贝全程持锁：与 ycn_end_paint 里「整帧 memcpy 进 s->frame」互斥，
+	 * 因此绝不会读到拷贝到一半的帧（撕裂安全）。 */
+	EnterCriticalSection(&g_lock);
+	s = find_session(session);
+	if (s && s->frame_valid && s->frame && s->frame_height > 0)
+	{
+		if (out_width)
+			*out_width = s->frame_width;
+		if (out_height)
+			*out_height = s->frame_height;
+		if (out_stride)
+			*out_stride = s->frame_stride;
+
+		need = (size_t)s->frame_stride * s->frame_height;
+		if (need <= (size_t)dst_size)
+		{
+			memcpy(dst, s->frame, need);
+			rc = YCN_OK;
+		}
+		else
+		{
+			rc = YCN_ERR_NO_MEMORY; /* 缓冲过小：调用方按 out_* 尺寸重分配后重试 */
+		}
+	}
+	LeaveCriticalSection(&g_lock);
+	return rc;
+}
+
+YCN_API int ycn_rdp_gfx_state(int session, uint32_t* out_dvc_count)
+{
+	YcnSession* s;
+	int st = -1;
+
+	EnterCriticalSection(&g_lock);
+	s = find_session(session);
+	if (s)
+	{
+		st = (int)s->gfx_state;
+		if (out_dvc_count)
+			*out_dvc_count = (uint32_t)s->dvc_connected;
+	}
+	LeaveCriticalSection(&g_lock);
+	return st;
+}
+
+YCN_API void ycn_rdp_dvc_names(int session, char* buf, size_t buflen)
+{
+	YcnSession* s;
+
+	if (!buf || buflen == 0)
+		return;
+	buf[0] = '\0';
+
+	EnterCriticalSection(&g_lock);
+	s = find_session(session);
+	if (s)
+		strncpy_s(buf, buflen, s->dvc_names, _TRUNCATE);
+	LeaveCriticalSection(&g_lock);
+}
+
+YCN_API void ycn_rdp_diag(int session, char* buf, size_t buflen)
+{
+	YcnSession* s;
+	rdpSettings* settings = NULL;
+
+	if (!buf || buflen == 0)
+		return;
+	buf[0] = '\0';
+
+	EnterCriticalSection(&g_lock);
+	s = find_session(session);
+	if (s && s->instance && s->instance->context)
+		settings = s->instance->context->settings;
+	if (s && settings)
+	{
+		_snprintf_s(buf, buflen, _TRUNCATE,
+		            "load_addins=%d static_ch=%u dyn_ch=%u gfx_state=%d dvc=%u gfx_init=%d codecs_null=%d names=[%s]",
+		            s->addins_rc,
+		            (unsigned)freerdp_settings_get_uint32(settings, FreeRDP_StaticChannelCount),
+		            (unsigned)freerdp_settings_get_uint32(settings, FreeRDP_DynamicChannelCount),
+		            (int)s->gfx_state, (unsigned)s->dvc_connected,
+		            s->gfx_init_rc, s->gfx_codecs_null, s->dvc_names);
+	}
+	LeaveCriticalSection(&g_lock);
 }
 
 YCN_API void ycn_rdp_last_error(int session, char* buf, size_t buflen)

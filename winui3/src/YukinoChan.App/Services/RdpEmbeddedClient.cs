@@ -54,6 +54,9 @@ namespace YukinoChan.Services
         private RdpClientState _state = RdpClientState.Idle;
         private int _session;
 
+        /// <summary>抓帧复用缓冲（避免每帧分配 8MB 触发 GC）。长度 ≥ 最近一帧的 stride*height。</summary>
+        private byte[] _frameBuffer = Array.Empty<byte>();
+
         public RdpClientState State { get { lock (_gate) { return _state; } } }
         public int Session => _session;
 
@@ -163,18 +166,74 @@ namespace YukinoChan.Services
         {
             width = height = stride = 0;
             pixels = Array.Empty<byte>();
-            var rc = RdpNativeInterop.ycn_rdp_grab_frame(_session, out var w, out var h, out var st, out var data);
-            if (rc != 0 || data == IntPtr.Zero || w == 0 || h == 0)
+
+            // 第一步只问尺寸：拿不到就快速失败，也顺便决定缓冲大小
+            var rc = RdpNativeInterop.ycn_rdp_grab_frame(_session, out var w, out var h, out var st, out _);
+            if (rc != 0 || w == 0 || h == 0 || st == 0)
             {
                 return false;
             }
+
             var size = checked((int)(st * h));
-            pixels = new byte[size];
-            Marshal.Copy(data, pixels, 0, size);
+            if (_frameBuffer.Length < size)
+            {
+                _frameBuffer = new byte[size];
+            }
+
+            // 第二步在原生锁内整帧拷贝：与 end_paint 的写入互斥，
+            // 所以绝不会读到「拷贝到一半」的半成品帧（撕裂根源）。
+            unsafe
+            {
+                fixed (byte* dst = _frameBuffer)
+                {
+                    rc = RdpNativeInterop.ycn_rdp_copy_frame(_session, dst, (uint)size, out w, out h, out st);
+                }
+            }
+            if (rc != 0 || w == 0 || h == 0 || st == 0)
+            {
+                return false;
+            }
+
             width = w;
             height = h;
             stride = st;
+            // 注意：pixels 是复用缓冲，长度可能大于 stride*height —— 消费方按 stride/width/height 取值
+            pixels = _frameBuffer;
             return true;
+        }
+
+        /// <summary>
+        /// GFX 图形管线状态（诊断）：
+        /// 0 未请求 / 1 已订阅但没有任何动态通道连上（服务器没给 GFX）/ 2 已接入 GDI（全帧模式）
+        /// / 3 收到了动态通道但没有 GFX 那条 / -1 会话未知。
+        /// </summary>
+        public int GfxState(out uint dvcCount)
+            => RdpNativeInterop.ycn_rdp_gfx_state(_session, out dvcCount);
+
+        /// <summary>已连上的通道名（诊断，逗号分隔）。空串 = 一条都没连上。</summary>
+        public string DvcNames()
+        {
+            var buf = new byte[256];
+            RdpNativeInterop.ycn_rdp_dvc_names(_session, buf, (UIntPtr)buf.Length);
+            var len = Array.IndexOf(buf, (byte)0);
+            if (len < 0)
+            {
+                len = buf.Length;
+            }
+            return System.Text.Encoding.UTF8.GetString(buf, 0, len);
+        }
+
+        /// <summary>原生通道加载诊断（一行文本：load_addins 返回值 / 通道计数 / GFX 状态 / 通道名）。</summary>
+        public string Diag()
+        {
+            var buf = new byte[512];
+            RdpNativeInterop.ycn_rdp_diag(_session, buf, (UIntPtr)buf.Length);
+            var len = Array.IndexOf(buf, (byte)0);
+            if (len < 0)
+            {
+                len = buf.Length;
+            }
+            return System.Text.Encoding.UTF8.GetString(buf, 0, len);
         }
 
         /// <summary>注入鼠标事件（flags 取 YcnPtrFlags）。</summary>

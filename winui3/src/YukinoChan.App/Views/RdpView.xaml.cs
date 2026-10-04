@@ -24,10 +24,18 @@ namespace YukinoChan.Views
         private bool _d3dFailed;               // D3D 初始化失败后本实例不再重试（回退软渲染）
         private bool _initQueued;              // 惰性初始化已排队（防高频帧重复排队泄漏渲染器）
         private bool _renderSuspended;         // 全屏时页面内渲染器挂起，避免双路渲染
-        private long _lastFrameArrivedTick;    // 最近一次 end_paint（原生线程写，防撕裂静默检测）
-        private long _lastPresentTick;         // 最近一次呈现（UI 线程写，兑底节流）
-        private Microsoft.UI.Dispatching.DispatcherQueueTimer? _presentTimer;  // 16ms 呈现节拍器
-        private ulong _grabFailures;           // grab 失败计数（诊断）
+        private long _lastFrameArrivedTick;    // 最近一次 end_paint（原生线程写，帧节奏统计用）
+        private Microsoft.UI.Dispatching.DispatcherQueueTimer? _presentTimer;  // 16ms 呈现节拍器（≈60Hz）
+        private bool _softRendering;           // 软渲染路线正在拷帧（防 async 重入）
+        private bool _renderPathLogged;        // 「当前渲染路径」只写一次日志
+        private long _frameArrivals;           // 统计窗口内的帧到达次数（原生线程写）
+        private long _maxArrivalGapMs;         // 统计窗口内最大帧间隔（原生线程写）
+        private long _statsWindowStart;        // 统计窗口起点（UI 线程写）
+        private int _frameSeq;                 // 帧到达序号（原生线程递增）
+        private int _presentedSeq;             // 已呈现到的序号（UI 线程写）
+        private long _windowStartFrames;       // 统计窗口起点时的 FramesRendered（算呈现帧率用）
+        private int _lastGfxState = -1;        // 上次打印过的 GFX 状态
+        private uint _lastDvcCount;            // 上次打印过的通道数
         private double _remoteWidth;
         private double _remoteHeight;
 
@@ -121,11 +129,20 @@ namespace YukinoChan.Views
             _renderer = null;
             _initQueued = false;
             _d3dFailed = false;
+            _softRendering = false;
+            _renderPathLogged = false;
+            _statsWindowStart = 0;
+            System.Threading.Interlocked.Exchange(ref _frameArrivals, 0);
+            System.Threading.Interlocked.Exchange(ref _maxArrivalGapMs, 0);
             _bitmapSource = null;
             _presentTimer?.Stop();
             _presentTimer = null;
             _lastFrameArrivedTick = 0;
-            _lastPresentTick = 0;
+            _frameSeq = 0;
+            _presentedSeq = 0;
+            _windowStartFrames = 0;
+            _lastGfxState = -1;
+            _lastDvcCount = 0;
             PartFrame.Source = null;
             PartFrame.Visibility = Visibility.Collapsed;
             PartPanel.Visibility = Visibility.Collapsed;
@@ -149,11 +166,20 @@ namespace YukinoChan.Views
             _renderer = null;
             _initQueued = false;
             _d3dFailed = false;
+            _softRendering = false;
+            _renderPathLogged = false;
+            _statsWindowStart = 0;
+            System.Threading.Interlocked.Exchange(ref _frameArrivals, 0);
+            System.Threading.Interlocked.Exchange(ref _maxArrivalGapMs, 0);
             _bitmapSource = null;
             _presentTimer?.Stop();
             _presentTimer = null;
             _lastFrameArrivedTick = 0;
-            _lastPresentTick = 0;
+            _frameSeq = 0;
+            _presentedSeq = 0;
+            _windowStartFrames = 0;
+            _lastGfxState = -1;
+            _lastDvcCount = 0;
             PartFrame.Source = null;
             PartFrame.Visibility = Visibility.Collapsed;
             PartPanel.Visibility = Visibility.Collapsed;
@@ -243,7 +269,21 @@ namespace YukinoChan.Views
             // 服务器按条带逐步重绘，条带中途快照会撕裂（M5 实测）：这里只记录到达时间，
             // 实际取帧交给呈现节拍器（16ms tick）：等 end_paint 静默 ≥8ms（一轮画完）
             // 或兜底节流 60ms（持续动画 16fps，撕裂均匀化）再抓帧呈现
-            System.Threading.Volatile.Write(ref _lastFrameArrivedTick, Environment.TickCount64);
+            var arrival = Environment.TickCount64;
+            var prevArrival = System.Threading.Volatile.Read(ref _lastFrameArrivedTick);
+            if (prevArrival != 0)
+            {
+                var gap = arrival - prevArrival;
+                if (gap > System.Threading.Interlocked.Read(ref _maxArrivalGapMs))
+                {
+                    System.Threading.Interlocked.Exchange(ref _maxArrivalGapMs, gap);
+                }
+            }
+            System.Threading.Interlocked.Increment(ref _frameArrivals);
+            System.Threading.Volatile.Write(ref _lastFrameArrivedTick, arrival);
+            // 用序号而不是 bool：bool 的「读-清」之间有竞争窗口，会丢掉正好落在那里的帧
+            // （实测：服务器 37 帧/秒 → 呈现只有 31 帧/秒，就是被这个窗口吃掉的）
+            System.Threading.Interlocked.Increment(ref _frameSeq);
 
             if (_remoteWidth == 0 || _remoteHeight == 0)
             {
@@ -268,6 +308,7 @@ namespace YukinoChan.Views
                         PartViewbox.Visibility = Visibility.Visible;
                         PartFrame.Visibility = Visibility.Collapsed;
                         DiagnosticLog?.Invoke($"[embed] D3D 渲染器初始化成功（{initW}×{initH}）");
+                        LogRenderPathOnce("D3D11 / SwapChainPanel");
                     }
                     else
                     {
@@ -300,43 +341,51 @@ namespace YukinoChan.Views
                 return; // 初始化排队中：下一拍就有了
             }
 
-            // M2 软渲染回退路线（原型，不节流）：原生线程 → UI 线程；高频下 TryEnqueue 失败直接丢帧
-            _dispatcher?.TryEnqueue(() => RenderFrameAsync(e.Session));
+            // 软渲染回退路线也**不在这里直接渲染** —— 同样交给呈现节拍器节流。
+            // （原先这里每帧 TryEnqueue 直渲，等于撕裂修复在回退路线上完全没生效。）
+            // 本方法只负责记 _lastFrameArrivedTick，抓帧时机由 OnPresentTick 决定。
         }
 
-        /// <summary>呈现节拍器 tick：静默 ≥8ms（服务器一轮画完）或兜底 60ms 才抓帧呈现。</summary>
+        /// <summary>
+        /// 呈现节拍器 tick：**固定 60Hz 节拍**（16ms 定时器）。
+        ///
+        /// 只在「两拍之间收到过新帧」时抓帧呈现（_frameDirty），故实际呈现帧率 =
+        /// min(60, 服务器推帧率)；静止画面不重复 Present（重复送同一帧没有意义）。
+        ///
+        /// 早先那套「等 end_paint 静默 ≥8ms 才算一轮画完」的启发式已删除：服务器持续推帧时
+        /// 它永远不成立，只会退化成「每 60ms 兜底抓一次」—— 那正是最后那点撕裂的来源之一。
+        /// 「抓到的必然是完整帧」现在由原生侧保证：ycn_rdp_copy_frame 在 g_lock 内整帧拷贝。
+        /// </summary>
         private void OnPresentTick(object? sender, object e)
         {
             if (_renderSuspended)
             {
                 return;
             }
+            var now = Environment.TickCount64;
+            EmitFrameRhythmStats(now);
+
+            var seq = System.Threading.Volatile.Read(ref _frameSeq);
+            if (seq == _presentedSeq)
+            {
+                return; // 还没有新帧：保留最后一帧即可
+            }
             var client = _client;
             if (client is null)
             {
                 return;
             }
-            var now = Environment.TickCount64;
-            if (_lastFrameArrivedTick == 0)
-            {
-                return; // 还没有任何帧
-            }
-            var sinceFrame = now - System.Threading.Volatile.Read(ref _lastFrameArrivedTick);
-            var sincePresent = now - _lastPresentTick;
-            if (sinceFrame < 8 && sincePresent < 60)
-            {
-                return; // 服务器还在画：不抓半成品
-            }
+            _presentedSeq = seq;
+
             if (!client.TryCopyFrame(out var w, out var h, out var stride, out var pixels))
             {
-                return; // 静止画面：保留最后一帧即可
+                return; // 尺寸切换瞬间等：下一拍再来
             }
             if (_renderer is { Initialized: true })
             {
                 if (_renderer.Present(pixels, w, h, stride))
                 {
                     FramesRendered++;
-                    _lastPresentTick = now;
                 }
                 else
                 {
@@ -351,23 +400,105 @@ namespace YukinoChan.Views
                     PartViewbox.Visibility = Visibility.Collapsed;
                 }
             }
+            else if (_bitmapSource is not null && !_softRendering)
+            {
+                // 软渲染回退路线：同一套节拍（否则回退后撕裂原样回来）
+                LogRenderPathOnce("SoftwareBitmap（软渲染回退，无 D3D）");
+                _ = RenderFrameAsync(client.Session);
+            }
         }
+
+        /// <summary>把当前实际渲染路径写一次日志（撕裂排查的第一手依据）。</summary>
+        private void LogRenderPathOnce(string path)
+        {
+            if (_renderPathLogged)
+            {
+                return;
+            }
+            _renderPathLogged = true;
+            DiagnosticLog?.Invoke($"[embed] 当前渲染路径：{path}");
+        }
+
+        /// <summary>
+        /// 每 5 秒把「帧到达节奏 / 实际呈现帧率」写一行日志（撕裂与帧率定位用）。
+        ///
+        /// 判读方式：条带（legacy bitmap）路径下服务器把一次桌面更新拆成大量碎帧，
+        /// 到达频率会远高于画面帧率、且间隔参差；走 GFX 全帧管线时每次 end_paint
+        /// 就是完整一帧，到达频率贴近真实画面帧率、间隔整齐。
+        /// 「呈现」一栏是节拍器真正 Present 出去的帧率，上限就是节拍器频率（16ms ≈ 60Hz）。
+        /// </summary>
+        private void EmitFrameRhythmStats(long now)
+        {
+            if (_statsWindowStart == 0)
+            {
+                _statsWindowStart = now;
+                _windowStartFrames = (long)FramesRendered;
+                return;
+            }
+            var elapsed = now - _statsWindowStart;
+            if (elapsed < 5000)
+            {
+                return;
+            }
+            var arrivals = System.Threading.Interlocked.Read(ref _frameArrivals);
+            var maxGap = System.Threading.Interlocked.Read(ref _maxArrivalGapMs);
+            System.Threading.Interlocked.Exchange(ref _frameArrivals, 0);
+            System.Threading.Interlocked.Exchange(ref _maxArrivalGapMs, 0);
+            _statsWindowStart = now;
+
+            var presented = (long)FramesRendered - _windowStartFrames;
+            _windowStartFrames = (long)FramesRendered;
+
+            if (_client is { } gfxClient)
+            {
+                var st = gfxClient.GfxState(out var dvc);
+                if (st != _lastGfxState || dvc != _lastDvcCount)
+                {
+                    _lastGfxState = st;
+                    _lastDvcCount = dvc;
+                    var desc = st switch
+                    {
+                        0 => "未请求图形管线",
+                        1 => "已订阅通道事件，但一条动态通道都没连上 —— 服务器没给 GFX",
+                        2 => "GFX 通道已接入 GDI（全帧模式）",
+                        3 => "动态通道连上了，但没有 GFX 那条（通道名不匹配）",
+                        4 => "GFX 通道已连上，但 gdi_graphics_pipeline_init 失败（看 gfx_init / codecs_null）",
+                        _ => "会话未知",
+                    };
+                    DiagnosticLog?.Invoke(
+                        $"[embed] GFX 管线状态：{st}（{desc}）｜{gfxClient.Diag()}");
+                }
+            }
+
+            DiagnosticLog?.Invoke(
+                $"[embed] 帧到达节奏：{arrivals} 次 / {elapsed / 1000.0:F0}s" +
+                $"（≈{arrivals * 1000.0 / elapsed:F1} 次/秒，最大间隔 {maxGap} ms）｜" +
+                $"呈现 ≈{presented * 1000.0 / elapsed:F1} 帧/秒");
+        }
+
         private async System.Threading.Tasks.Task RenderFrameAsync(int session)
         {
-            var client = _client;
-            if (client is null || client.Session != session)
+            if (_softRendering)
             {
-                return;
+                return; // 上一帧还在拷：下一拍再来
             }
-
-            if (!client.TryCopyFrame(out var w, out var h, out var stride, out var pixels))
-            {
-                return;
-            }
-
+            _softRendering = true;
             try
             {
-                var buffer = System.Runtime.InteropServices.WindowsRuntime.WindowsRuntimeBufferExtensions.AsBuffer(pixels);
+                var client = _client;
+                if (client is null || client.Session != session)
+                {
+                    return;
+                }
+
+                if (!client.TryCopyFrame(out var w, out var h, out var stride, out var pixels))
+                {
+                    return;
+                }
+
+                // pixels 是复用缓冲，长度可能大于本帧实际字节数 —— 必须按 stride*height 切
+                var byteCount = checked((int)(stride * h));
+                var buffer = System.Runtime.InteropServices.WindowsRuntime.WindowsRuntimeBufferExtensions.AsBuffer(pixels, 0, byteCount);
                 using var bitmap = SoftwareBitmap.CreateCopyFromBuffer(
                     buffer, BitmapPixelFormat.Bgra8, (int)w, (int)h, BitmapAlphaMode.Ignore);
                 if (_bitmapSource is not null)
@@ -379,6 +510,10 @@ namespace YukinoChan.Views
             catch
             {
                 // 尺寸切换瞬间可能抛参数异常，丢帧即可
+            }
+            finally
+            {
+                _softRendering = false;
             }
         }
 
