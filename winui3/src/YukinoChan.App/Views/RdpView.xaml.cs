@@ -38,6 +38,7 @@ namespace YukinoChan.Views
         private uint _lastDvcCount;            // 上次打印过的通道数
         private double _remoteWidth;
         private double _remoteHeight;
+        private bool _inputLocked;             // 锁定：鼠标穿透 + 键盘映射全部停用
 
         /// <summary>画面刷新次数（诊断/验收计数）。</summary>
         public ulong FramesRendered { get; private set; }
@@ -218,7 +219,64 @@ namespace YukinoChan.Views
         public bool SendMouse(uint flags, ushort x, ushort y) => _client?.SendMouse(flags, x, y) ?? false;
 
         /// <summary>注入键盘事件。</summary>
-        public bool SendKey(bool down, bool extended, ushort scancode) => _client?.SendKey(down, extended, scancode) ?? false;
+        public bool SendKey(bool down, bool extended, ushort scancode)
+            => _inputLocked ? false : (_client?.SendKey(down, extended, scancode) ?? false);
+
+        /// <summary>
+        /// 锁定 / 解锁本画面的输入转发。
+        /// 锁定时鼠标穿透（指针事件不再转投远端）与键盘映射（含全屏钩子里的 SendKey）都停用，
+        /// 但画面照常接收与渲染 —— 只是本机不再往里送输入。
+        /// 事件用来让宿主刷新顶部条（锁定按钮的文案/图标）。
+        /// </summary>
+        public bool IsInputLocked
+        {
+            get => _inputLocked;
+            set
+            {
+                if (_inputLocked == value)
+                {
+                    return;
+                }
+
+                _inputLocked = value;
+
+                // 锁定瞬间把「按下的键」补一个释放，免得远端卡键（拖拽中的鼠标同理）
+                if (value)
+                {
+                    ReleaseStuckButtons();
+                }
+
+                InputLockChanged?.Invoke(this, value);
+            }
+        }
+
+        /// <summary>锁定状态变化（参数 = 新的锁定状态）。</summary>
+        public event EventHandler<bool>? InputLockChanged;
+
+        /// <summary>锁定前把可能卡住的按键 / 鼠标按钮释放掉，避免远端一直按着。</summary>
+        private void ReleaseStuckButtons()
+        {
+            var client = _client;
+            if (client is null)
+            {
+                _leftDown = _rightDown = _middleDown = false;
+                return;
+            }
+
+            if (_leftDown)
+            {
+                client.SendMouse(YcnPointerFlags.Button1, 0, 0);
+            }
+            if (_rightDown)
+            {
+                client.SendMouse(YcnPointerFlags.Button2, 0, 0);
+            }
+            if (_middleDown)
+            {
+                client.SendMouse(YcnPointerFlags.Button3, 0, 0);
+            }
+            _leftDown = _rightDown = _middleDown = false;
+        }
 
         private void HookClient(RdpEmbeddedClient client)
         {
@@ -553,8 +611,12 @@ namespace YukinoChan.Views
         private bool _rightDown;
         private bool _middleDown;
 
-        /// <summary>当前指针是否可直接转发远端（画面未就绪/遮罩在时不转发）。</summary>
-        private bool InputForwardingEnabled => _client is not null && PartOverlay.Visibility == Visibility.Collapsed;
+        /// <summary>
+        /// 当前指针是否可直接转发远端（画面未就绪/遮罩在时/已锁定时都不转发）。
+        /// ⚠️ 锁定也走这里 —— 但**只拦转发**，不拦「锁定」按钮自己（它在格子顶部条上，不走本控件）。
+        /// </summary>
+        private bool InputForwardingEnabled =>
+            _client is not null && !_inputLocked && PartOverlay.Visibility == Visibility.Collapsed;
 
         private bool TryForwardPointer(Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e, uint extraFlags)
         {
@@ -668,6 +730,11 @@ namespace YukinoChan.Views
 
         private void OnKeyUp(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
         {
+            // 锁定时不转发 —— 但按下时已经发出去的键，在锁定的瞬间由 ReleaseStuckButtons 兜底
+            if (!InputForwardingEnabled)
+            {
+                return;
+            }
             var (sc, ext) = RdpInputMapper.MapKey((ushort)e.KeyStatus.ScanCode, e.KeyStatus.IsExtendedKey, (ulong)e.Key);
             if (sc == 0)
             {

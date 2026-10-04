@@ -2,6 +2,7 @@
 using System;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using YukinoChan.Services;
 using YukinoChan.ViewModels;
 
@@ -25,6 +26,10 @@ public sealed partial class RdpSurfaceCell : UserControl
 
         // 画面上的双击 / F11 全屏请求 —— 带上本格通道 id，页面才知道该全屏哪一路
         SurfaceView.FullScreenToggleRequested += (_, _) => FullScreenRequested?.Invoke(this, _channelId);
+
+        // 锁定状态由画面控件自己维护（它才知道有没有卡住的键要放）；
+        // 这里只需要跟着刷新按钮文案。
+        SurfaceView.InputLockChanged += (_, locked) => ApplyLockChrome(locked);
     }
 
     /// <summary>本格对应的通道 id（空串 = 尚未分配）。</summary>
@@ -54,9 +59,19 @@ public sealed partial class RdpSurfaceCell : UserControl
         set => FullScreenButton.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    /// <summary>全屏状态变化（切按钮文案）。</summary>
+    /// <summary>全屏状态变化（切图标 + tooltip）。</summary>
     public void SetFullScreenActive(bool active)
-        => FullScreenButton.Content = active ? "退出全屏" : "全屏";
+    {
+        // 图标 = 这条路的当前状态：没全屏显示放大箭头，全屏中显示缩小箭头。
+        FullScreenIconEnter.Visibility = active ? Visibility.Collapsed : Visibility.Visible;
+        FullScreenIconExit.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
+
+        ToolTipService.SetToolTip(
+            FullScreenButton,
+            active
+                ? "退出全屏：回到页面里的这一格（F11 或双击画面亦可退出）"
+                : "全屏显示这一路画面（键盘一并接管；F11 或双击画面退出）");
+    }
 
     private static MainViewModel VM => App.ViewModel;
 
@@ -102,6 +117,16 @@ public sealed partial class RdpSurfaceCell : UserControl
         DisconnectButton.IsEnabled = hasClient;
         PopOutButton.IsEnabled = hasClient;
         FullScreenButton.IsEnabled = hasClient;
+        MuteButton.IsEnabled = hasClient;
+        LockButton.IsEnabled = hasClient;
+
+        // ⚠️ 顺序要紧：先刷一遍常态配色，再让 Apply*Chrome 各自上生效态。
+        //    反过来会把「已静音 / 已锁定」的强调色又刷回灰色。
+        ApplyIconButtonChrome();
+
+        // 锁定 / 静音都有状态，且都按通道记忆 —— 每拍都从 VM 取，不缓存
+        ApplyLockChrome(hasClient && VM.IsSurfaceInputLocked(_channelId));
+        ApplyMuteChrome(hasClient && VM.IsSurfaceMuted(_channelId));
 
         StateText.Text = VM.SurfaceStateText(_channelId);
 
@@ -141,4 +166,125 @@ public sealed partial class RdpSurfaceCell : UserControl
 
     private void OnDisconnectClicked(object sender, RoutedEventArgs e)
         => DisconnectRequested?.Invoke(this, _channelId);
+
+    /// <summary>
+    /// 静音开关。状态写进 VM（按通道记），原生侧同步把 rdpsnd 音量置 0 / 还原。
+    /// 本机静音是「本机不放声」，远端会话照常发声 —— 不是把远端也静掉。
+    /// </summary>
+    private void OnMuteClicked(object sender, RoutedEventArgs e)
+    {
+        if (_channelId.Length == 0 && _client is null)
+        {
+            return;
+        }
+
+        var next = !VM.IsSurfaceMuted(_channelId);
+        VM.SetSurfaceMuted(_channelId, next);
+        ApplyMuteChrome(next);
+    }
+
+    /// <summary>
+    /// 锁定开关：停用鼠标穿透 + 键盘映射（防误触），再点一次解除。
+    /// 注意「锁定」按钮本身仍在顶部条上 —— 它不走画面输入隧道，所以锁定后依然点得动。
+    /// </summary>
+    private void OnLockClicked(object sender, RoutedEventArgs e)
+    {
+        // 让画面控件自己切（它会顺手把可能卡住的键/鼠标按钮释放掉）
+        SurfaceView.IsInputLocked = !SurfaceView.IsInputLocked;
+        VM.SetSurfaceInputLocked(_channelId, SurfaceView.IsInputLocked);
+    }
+
+    /// <summary>
+    /// 按锁定状态切图标（开锁 ↔ 闭锁）并给生效态加淡强调色底。
+    /// 不换 AccentButtonStyle：那个样式会把底色和图标一起染成强调色，
+    /// 两个图标就分不出"哪个是当前状态"了。这里只换底色 + 图标色，形状自己说话。
+    /// </summary>
+    private void ApplyLockChrome(bool locked)
+    {
+        // 图标 = 这把锁现在的状态：没锁时是开着的锁（E785），锁上了就是闭锁（E72E）。
+        LockIconUnlocked.Visibility = locked ? Visibility.Collapsed : Visibility.Visible;
+        LockIconPadlock.Visibility = locked ? Visibility.Visible : Visibility.Collapsed;
+
+        // 锁定是「当前生效」的状态，用淡强调色标出来，避免用户忘了自己锁着
+        LockButton.Background = locked ? AccentTint : null;
+        LockButton.Foreground = locked ? AccentFg : NormalFg;
+        LockButton.BorderBrush = locked ? AccentBorder : null;
+
+        // 按钮上没文字了，tooltip 是唯一说明 —— 必须跟着状态走，
+        // 否则悬停看到的永远是同一句、不知道现在是锁着还是没锁。
+        ToolTipService.SetToolTip(
+            LockButton,
+            locked
+                ? "已锁定：鼠标穿透与键盘映射已停用，点一下解锁"
+                : "锁定画面输入：停用鼠标穿透与键盘映射，防止误操作");
+    }
+
+    /// <summary>按静音状态切图标（有声 ↔ 静音）并给生效态加淡强调色底。</summary>
+    private void ApplyMuteChrome(bool muted)
+    {
+        MuteIconSound.Visibility = muted ? Visibility.Collapsed : Visibility.Visible;
+        MuteIconMuted.Visibility = muted ? Visibility.Visible : Visibility.Collapsed;
+
+        MuteButton.Background = muted ? AccentTint : null;
+        MuteButton.Foreground = muted ? AccentFg : NormalFg;
+        MuteButton.BorderBrush = muted ? AccentBorder : null;
+
+        ToolTipService.SetToolTip(
+            MuteButton,
+            muted
+                ? "已静音：这台机器不放这条通道的声音（远端照常发声），点一下恢复"
+                : "本机静音：远端照常发声，只是这台机器不放这条通道的声音");
+    }
+
+    // ---- 图标按钮的配色 ----
+    // 常态用「次要文字」色（比纯白/纯黑柔和，在画面上方不抢戏）；
+    // 生效态用强调色，让"正在静音 / 正在锁定"一眼可见。
+    // 主题画刷取不到时用兜底色（下面的 ARGB 字面量），避免因缺资源整页崩。
+
+    /// <summary>
+    /// 顶条上所有图标按钮统一走这套配色。
+    /// 五个按钮（弹出/静音/锁定/全屏/断开）逐个手工设过一遍颜色，后来加按钮很容易漏，
+    /// 颜色深浅不一 —— 所以统一在这里刷一遍，各 Apply*Chrome 只管自己的「生效态」。
+    /// </summary>
+    private void ApplyIconButtonChrome()
+    {
+        // 单态按钮没有生效态，只需要常态前景色（禁用时由 Button 自己变灰）
+        foreach (var b in new[] { PopOutButton, DisconnectButton })
+        {
+            b.Background = null;
+            b.BorderBrush = null;
+            b.Foreground = NormalFg;
+        }
+
+        // 两态按钮的「未生效」那一态也在这里兜住，
+        // 这样即使 Apply*Chrome 还没跑过（首帧）颜色也是对的。
+        MuteButton.Foreground = NormalFg;
+        LockButton.Foreground = NormalFg;
+        FullScreenButton.Foreground = NormalFg;
+    }
+
+    private static Brush NormalFg =>
+        ThemeBrush("TextFillColorSecondaryBrush", C(0xB3, 0xB3, 0xB3));
+
+    private static Brush AccentFg =>
+        ThemeBrush("AccentTextFillColorPrimaryBrush", C(0x00, 0x78, 0xD4));
+
+    private static Brush AccentTint =>
+        ThemeBrush("AccentFillColorSecondaryBrush", C(0x30, 0x78, 0xD4, 0x40));
+
+    private static Brush AccentBorder =>
+        ThemeBrush("AccentControlBorderBrush", C(0x00, 0x78, 0xD4, 0x80));
+
+    private static Windows.UI.Color C(byte r, byte g, byte b, byte a = 0xFF)
+        => Windows.UI.Color.FromArgb(a, r, g, b);
+
+    /// <summary>取主题画刷；取不到就用兜底色（避免因缺资源整页崩）。</summary>
+    private static Brush ThemeBrush(string key, Windows.UI.Color fallback)
+    {
+        if (Application.Current.Resources.TryGetValue(key, out var v) && v is Brush b)
+        {
+            return b;
+        }
+        return new SolidColorBrush(fallback);
+    }
 }

@@ -55,7 +55,19 @@ public sealed partial class RdpMultiViewPage : Page
             cell.DisconnectRequested += OnCellDisconnect;
             cell.ConnectRequested += OnCellConnect;
         }
+
+        // 锁定 / 静音这类开关变了要立刻反映到格子顶部条，不能等下一拍 1Hz
+        VM.SurfaceRefreshRequested += OnSurfaceRefreshRequested;
     }
+
+    private void OnSurfaceRefreshRequested()
+        => DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_pageAlive)
+            {
+                LayoutSurfaces();
+            }
+        });
 
     private static MainViewModel VM => App.ViewModel;
 
@@ -82,6 +94,7 @@ public sealed partial class RdpMultiViewPage : Page
         _pageAlive = false;
         _refreshTimer?.Stop();
         _refreshTimer = null;
+        VM.SurfaceRefreshRequested -= OnSurfaceRefreshRequested;
 
         // 只解挂、不断开：会话与画面流照旧，切回来继续用同一个 client
         foreach (var cell in _cells)

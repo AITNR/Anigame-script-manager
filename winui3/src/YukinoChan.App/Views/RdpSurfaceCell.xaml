@@ -41,10 +41,114 @@
                                TextTrimming="CharacterEllipsis" />
                 </StackPanel>
 
+                <!-- 按钮顺序：**弹出窗口 → 静音 → 锁定 → 全屏 → 断开**。
+                     弹出窗口放最左：它是「换种看法看这一路」，不是操作画面本身，
+                     挨着右边的控制按钮会让人误以为会改变画面状态。断开沉在最右（破坏性操作）。 -->
                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
-                    <Button x:Name="FullScreenButton" Content="全屏" Click="OnFullScreenClicked" />
-                    <Button x:Name="PopOutButton" Content="弹出窗口" Click="OnPopOutClicked" />
-                    <Button x:Name="DisconnectButton" Content="断开" Click="OnDisconnectClicked" />
+                    <!-- 弹出窗口：方框 + 箭头朝外（E8A7），单态 -->
+                    <Button x:Name="PopOutButton"
+                            Click="OnPopOutClicked"
+                            Width="34" Height="30"
+                            Padding="0"
+                            ToolTipService.ToolTip="弹出成独立窗口：把这一路画面单独开一个窗口，可自己摆放；关掉窗口画面会自动回到这里">
+                        <Grid>
+                            <FontIcon x:Name="PopOutIcon"
+                                      Glyph="&#xE8A7;"
+                                      FontSize="16"
+                                      HorizontalAlignment="Center"
+                                      VerticalAlignment="Center" />
+                        </Grid>
+                    </Button>
+
+                    <!-- 静音：图标两态（有声 / 静音）。文字说明走 ToolTip，
+                         顶条空间窄，按钮只留图标更清爽。
+                         ToolTip 初值在这里给一份，运行时由 ApplyMuteChrome 按状态覆盖。 -->
+                    <Button x:Name="MuteButton"
+                            Click="OnMuteClicked"
+                            Width="34" Height="30"
+                            Padding="0"
+                            ToolTipService.ToolTip="本机静音：远端照常发声，只是这台机器不放这条通道的声音">
+                        <Grid>
+                            <!-- 命名按「画的是什么」而不是「当前状态」，
+                                 且可见性由 ApplyMuteChrome 按状态切：
+                                 有声（未静音）→ 喇叭 + 声波 -->
+                            <FontIcon x:Name="MuteIconSound"
+                                      Glyph="&#xE767;"
+                                      FontSize="16"
+                                      HorizontalAlignment="Center"
+                                      VerticalAlignment="Center" />
+                            <!-- 静音中 → 喇叭 + ✕ -->
+                            <FontIcon x:Name="MuteIconMuted"
+                                      Glyph="&#xE74F;"
+                                      FontSize="16"
+                                      HorizontalAlignment="Center"
+                                      VerticalAlignment="Center"
+                                      Visibility="Collapsed" />
+                        </Grid>
+                    </Button>
+
+                    <!-- 锁定：开锁 / 闭锁 两态。
+                         语义 = 这把锁**当前**的状态：没锁时显示开锁，锁上了显示闭锁。
+                         可见性由 ApplyLockChrome 切，XAML 里的初值对应「未锁定」。 -->
+                    <Button x:Name="LockButton"
+                            Click="OnLockClicked"
+                            Width="34" Height="30"
+                            Padding="0"
+                            ToolTipService.ToolTip="锁定画面输入：停用鼠标穿透与键盘映射，防止误操作；再点一次解锁">
+                        <Grid>
+                            <!-- 未锁定（初值可见）：开锁图形 -->
+                            <FontIcon x:Name="LockIconUnlocked"
+                                      Glyph="&#xE785;"
+                                      FontSize="16"
+                                      HorizontalAlignment="Center"
+                                      VerticalAlignment="Center" />
+                            <!-- 已锁定：闭锁图形 -->
+                            <FontIcon x:Name="LockIconPadlock"
+                                      Glyph="&#xE72E;"
+                                      FontSize="16"
+                                      HorizontalAlignment="Center"
+                                      VerticalAlignment="Center"
+                                      Visibility="Collapsed" />
+                        </Grid>
+                    </Button>
+
+                    <!-- 全屏：放大 / 缩小 两态（E740 放大箭头、E73F 缩小箭头） -->
+                    <Button x:Name="FullScreenButton"
+                            Click="OnFullScreenClicked"
+                            Width="34" Height="30"
+                            Padding="0"
+                            ToolTipService.ToolTip="全屏显示这一路画面（键盘一并接管；F11 或双击画面退出）">
+                        <Grid>
+                            <!-- 未全屏（初值可见）：放大箭头 -->
+                            <FontIcon x:Name="FullScreenIconEnter"
+                                      Glyph="&#xE740;"
+                                      FontSize="16"
+                                      HorizontalAlignment="Center"
+                                      VerticalAlignment="Center" />
+                            <!-- 全屏中：缩小箭头 -->
+                            <FontIcon x:Name="FullScreenIconExit"
+                                      Glyph="&#xE73F;"
+                                      FontSize="16"
+                                      HorizontalAlignment="Center"
+                                      VerticalAlignment="Center"
+                                      Visibility="Collapsed" />
+                        </Grid>
+                    </Button>
+
+                    <!-- 断开：链条断开（E71B），单态。破坏性操作，沉在最右。 -->
+                    <Button x:Name="DisconnectButton"
+                            Click="OnDisconnectClicked"
+                            Width="34" Height="30"
+                            Padding="0"
+                            ToolTipService.ToolTip="断开这一路的连接（会话保留在远端，下次可再连上）">
+                        <Grid>
+                            <FontIcon x:Name="DisconnectIcon"
+                                      Glyph="&#xE71B;"
+                                      FontSize="16"
+                                      HorizontalAlignment="Center"
+                                      VerticalAlignment="Center" />
+                        </Grid>
+                    </Button>
                 </StackPanel>
             </Grid>
 

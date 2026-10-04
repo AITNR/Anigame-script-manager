@@ -73,7 +73,19 @@ public sealed partial class RdpChannelPage : Page, System.ComponentModel.INotify
 
         // 本页只有一格，全屏按钮常开
         Cell0.ShowFullScreenButton = true;
+
+        // 锁定 / 静音这类开关变了要立刻反映到顶部条，不能等下一拍 1Hz
+        VM.SurfaceRefreshRequested += OnSurfaceRefreshRequested;
     }
+
+    private void OnSurfaceRefreshRequested()
+        => DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_pageAlive)
+            {
+                RefreshSurface();
+            }
+        });
 
     private void RaiseAllChanged() =>
         PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(null));
@@ -165,6 +177,7 @@ public sealed partial class RdpChannelPage : Page, System.ComponentModel.INotify
         _pageAlive = false;
         _refreshTimer?.Stop();
         _refreshTimer = null;
+        VM.SurfaceRefreshRequested -= OnSurfaceRefreshRequested;
 
         // 只解绑订阅、不结束全屏：全屏窗口是独立窗口，切页不该把它关掉
         _fullScreen?.Detach();

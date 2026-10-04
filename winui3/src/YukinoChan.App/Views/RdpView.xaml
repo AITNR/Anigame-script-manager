@@ -25,8 +25,11 @@
                     VerticalAlignment="Center"
                     Spacing="8"
                     Visibility="Visible">
+            <!-- 未连接时不许转圈：构造初期就是「未连接」，此时不该有加载动画。
+                 只有 Connect() 的「连接中…」才会把它打开（见 ShowOverlay）。 -->
             <ProgressRing x:Name="PartProgress"
-                          IsActive="True"
+                          IsActive="False"
+                          Visibility="Collapsed"
                           Width="36"
                           Height="36" />
             <TextBlock x:Name="PartStatusText"

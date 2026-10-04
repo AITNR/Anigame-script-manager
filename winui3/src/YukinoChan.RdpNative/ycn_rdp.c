@@ -31,6 +31,7 @@
 #include <freerdp/channels/rdpgfx.h>
 #include <freerdp/channels/drdynvc.h>
 #include <freerdp/channels/rdpsnd.h>
+#include <freerdp/client/rdpsnd.h>   /* rdpsndDevicePlugin::{SetVolume,...}（本机静音靠链式挂钩它） */
 
 /* FREERDP_ADDIN_CHANNEL_* 的值照抄 freerdp/addin.h。
  * ⚠️ 不能 #include <freerdp/addin.h>：它会拉进 rail.h/shellapi.h，
@@ -134,6 +135,23 @@ typedef struct
 	int allow_selfsigned;
 	int enable_audio;
 	int use_gfx;
+	volatile LONG muted;              /* 1 = 本机静音（拦 device 的 Play/PlayEx 丢弃数据 + SetVolume 置 0） */
+	/* ⚠️ 一条 RDP 连接里可能同时存在**两个** rdpsnd 插件实例：
+	 *   ① 静态通道 `rdpsnd`（VirtualChannelEntryEx 建的那份）
+	 *   ② DVC    `AUDIO_PLAYBACK_DVC`（drdynvc 加载 rdpsnd 客户端时另建的 dynamic 实例）
+	 * 服务器通常走 ②（AUDIO_PLAYBACK_DVC），①的 OnOpenCalled 恒 0、收不到任何数据。
+	 * 所以两个都要跟踪、都要挂钩，否则静音只挂在"哑"的那份上 → 无效。 */
+	#define YCN_RDPSND_SLOTS 4
+	void* rdpsnd_plugin[YCN_RDPSND_SLOTS];   /* 各 plugin 指针 */
+	void* rdpsnd_device[YCN_RDPSND_SLOTS];   /* 各 device 指针（挂钩用；拿不到时 NULL） */
+	void* rdpsnd_orig_set_volume[YCN_RDPSND_SLOTS];
+	void* rdpsnd_orig_play[YCN_RDPSND_SLOTS];
+	void* rdpsnd_orig_play_ex[YCN_RDPSND_SLOTS];
+	int rdpsnd_slot_count;                    /* 已发现的 plugin 数 */
+	volatile LONG mute_play_hits;     /* 诊断：Play/PlayEx 钩子被调用次数 */
+	volatile LONG mute_setvol_hits;   /* 诊断：静音态下 SetVolume 钩子命中次数 */
+	volatile LONG mute_dbg_tick;      /* 诊断：hook 快照节拍计数（限流用） */
+	volatile LONG mute_dvc_tick;      /* 诊断：DVC 扫描节拍计数（限流用） */
 	volatile LONG gfx_state;       /* 0/1/2/3，见 ycn_rdp_gfx_state */
 	volatile LONG dvc_connected;   /* 收到的动态通道连接事件累计数 */
 	char dvc_names[256];           /* 已连上的通道名（逗号分隔，诊断用） */
@@ -317,10 +335,20 @@ static void ycn_debug_dump_tag(const char* tag)
 {
 	char path[MAX_PATH] = WINPR_C_ARRAY_INIT;
 	FILE* f = NULL;
-	const DWORD n = GetTempPathA(MAX_PATH, path);
-	if (n == 0 || n >= MAX_PATH)
-		return;
-	strcat_s(path, sizeof(path), "ycn_gfx_debug.txt");
+	const char* override = getenv("YCN_DEBUG_TAG");
+
+	if (override && override[0])
+	{
+		/* 环境变量指定独立路径：多实例/残留进程混写时用来隔离诊断输出 */
+		strncpy_s(path, sizeof(path), override, _TRUNCATE);
+	}
+	else
+	{
+		const DWORD n = GetTempPathA(MAX_PATH, path);
+		if (n == 0 || n >= MAX_PATH)
+			return;
+		strcat_s(path, sizeof(path), "ycn_gfx_debug.txt");
+	}
 	if (fopen_s(&f, path, "a") != 0 || !f)
 		return;
 	fprintf(f, "[tag] %s\n", tag);
@@ -389,6 +417,755 @@ static UINT ycn_gfx_end_frame(RdpgfxClientContext* ctx, const RDPGFX_END_FRAME_P
 		}
 	}
 	return rc;
+}
+
+/* ---- 本机静音（拦截 rdpsnd 设备的 SetVolume，强制置 0）----
+ *
+ * 语义：让**本机扬声器**不出声，远端照常发声（不是关掉音频通道）。
+ *
+ * ❌ 走过的弯路：
+ *   ① 用 `WLog_Get("com.freerdp.channels.rdpsnd.client")` 反推插件基址 —— 这个名字是
+ *      **全局单例**，多会话拿到同一个指针 → 静音一个通道把别人也静了。
+ *   ② 用 `ChannelConnectedEventArgs.pInterface` 拿 rdpsndPlugin —— **它是 NULL**！
+ *      静态通道的 pInterface 来自 VirtualChannelInitEx 的 clientContext 参数，
+ *      而 rdpsnd 传的就是 nullptr（官方 Windows 客户端也只处理 rail/cliprdr/disp 这些 DVC，
+ *      从不碰 rdpsnd）。所以早期 attach 一进门就被 `!e->pInterface` 挡掉，静音完全没反应。
+ *   ③ 只调一次 SetVolume(0) —— 服务器后续的 volume PDU 会把它盖回去 → 取消静音也不恢复。
+ *
+ * ✅ 正解（两步）：
+ *   A) 怎么拿到 rdpsndPlugin：从 **`context->channels->openDataList[i].lpUserParam`** 拿。
+ *      lpUserParam 就是 VirtualChannelInitEx 的 lpUserParam = rdpsnd 插件本身；
+ *      按 `stats.channelName == "rdpsnd"` 匹配那一项即可。
+ *      `rdpContext.channels` 是**公开字段**；`rdpChannels` / `CHANNEL_OPEN_DATA` 是私有结构，
+ *      但布局稳定，偏移由探针实测（真实私有头 offsetof，见下表）。
+ *   B) 拿到 device 后**链式挂钩 device->SetVolume**：静音态把传下来的 value 压成 0
+ *      再交原函数 —— 无论谁写音量（服务器 PDU、设备 Open 后的 apply_volume、我们自己的
+ *      调用）都逃不掉。每个会话各挂各的 device，互不干扰。
+ *
+ * 探针实测偏移（含私有头 libfreerdp/core/client.h，绑死 vcpkg FreeRDP 3.32.0）：
+ *   offsetof(rdpContext, channels)                = 288
+ *   offsetof(rdpChannels, openDataCount)          = 1448
+ *   offsetof(rdpChannels, openDataList)           = 1456
+ *   sizeof(CHANNEL_OPEN_DATA)                     = 112
+ *   offsetof(CHANNEL_OPEN_DATA, lpUserParam)      = 88   ← rdpsndPlugin*
+ *   offsetof(CHANNEL_OPEN_DATA, stats.channelName) = 0
+ *   CHANNEL_MAX_COUNT                             = 30
+ * ⚠️ 换 FreeRDP 版本必须重跑探针核对这组常量。 */
+#define YCN_CTX_OFF_CHANNELS          288
+#define YCN_CH_OFF_OPENDATA_COUNT     1448
+#define YCN_CH_OFF_OPENDATA_LIST      1456
+#define YCN_CH_MAX_COUNT              30
+#define YCN_OD_SIZE                   112
+#define YCN_OD_OFF_LPUSERPARAM        88
+#define YCN_OD_OFF_STATS_NAME         0
+
+/* DVC 音频通道（AUDIO_PLAYBACK_DVC）的 rdpsnd 插件**不在** context->channels 里，
+ * 而在 drdynvc 的 DVCMAN->plugins 列表里。取值链（探针实测，绑死 FreeRDP 3.32.0）：
+ *   context->channels               (+288)
+ *   -> rdpChannels.drdynvc          (+5328) = DrdynvcClientContext*
+ *   -> DrdynvcClientContext.handle  (+0)    = drdynvcPlugin*
+ *   -> drdynvc_plugin.channel_mgr   (+192)  = DVCMAN*
+ *   -> DVCMAN.plugins               (+56)   = wArrayList*（元素 = IWTSPlugin*，即 rdpsnd DVC 插件）
+ * ⚠️ 不能用 DrdynvcClientContext.custom —— 那是 rdpChannels*（client.c 里设的），不是 DVCMAN。 */
+#define YCN_CH_OFF_DRDYNVC            5328
+#define YCN_DRDYNVC_OFF_HANDLE        0
+#define YCN_DRDYNVC_PLUGIN_OFF_CHMGR  192
+#define YCN_DVCMAN_OFF_PLUGINS        56
+
+/* rdpsndPlugin 私有结构里的字段偏移（探针实测，绑死 vcpkg FreeRDP 3.32.0） */
+#define YCN_RDPSND_OFFSET_OPENDATA_HANDLE 184   /* DWORD OpenHandle */
+#define YCN_RDPSND_OFFSET_NUM_CLIENT_FMT  232   /* UINT16 NumberOfClientFormats */
+#define YCN_RDPSND_OFFSET_ATTACHED        236   /* BOOL attached */
+#define YCN_RDPSND_OFFSET_DYNAMIC         240   /* BOOL dynamic */
+#define YCN_RDPSND_OFFSET_ISOPEN          268   /* BOOL isOpen */
+#define YCN_RDPSND_OFFSET_DEVICE          312   /* rdpsndDevicePlugin* device */
+#define YCN_RDPSND_OFFSET_APPLYVOLUME     404   /* BOOL applyVolume */
+#define YCN_RDPSND_OFFSET_ONOPENCALLED    416   /* BOOL OnOpenCalled */
+#define YCN_RDPSND_OFFSET_ASYNC           420   /* BOOL async */
+
+/* 诊断：枚举 context->channels 里所有 openData 项的 channelName + lpUserParam。
+ * 目的：确认 rdpsnd / AUDIO_PLAYBACK_DVC 到底是同一个 plugin 还是两个。 */
+static void ycn_dump_all_channels(rdpContext* context)
+{
+	uint8_t* channels;
+	int count, i;
+
+	if (!context)
+		return;
+	channels = *(uint8_t**)((uint8_t*)context + YCN_CTX_OFF_CHANNELS);
+	if (!channels)
+		return;
+	count = *(int*)(channels + YCN_CH_OFF_OPENDATA_COUNT);
+	if (count <= 0 || count > YCN_CH_MAX_COUNT)
+		return;
+
+	for (i = 0; i < count; i++)
+	{
+		uint8_t* od = channels + YCN_CH_OFF_OPENDATA_LIST + (size_t)i * YCN_OD_SIZE;
+		const char* name = (const char*)(od + YCN_OD_OFF_STATS_NAME);
+		void* lp = *(void**)(od + YCN_OD_OFF_LPUSERPARAM);
+		char dbg[256];
+		char safe[9];
+		memcpy(safe, name, 8);
+		safe[8] = '\0';
+		_snprintf_s(dbg, sizeof(dbg), _TRUNCATE, "ch[%d] name='%s' lpUserParam=%p", i, safe, lp);
+		ycn_debug_dump_tag(dbg);
+	}
+}
+
+
+/* 按 device 指针反查所属会话与槽位（表很小，线性扫足够）。
+ * 找到返回会话指针，*slot 写回槽位下标；找不到返回 NULL。 */
+static YcnSession* ycn_session_of_device(void* device, int* slot)
+{
+	YcnSession* s = NULL;
+	int i, k;
+
+	if (slot)
+		*slot = -1;
+	if (!device)
+		return NULL;
+	EnterCriticalSection(&g_lock);
+	for (i = 0; i < YCN_MAX_SESSIONS && !s; i++)
+	{
+		if (!g_sessions[i].used)
+			continue;
+		for (k = 0; k < YCN_RDPSND_SLOTS; k++)
+		{
+			if (g_sessions[i].rdpsnd_device[k] == device)
+			{
+				s = &g_sessions[i];
+				if (slot)
+					*slot = k;
+				break;
+			}
+		}
+	}
+	LeaveCriticalSection(&g_lock);
+	return s;
+}
+
+/* ---- 静音的两道闸 ----
+ *
+ * 光靠 SetVolume 不一定够：`waveOutSetVolume` 在现代 Windows（WASAPI 兼容层）上
+ * 对某些音频会话不生效，而且**服务器不一定下发 volume PDU**（不下发则 SetVolume
+ * 根本不被调用）。所以静音的**主闸是丢弃音频数据**（Play/PlayEx），
+ * SetVolume 只作为副闸（让音量指示也归零、并兼容会走 GetVolume 的路径）。
+ *
+ * 丢弃数据 = 静音时 Play/PlayEx 直接返回 0（不 waveOutWrite）→ 后端无关、必生效。 */
+
+static BOOL ycn_rdpsnd_set_volume_hook(rdpsndDevicePlugin* device, UINT32 value)
+{
+	int slot = -1;
+	YcnSession* s = ycn_session_of_device((void*)device, &slot);
+
+	if (s && InterlockedCompareExchange(&s->muted, 0, 0) != 0)
+	{
+		value = 0; /* 静音态：无论服务器/设备想设多大，一律 0 */
+		InterlockedIncrement(&s->mute_setvol_hits);
+	}
+
+	if (s && slot >= 0 && s->rdpsnd_orig_set_volume[slot])
+		return IFCALLRESULT(FALSE, ((pcSetVolume)s->rdpsnd_orig_set_volume[slot]), device, value);
+
+	return FALSE;
+}
+
+/* Play 挂钩：静音时把 PCM 数据清零后再交后端 —— 既静音又保持 rdpsnd 的正常节奏
+ * （rdpsnd 每帧要发 WaveConfirm 回执给服务器；直接把数据丢掉虽然也不报错，但
+ *  清零重放能保证后端缓冲/时序完全不受影响，兼容性最好）。
+ * 用栈上小缓冲分块清，避免为大小不定的音频数据动态分配。 */
+static UINT ycn_rdpsnd_play_hook(rdpsndDevicePlugin* device, const BYTE* data, size_t size)
+{
+	int slot = -1;
+	YcnSession* s = ycn_session_of_device((void*)device, &slot);
+
+	if (s)
+	{
+		InterlockedIncrement(&s->mute_play_hits);
+		if (InterlockedCompareExchange(&s->muted, 0, 0) != 0 &&
+		    slot >= 0 && s->rdpsnd_orig_play[slot])
+		{
+			/* 静音：原样调用，但喂全零 PCM */
+			BYTE zero[512];
+			UINT last = 0;
+			size_t off = 0;
+			memset(zero, 0, sizeof(zero));
+			while (off < size)
+			{
+				size_t chunk = size - off;
+				if (chunk > sizeof(zero))
+					chunk = sizeof(zero);
+				last = ((pcPlay)s->rdpsnd_orig_play[slot])(device, zero, chunk);
+				off += chunk;
+			}
+			return last;
+		}
+		if (slot >= 0 && s->rdpsnd_orig_play[slot])
+			return ((pcPlay)s->rdpsnd_orig_play[slot])(device, data, size);
+	}
+	return 0;
+}
+
+/* PlayEx 挂钩：同上（rdpsnd 优先用 PlayEx，若存在则 Play 不会被调）。 */
+static UINT ycn_rdpsnd_play_ex_hook(rdpsndDevicePlugin* device, const AUDIO_FORMAT* format,
+                                    const BYTE* data, size_t size)
+{
+	int slot = -1;
+	YcnSession* s = ycn_session_of_device((void*)device, &slot);
+
+	if (s)
+	{
+		InterlockedIncrement(&s->mute_play_hits);
+		if (InterlockedCompareExchange(&s->muted, 0, 0) != 0 &&
+		    slot >= 0 && s->rdpsnd_orig_play_ex[slot])
+		{
+			/* 静音：喂全零 PCM（保持格式/节奏不变，只有内容静音） */
+			BYTE zero[512];
+			UINT last = 0;
+			size_t off = 0;
+			memset(zero, 0, sizeof(zero));
+			while (off < size)
+			{
+				size_t chunk = size - off;
+				if (chunk > sizeof(zero))
+					chunk = sizeof(zero);
+				last = ((pcPlayEx)s->rdpsnd_orig_play_ex[slot])(device, format, zero, chunk);
+				off += chunk;
+			}
+			return last;
+		}
+		if (slot >= 0 && s->rdpsnd_orig_play_ex[slot])
+			return ((pcPlayEx)s->rdpsnd_orig_play_ex[slot])(device, format, data, size);
+	}
+	return 0;
+}
+
+/* ---------------------------------------------------------------
+ * 自验证：完全在原生侧构造一个假的 rdpsndDevicePlugin，走真实钩子链路，
+ * 证明「静音时 Play/PlayEx 收到的是全零数据」。不依赖服务器推音频。
+ *
+ * 做法：
+ *   ① 造一个假 plugin（432 字节，device 字段放我们的假 device）；
+ *   ② 造假 device，SetVolume/Play/PlayEx 指向**本测试专用的记账函数**；
+ *   ③ 把一个空闲会话的 slot0 指向这套假对象（保留原值，测完还原）；
+ *   ④ 静音前调 Play → 记账函数应看到"原始数据"；
+ *   ⑤ 静音后再调 Play → 记账函数应看到"全零"。
+ * 返回：按位标记，全 1 = 全部通过（见下方 bit 定义）。 */
+static volatile LONG g_selftest_play_calls;
+static volatile LONG g_selftest_zero_seen;
+static volatile LONG g_selftest_data_seen;
+static BYTE g_selftest_last[64];
+static size_t g_selftest_last_size;
+
+static UINT ycn_selftest_play(rdpsndDevicePlugin* device, const BYTE* data, size_t size)
+{
+	(void)device;
+	InterlockedIncrement(&g_selftest_play_calls);
+	{
+		size_t i;
+		BOOL allzero = TRUE;
+		size_t n = size < sizeof(g_selftest_last) ? size : sizeof(g_selftest_last);
+		for (i = 0; i < size; i++)
+		{
+			if (data[i] != 0)
+			{
+				allzero = FALSE;
+				break;
+			}
+		}
+		if (allzero)
+			InterlockedIncrement(&g_selftest_zero_seen);
+		else
+			InterlockedIncrement(&g_selftest_data_seen);
+		if (n)
+			memcpy(g_selftest_last, data, n);
+		g_selftest_last_size = n;
+	}
+	return 0;
+}
+
+static UINT ycn_selftest_play_ex(rdpsndDevicePlugin* device, const AUDIO_FORMAT* format,
+                                 const BYTE* data, size_t size)
+{
+	(void)format;
+	return ycn_selftest_play(device, data, size);
+}
+
+static BOOL ycn_selftest_setvol(rdpsndDevicePlugin* device, UINT32 value)
+{
+	(void)device;
+	(void)value;
+	return TRUE;
+}
+
+/* 返回位掩码（全 1 = 通过）：
+ *   bit0(1) = 能拿到会话与空闲槽位
+ *   bit1(2) = 卸载静音时 Play 收到原始数据（非零）
+ *   bit2(4) = 静音时 Play 收到全零
+ *   bit3(8) = 静音时 Play 依然被调用（节奏不丢，rdpsnd 回执正常）
+ *   bit4(16) = 取消静音后恢复原始数据
+ */
+YCN_API int ycn_rdp_selftest_mute(void)
+{
+	int result = 0;
+	YcnSession* s = NULL;
+	int slot = -1;
+	int i;
+	int saved_used = 0;
+	rdpsndDevicePlugin fakeDev;
+	uint8_t fakePlugin[432];
+	BYTE pcm[128];
+	void* saved_plugin;
+	void* saved_device;
+	void* saved_orig;
+
+	/* 挑一个会话：优先**没在用**的（自检不该干扰真连接）。
+	 * ⚠️ 但 ycn_session_of_device 反查时会跳过 !used 的会话 —— 所以自检期间
+	 * 必须把 used 临时置 1（下面还原），否则钩子根本认不出这个 device。 */
+	EnterCriticalSection(&g_lock);
+	for (i = 0; i < YCN_MAX_SESSIONS; i++)
+	{
+		if (!g_sessions[i].used)
+		{
+			s = &g_sessions[i];
+			break;
+		}
+	}
+	if (!s)
+	{
+		/* 全都用着：退而求其次，借用第一个会话的最后一个槽位 */
+		for (i = 0; i < YCN_MAX_SESSIONS; i++)
+		{
+			if (g_sessions[i].used && g_sessions[i].rdpsnd_slot_count < YCN_RDPSND_SLOTS)
+			{
+				s = &g_sessions[i];
+				break;
+			}
+		}
+	}
+	if (!s)
+	{
+		LeaveCriticalSection(&g_lock);
+		return 0;
+	}
+	saved_used = s->used;
+	s->used = 1; /* 让 ycn_session_of_device 能反查到本会话 */
+
+	memset(&fakeDev, 0, sizeof(fakeDev));
+	fakeDev.SetVolume = ycn_selftest_setvol;
+	fakeDev.Play = ycn_selftest_play;
+	fakeDev.PlayEx = ycn_selftest_play_ex;
+
+	memset(fakePlugin, 0, sizeof(fakePlugin));
+	/* device 字段（偏移 312）指向假 device —— 与真实布局一致 */
+	*(rdpsndDevicePlugin**)(fakePlugin + YCN_RDPSND_OFFSET_DEVICE) = &fakeDev;
+
+	/* 占用一个槽位并记录原值 */
+	slot = s->rdpsnd_slot_count;
+	if (slot >= YCN_RDPSND_SLOTS)
+	{
+		LeaveCriticalSection(&g_lock);
+		return 0;
+	}
+	saved_plugin = s->rdpsnd_plugin[slot];
+	saved_device = s->rdpsnd_device[slot];
+	saved_orig = s->rdpsnd_orig_set_volume[slot];
+	s->rdpsnd_plugin[slot] = fakePlugin;
+	s->rdpsnd_device[slot] = &fakeDev;
+	s->rdpsnd_orig_set_volume[slot] = NULL;
+	s->rdpsnd_orig_play[slot] = NULL;
+	s->rdpsnd_orig_play_ex[slot] = NULL;
+	s->rdpsnd_slot_count = slot + 1;
+	InterlockedExchange(&s->muted, 0);
+	LeaveCriticalSection(&g_lock);
+
+	result |= 1; /* 拿到槽位 */
+
+	/* 用真实钩子函数装到假 device 上（这就是线上跑的那段代码） */
+	{
+		HMODULE m = NULL;
+		(void)m;
+		s->rdpsnd_orig_set_volume[slot] = (void*)fakeDev.SetVolume;
+		fakeDev.SetVolume = ycn_rdpsnd_set_volume_hook;
+		s->rdpsnd_orig_play[slot] = (void*)fakeDev.Play;
+		fakeDev.Play = ycn_rdpsnd_play_hook;
+		s->rdpsnd_orig_play_ex[slot] = (void*)fakeDev.PlayEx;
+		fakeDev.PlayEx = ycn_rdpsnd_play_ex_hook;
+	}
+
+	/* 造一段非零 PCM */
+	for (i = 0; i < (int)sizeof(pcm); i++)
+		pcm[i] = (BYTE)(i * 7 + 3);
+
+	g_selftest_play_calls = 0;
+	g_selftest_zero_seen = 0;
+	g_selftest_data_seen = 0;
+
+	/* ① 未静音 → 应收到原始（非零）数据 */
+	fakeDev.Play(&fakeDev, pcm, sizeof(pcm));
+	if (InterlockedCompareExchange(&g_selftest_data_seen, 0, 0) == 1 &&
+	    InterlockedCompareExchange(&g_selftest_zero_seen, 0, 0) == 0)
+		result |= 2;
+
+	/* ② 静音 → 应收到全零，且 Play 仍被调用（节奏不丢） */
+	g_selftest_play_calls = 0;
+	g_selftest_zero_seen = 0;
+	g_selftest_data_seen = 0;
+	InterlockedExchange(&s->muted, 1);
+	fakeDev.Play(&fakeDev, pcm, sizeof(pcm));
+	if (InterlockedCompareExchange(&g_selftest_play_calls, 0, 0) >= 1)
+		result |= 8;
+	if (InterlockedCompareExchange(&g_selftest_zero_seen, 0, 0) == 1)
+		result |= 4;
+
+	/* ③ 取消静音 → 恢复原始数据 */
+	g_selftest_play_calls = 0;
+	g_selftest_zero_seen = 0;
+	g_selftest_data_seen = 0;
+	InterlockedExchange(&s->muted, 0);
+	fakeDev.Play(&fakeDev, pcm, sizeof(pcm));
+	if (InterlockedCompareExchange(&g_selftest_data_seen, 0, 0) == 1)
+		result |= 16;
+
+	/* 还原槽位（真机运行时这槽本来可能是空的） */
+	EnterCriticalSection(&g_lock);
+	s->rdpsnd_plugin[slot] = saved_plugin;
+	s->rdpsnd_device[slot] = saved_device;
+	s->rdpsnd_orig_set_volume[slot] = saved_orig;
+	s->rdpsnd_orig_play[slot] = NULL;
+	s->rdpsnd_orig_play_ex[slot] = NULL;
+	if (!saved_plugin)
+		s->rdpsnd_slot_count = slot; /* 原本就是空的：退回 */
+	s->used = saved_used;            /* 还原 used（自检期间临时置 1 过） */
+	s->muted = 0;
+	LeaveCriticalSection(&g_lock);
+
+	return result;
+}
+
+
+/* 判断某指针是否"像"一个 rdpsndPlugin：取它的 device 字段，看 device 的 SetVolume
+ * 是否为落在**本模块之外**的有效函数指针。用于在 openData 里认出所有 rdpsnd 插件
+ * （静态那份、DVC 另建的那份，注册名都可能是 "rdpsnd"，只能靠形态认）。 */
+static rdpsndDevicePlugin* ycn_probe_rdpsnd_device(void* plugin)
+{
+	rdpsndDevicePlugin* dev;
+	HMODULE mod = NULL;
+
+	if (!plugin)
+		return NULL;
+	__try
+	{
+		dev = *(rdpsndDevicePlugin**)((uint8_t*)plugin + YCN_RDPSND_OFFSET_DEVICE);
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		return NULL;
+	}
+	if (!dev || !dev->SetVolume)
+		return NULL;
+	/* SetVolume 落在本模块内 = 布局不对/是我们自己的钩子，跳过 */
+	if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+	                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+	                       (LPCWSTR)(uintptr_t)dev->SetVolume, &mod) &&
+	    mod == (HMODULE)(uintptr_t)&__ImageBase)
+		return NULL;
+	return dev;
+}
+
+/* 把候选 plugin 收进空闲槽位（已在槽里的跳过）。返回是否新收。 */
+static int ycn_add_slot(YcnSession* s, void* plugin, const char* tag_name)
+{
+	int k;
+	if (!plugin)
+		return 0;
+	for (k = 0; k < s->rdpsnd_slot_count; k++)
+	{
+		if (s->rdpsnd_plugin[k] == plugin)
+			return 0; /* 已在槽里 */
+	}
+	if (s->rdpsnd_slot_count >= YCN_RDPSND_SLOTS)
+		return 0;
+	k = s->rdpsnd_slot_count;
+	s->rdpsnd_plugin[k] = plugin;
+	s->rdpsnd_device[k] = (void*)ycn_probe_rdpsnd_device(plugin);
+	s->rdpsnd_orig_set_volume[k] = NULL;
+	s->rdpsnd_orig_play[k] = NULL;
+	s->rdpsnd_orig_play_ex[k] = NULL;
+	s->rdpsnd_slot_count++;
+	{
+		char dbg[256];
+		_snprintf_s(dbg, sizeof(dbg), _TRUNCATE, "mute: collect slot%d src='%s' plugin=%p dev=%p", k,
+		            tag_name ? tag_name : "?", plugin, s->rdpsnd_device[k]);
+		ycn_debug_dump_tag(dbg);
+	}
+	return 1;
+}
+
+/* 扫描并收集本会话所有 rdpsnd 插件，两条来源都扫：
+ *   ① context->channels.openData 里的静态 `rdpsnd` 项（lpUserParam = plugin）
+ *   ② drdynvc 的 DVCMAN->plugins 列表里 DVC 音频（AUDIO_PLAYBACK_DVC）那份 —— 这个是
+ *      **真正在播的**（服务器走 DVC 音频时，静态那份 device 恒 NULL）。
+ * 已收集的槽位不重复添加（否则每拍覆盖会丢已装钩子的记录）。
+ * 返回槽位总数。 */
+static int ycn_collect_rdpsnd_plugins(YcnSession* s, int verbose)
+{
+	uint8_t* channels;
+	uint8_t* drdynvc_ctx;
+	uint8_t* dvcman;
+	wArrayList* plugins;
+
+	if (!s || !s->instance || !s->instance->context)
+		return 0;
+	channels = *(uint8_t**)((uint8_t*)s->instance->context + YCN_CTX_OFF_CHANNELS);
+	if (!channels)
+		return s->rdpsnd_slot_count;
+
+	/* ① 静态 openData 扫描 */
+	{
+		int count = *(int*)(channels + YCN_CH_OFF_OPENDATA_COUNT);
+		int i;
+		if (count > 0 && count <= YCN_CH_MAX_COUNT)
+		{
+			for (i = 0; i < count; i++)
+			{
+				uint8_t* od = channels + YCN_CH_OFF_OPENDATA_LIST + (size_t)i * YCN_OD_SIZE;
+				const char* name = (const char*)(od + YCN_OD_OFF_STATS_NAME);
+				void* lp = *(void**)(od + YCN_OD_OFF_LPUSERPARAM);
+				char safe[9];
+				if (!lp)
+					continue;
+				memcpy(safe, name, 8);
+				safe[8] = '\0';
+				if (!(strstr(safe, "rdpsnd") || strstr(safe, "AUDIO")))
+					continue;
+				(void)ycn_add_slot(s, lp, safe);
+			}
+		}
+	}
+
+	/* ② DVC 插件列表扫描（AUDIO_PLAYBACK_DVC 的那份）。
+	 * verbose = 前几拍才打详细诊断，避免刷爆文件。 */
+	drdynvc_ctx = *(uint8_t**)(channels + YCN_CH_OFF_DRDYNVC);
+	if (verbose)
+	{
+		char dbg[256];
+		_snprintf_s(dbg, sizeof(dbg), _TRUNCATE, "mute-dvc: drdynvc_ctx=%p", (void*)drdynvc_ctx);
+		ycn_debug_dump_tag(dbg);
+	}
+	if (drdynvc_ctx)
+	{
+		uint8_t* dvcplugin = *(uint8_t**)(drdynvc_ctx + YCN_DRDYNVC_OFF_HANDLE);
+		if (verbose)
+		{
+			char dbg[256];
+			_snprintf_s(dbg, sizeof(dbg), _TRUNCATE, "mute-dvc: ctx=%p dvcplugin=%p",
+			            (void*)drdynvc_ctx, (void*)dvcplugin);
+			ycn_debug_dump_tag(dbg);
+		}
+		dvcman = dvcplugin ? *(uint8_t**)(dvcplugin + YCN_DRDYNVC_PLUGIN_OFF_CHMGR) : NULL;
+		if (verbose)
+		{
+			char dbg[256];
+			_snprintf_s(dbg, sizeof(dbg), _TRUNCATE, "mute-dvc: dvcman=%p", (void*)dvcman);
+			ycn_debug_dump_tag(dbg);
+		}
+		if (dvcman)
+		{
+			plugins = *(wArrayList**)(dvcman + YCN_DVCMAN_OFF_PLUGINS);
+			if (verbose)
+			{
+				char dbg[256];
+				_snprintf_s(dbg, sizeof(dbg), _TRUNCATE, "mute-dvc: plugins=%p count=%zu",
+				            (void*)plugins, plugins ? ArrayList_Count(plugins) : 0);
+				ycn_debug_dump_tag(dbg);
+			}
+			if (plugins)
+			{
+				size_t n = ArrayList_Count(plugins);
+				size_t j;
+				for (j = 0; j < n; j++)
+				{
+					void* p = ArrayList_GetItem(plugins, j);
+					rdpsndDevicePlugin* dv = ycn_probe_rdpsnd_device(p);
+					if (verbose)
+					{
+						char dbg[256];
+						_snprintf_s(dbg, sizeof(dbg), _TRUNCATE, "mute-dvc: item%zu p=%p dev=%p", j, p,
+						            (void*)dv);
+						ycn_debug_dump_tag(dbg);
+					}
+					if (dv)
+						(void)ycn_add_slot(s, p, "dvc");
+				}
+			}
+		}
+	}
+	return s->rdpsnd_slot_count;
+}
+
+/* 对单个槽位的 device 装钩子。返回 1 = 已挂钩/已是最新，0 = 暂不可用，-1 = 校验失败。 */
+static int ycn_rdpsnd_hook_slot(YcnSession* s, int slot)
+{
+	rdpsndDevicePlugin* device = (rdpsndDevicePlugin*)s->rdpsnd_device[slot];
+	rdpsndDevicePlugin* dev;
+	HMODULE selfMod = NULL;
+
+	if (!s->rdpsnd_plugin[slot])
+		return 0;
+
+	/* 每次都从插件里重新读 device —— device 会在 Close→Free 后被换成新对象，
+	 * 缓存旧指针会指向已释放内存。 */
+	dev = ycn_probe_rdpsnd_device(s->rdpsnd_plugin[slot]);
+	if (dev && s->rdpsnd_device[slot] != (void*)dev)
+	{
+		s->rdpsnd_device[slot] = (void*)dev;
+		s->rdpsnd_orig_set_volume[slot] = NULL;
+		s->rdpsnd_orig_play[slot] = NULL;
+		s->rdpsnd_orig_play_ex[slot] = NULL;
+	}
+	device = (rdpsndDevicePlugin*)s->rdpsnd_device[slot];
+	if (!device || !device->SetVolume)
+		return 0;
+
+	/* 已挂钩？只看「当前 device 上的函数指针就是我的钩子」——不掺 orig 缓存，
+	 * 否则重扫时 orig 被清就误判成未挂钩 → 反复重装。 */
+	if (device->SetVolume == ycn_rdpsnd_set_volume_hook)
+		return 1;
+
+	if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+	                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+	                       (LPCWSTR)(uintptr_t)device->SetVolume, &selfMod) &&
+	    selfMod == (HMODULE)(uintptr_t)&__ImageBase)
+	{
+		return -1;
+	}
+
+	/* 存 orig 前先排雷：若当前指针**已经是本模块的钩子**（上轮挂完 device 地址没变、
+	 * 但上一轮被判定为"未挂钩"而重进这里），绝不能把它存成 orig —— 那会让钩子
+	 * 转调自己 → 无限递归 / 调用野指针（实测出现过 play=000000E400000001 这种垃圾）。
+	 * 判据：指针落在本模块内 = 我们的钩子，此时保留旧 orig 不动。 */
+	{
+		HMODULE m = NULL;
+		if (!(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+		                         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+		                         (LPCWSTR)(uintptr_t)device->SetVolume, &m) &&
+		      m == (HMODULE)(uintptr_t)&__ImageBase))
+		{
+			s->rdpsnd_orig_set_volume[slot] = (void*)device->SetVolume;
+			device->SetVolume = ycn_rdpsnd_set_volume_hook;
+		}
+		else
+		{
+			device->SetVolume = ycn_rdpsnd_set_volume_hook;
+		}
+	}
+	{
+		HMODULE m = NULL;
+		if (device->Play &&
+		    !(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+		                         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+		                         (LPCWSTR)(uintptr_t)device->Play, &m) &&
+		      m == (HMODULE)(uintptr_t)&__ImageBase))
+		{
+			s->rdpsnd_orig_play[slot] = (void*)device->Play;
+			device->Play = ycn_rdpsnd_play_hook;
+		}
+		else if (device->Play)
+		{
+			device->Play = ycn_rdpsnd_play_hook;
+		}
+	}
+	{
+		HMODULE m = NULL;
+		if (device->PlayEx &&
+		    !(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+		                         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+		                         (LPCWSTR)(uintptr_t)device->PlayEx, &m) &&
+		      m == (HMODULE)(uintptr_t)&__ImageBase))
+		{
+			s->rdpsnd_orig_play_ex[slot] = (void*)device->PlayEx;
+			device->PlayEx = ycn_rdpsnd_play_ex_hook;
+		}
+		else if (device->PlayEx)
+		{
+			device->PlayEx = ycn_rdpsnd_play_ex_hook;
+		}
+	}
+
+	{
+		char dbg[256];
+		_snprintf_s(dbg, sizeof(dbg), _TRUNCATE,
+		            "mute: slot%d HOOKED dev=%p play=%p playEx=%p", slot, (void*)device,
+		            (void*)s->rdpsnd_orig_play[slot], (void*)s->rdpsnd_orig_play_ex[slot]);
+		ycn_debug_dump_tag(dbg);
+	}
+	WLog_INFO(TAG, "audio mute: slot%d hooked (device=%p)", slot, (void*)device);
+	return 1;
+}
+
+/* 解析本会话所有 rdpsnd device 并装钩子。可重入（重复调用安全）。
+ * 返回已挂钩/已就绪的槽位数。 */
+static int ycn_rdpsnd_hook(YcnSession* s)
+{
+	int hooked = 0;
+	int k;
+	long tick;
+
+	if (!s)
+		return 0;
+
+	/* 每拍重扫一次槽位（plugin/device 都可能出现/更换；数量很少，开销可忽略） */
+	tick = InterlockedIncrement(&s->mute_dbg_tick);
+	ycn_collect_rdpsnd_plugins(s, tick <= 5);
+
+	if (tick == 3 && s->instance && s->instance->context)
+		ycn_dump_all_channels(s->instance->context);
+
+	for (k = 0; k < s->rdpsnd_slot_count; k++)
+	{
+		int rc = ycn_rdpsnd_hook_slot(s, k);
+		if (rc == 1)
+			hooked++;
+
+		/* 诊断快照（前几拍 + 之后每 120 拍一次，避免刷爆） */
+		if (tick <= 5 || (tick % 120) == 0)
+		{
+			uint8_t* p = (uint8_t*)s->rdpsnd_plugin[k];
+			char dbg[320];
+			if (p)
+			{
+				_snprintf_s(dbg, sizeof(dbg), _TRUNCATE,
+				            "mute-snap#%ld slot%d dync=%d att=%d open=%d onopen=%d isopen=%d "
+				            "applyv=%d nfmt=%u dev=%p rc=%d",
+				            tick, k,
+				            (int)*(BOOL*)(p + YCN_RDPSND_OFFSET_DYNAMIC),
+				            (int)*(BOOL*)(p + YCN_RDPSND_OFFSET_ATTACHED),
+				            (int)*(DWORD*)(p + YCN_RDPSND_OFFSET_OPENDATA_HANDLE),
+				            (int)*(BOOL*)(p + YCN_RDPSND_OFFSET_ONOPENCALLED),
+				            (int)*(BOOL*)(p + YCN_RDPSND_OFFSET_ISOPEN),
+				            (int)*(BOOL*)(p + YCN_RDPSND_OFFSET_APPLYVOLUME),
+				            (unsigned)*(UINT16*)(p + YCN_RDPSND_OFFSET_NUM_CLIENT_FMT),
+				            s->rdpsnd_device[k], rc);
+				ycn_debug_dump_tag(dbg);
+			}
+		}
+	}
+	return hooked;
+}
+
+/* 通道连上时把插件/设备指针记下来并挂钩。
+ * ⚠️ 不能信 e->pInterface（静态通道这里是 NULL），只借 e->name 记个信号，
+ * 真正的指针由 ycn_rdpsnd_hook 从 context->channels 里找。 */
+static void ycn_rdpsnd_attach(YcnSession* s, const ChannelConnectedEventArgs* e)
+{
+	if (!s || !e)
+		return;
+
+	/* rdpsnd 连上时设备可能还没 Open（音频协商在稍后）→ 这里能挂就挂，
+	 * 挂不上也无妨：ycn_rdp_set_muted 会再试，或下次通道事件再试。 */
+	(void)ycn_rdpsnd_hook(s);
 }
 
 static void ycn_on_channel_connected(void* ctx, const ChannelConnectedEventArgs* e)
@@ -466,6 +1243,14 @@ static void ycn_on_channel_connected(void* ctx, const ChannelConnectedEventArgs*
 				gfx->EndFrame = ycn_gfx_end_frame;
 			}
 		}
+	}
+
+	/* rdpsnd 连上后：记下设备插件并装 SetVolume 挂钩。
+	 * 必须在这里（而不是只在 ycn_rdp_set_muted 里）—— 用户可能先点静音、通道后到；
+	 * 重连时设备会重建，也要重新挂。挂钩装上后，静音态会被**自动**持续执行。 */
+	if (s && strcmp(e->name, RDPSND_CHANNEL_NAME) == 0)
+	{
+		ycn_rdpsnd_attach(s, e);
 	}
 }
 
@@ -886,6 +1671,11 @@ static DWORD WINAPI event_loop(LPVOID arg)
 				break;
 			}
 
+			/* rdpsnd 静音挂钩补装：通道连上时设备往往还没 Open（音频协商在稍后），
+			 * 所以每拍（500ms）试一次；device 被换掉时也会重挂（函数内部判指针）。
+			 * 必须在**本线程**调 —— 这是 RDP 线程，FreeRDP 结构只在这里安全访问。 */
+			(void)ycn_rdpsnd_hook(s);
+
 			/* 重连已有会话时，服务器按 RDP 协议假设「客户端仍持有屏幕缓存」，
 			 * 不主动重推桌面帧 —— 恢复瞬间最多一帧（常为纯黑），之后画面永远静止（M5 黑屏根因）。
 			 * 激活完成约 1 秒后显式请求一次全屏刷新（Refresh Rectangle PDU，MS-RDPBCGR 2.2.11.2.1），
@@ -969,6 +1759,7 @@ YCN_API int ycn_rdp_connect(const ycn_rdp_params* params, const ycn_rdp_callback
 	s->allow_selfsigned = params->allow_selfsigned;
 	s->enable_audio = params->enable_audio;
 	s->use_gfx = params->use_gfx;
+	InterlockedExchange(&s->muted, 0); /* 新会话默认不静音（C# 侧若记住状态会在连上后立刻设一次） */
 	s->gfx_state = params->use_gfx ? 1 : 0;
 	s->dvc_connected = 0;
 	s->dvc_names[0] = '\0';
@@ -1156,6 +1947,20 @@ YCN_API void ycn_rdp_disconnect(int session)
 	s->frame_stride = 0;
 	s->thread = NULL;
 	s->stop_event = NULL;
+	/* 静音挂钩随会话一起作废：device 对象已被 FreeRDP 释放，绝不能再解引用。
+	 * ⚠️ 必须在上面 freerdp_context_free 之后清 —— 顺序反了会拿到悬垂指针。 */
+	{
+		int k;
+		for (k = 0; k < YCN_RDPSND_SLOTS; k++)
+		{
+			s->rdpsnd_device[k] = NULL;
+			s->rdpsnd_plugin[k] = NULL;
+			s->rdpsnd_orig_set_volume[k] = NULL;
+			s->rdpsnd_orig_play[k] = NULL;
+			s->rdpsnd_orig_play_ex[k] = NULL;
+		}
+		s->rdpsnd_slot_count = 0;
+	}
 	s->mouse_head = 0;
 	s->mouse_tail = 0;
 	s->key_head = 0;
@@ -1247,6 +2052,97 @@ YCN_API int ycn_rdp_send_key(int session, int down, int extended, uint16_t scanc
 	}
 	LeaveCriticalSection(&g_lock);
 	return rc;
+}
+
+/* 设置本机静音：静音态由 SetVolume 钩子持续执行（服务器下发的 volume PDU 也盖不掉）。
+ * 这里只改标志 + 立刻推一次让当前音量即时生效。
+ *
+ * ⚠️ 线程安全：本函数从 **UI 线程**调用，而钩子/RDP 结构归 **RDP 线程**（event_loop）所有。
+ * 所以这里**绝不**改 `device->SetVolume`（那是 event_loop 的活，避免数据竞争）；
+ * 只做两件跨线程安全的事：
+ *   ① 原子写 `s->muted`（钩子按它决定是否压 0）；
+ *   ② 用记录的**原函数指针**直接推一次目标音量（就是 waveOutSetVolume，任何线程可调）。
+ * 钩子的装卸交给 event_loop（500ms 一拍 + 通道事件）。
+ * rdpsnd 尚未连上/钩子还没装时静默成功（装好后由 event_loop / 下次调用补上）。
+ * muted 非 0 = 静音。 */
+YCN_API int ycn_rdp_set_muted(int session, int muted)
+{
+	YcnSession* s;
+	void* orig[YCN_RDPSND_SLOTS];
+	void* device[YCN_RDPSND_SLOTS];
+	int n = 0, k;
+
+	EnterCriticalSection(&g_lock);
+	s = find_session(session);
+	if (!s)
+	{
+		LeaveCriticalSection(&g_lock);
+		return YCN_ERR_SESSION_NOT_FOUND;
+	}
+	InterlockedExchange(&s->muted, muted ? 1 : 0);
+	/* 锁内重新从 plugin 取当前 device（比缓存的新鲜；plugin 为 NULL 则跳过）。
+	 * 仍不能完全消除与 RDP 线程的竞争，但这是"副闸"，拿不准就不推 —— 主闸是 Play 钩子。 */
+	for (k = 0; k < YCN_RDPSND_SLOTS; k++)
+	{
+		rdpsndDevicePlugin* d = ycn_probe_rdpsnd_device(s->rdpsnd_plugin[k]);
+		orig[k] = s->rdpsnd_orig_set_volume[k];
+		device[k] = (void*)d;
+		if (d && orig[k])
+			n++;
+	}
+	LeaveCriticalSection(&g_lock);
+
+	/* 立刻推一次目标音量，让「正在播的声音」即时停/响。
+	 * 静音 → 0；取消 → 全量 0xFFFFFFFF。*不*动钩子本身。
+	 * ⚠️ 这只是副闸；主闸是 Play 钩子（静音时丢数据），它按 s->muted 自动生效。 */
+	for (k = 0; k < YCN_RDPSND_SLOTS; k++)
+	{
+		if (device[k] && orig[k])
+		{
+			(void)IFCALLRESULT(FALSE, ((pcSetVolume)orig[k]), (rdpsndDevicePlugin*)device[k],
+			                   muted ? 0u : 0xFFFFFFFFu);
+		}
+	}
+
+	/* 诊断：把「设了静音后 Play/SetVolume 钩子各被调了多少次」落盘。
+	 * Play 计数不动 = 服务器根本没推音频（或钩子没挂在这条路径上）；
+	 * Play 计数在涨但还有声音 = 静音闸没生效。
+	 * hooked 列 = 当前 device->Play/SetVolume 是否就是我们的钩子（静音能否生效的前提）。*/
+	{
+		char buf[320];
+		int hooked[YCN_RDPSND_SLOTS];
+		for (k = 0; k < YCN_RDPSND_SLOTS; k++)
+		{
+			rdpsndDevicePlugin* d = (rdpsndDevicePlugin*)device[k];
+			hooked[k] = (d && d->SetVolume == ycn_rdpsnd_set_volume_hook) ? 1 : 0;
+		}
+		_snprintf_s(buf, sizeof(buf), _TRUNCATE,
+		            "mute: set=%d slots=%d dev0=%p dev1=%p hooked0=%d hooked1=%d "
+		            "play_hits=%ld setvol_hits=%ld",
+		            muted, n, device[0], device[1], hooked[0], hooked[1],
+		            (long)InterlockedCompareExchange(&s->mute_play_hits, 0, 0),
+		            (long)InterlockedCompareExchange(&s->mute_setvol_hits, 0, 0));
+		ycn_debug_dump_tag(buf);
+	}
+	return YCN_OK;
+}
+
+/* 查询当前静音标志（1 = 静音）。仅用于自检与 C# 侧状态对齐。 */
+YCN_API int ycn_rdp_get_muted(int session)
+{
+	YcnSession* s;
+	int muted;
+
+	EnterCriticalSection(&g_lock);
+	s = find_session(session);
+	if (!s)
+	{
+		LeaveCriticalSection(&g_lock);
+		return YCN_ERR_SESSION_NOT_FOUND;
+	}
+	muted = (int)InterlockedCompareExchange(&s->muted, 0, 0);
+	LeaveCriticalSection(&g_lock);
+	return muted;
 }
 
 YCN_API int ycn_rdp_grab_frame(int session, uint32_t* out_width, uint32_t* out_height,

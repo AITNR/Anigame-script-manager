@@ -67,6 +67,8 @@ namespace YukinoChan.Services
         [DllImport(Lib, CallingConvention = CC)] internal static extern void ycn_rdp_disconnect(int session);
         [DllImport(Lib, CallingConvention = CC)] internal static extern int ycn_rdp_send_mouse(int session, uint flags, ushort x, ushort y);
         [DllImport(Lib, CallingConvention = CC)] internal static extern int ycn_rdp_send_key(int session, int down, int extended, ushort scancode);
+        [DllImport(Lib, CallingConvention = CC)] internal static extern int ycn_rdp_set_muted(int session, int muted);
+        [DllImport(Lib, CallingConvention = CC)] internal static extern int ycn_rdp_get_muted(int session);
         [DllImport(Lib, CallingConvention = CC)] internal static extern int ycn_rdp_grab_frame(int session, out uint out_width, out uint out_height, out uint out_stride, out IntPtr out_data);
         [DllImport(Lib, CallingConvention = CC)] internal static extern unsafe int ycn_rdp_copy_frame(int session, byte* dst, uint dst_size, out uint out_width, out uint out_height, out uint out_stride);
         [DllImport(Lib, CallingConvention = CC)] internal static extern void ycn_rdp_last_error(int session, [Out] byte[] buf, UIntPtr buflen);
@@ -74,5 +76,8 @@ namespace YukinoChan.Services
         [DllImport(Lib, CallingConvention = CC)] internal static extern void ycn_rdp_dvc_names(int session, [Out] byte[] buf, UIntPtr buflen);
         [DllImport(Lib, CallingConvention = CC)] internal static extern void ycn_rdp_diag(int session, [Out] byte[] buf, UIntPtr buflen);
         [DllImport(Lib, CallingConvention = CC)] internal static extern IntPtr ycn_rdp_version(); // const char*
+
+        /// <summary>静音链路自验证（本地构造假设备，不依赖服务器推音频）。返回位掩码，31=全过。</summary>
+        [DllImport(Lib, CallingConvention = CC)] internal static extern int ycn_rdp_selftest_mute();
     }
 }

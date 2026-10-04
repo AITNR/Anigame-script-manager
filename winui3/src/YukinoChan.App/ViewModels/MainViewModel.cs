@@ -2500,6 +2500,20 @@ public sealed class MainViewModel : ObservableObject
         /// </summary>
         public bool PoppedOut { get; set; }
 
+        /// <summary>
+        /// 用户在这格画面上点了「锁定」：鼠标穿透 + 键盘映射都说停就停。
+        ///
+        /// 与「键盘焦点」不是一回事 —— 焦点只决定按键去处，锁定是彻底不再往远端送输入。
+        /// 每通道独立（多画面时锁一格不影响别格），且**跨重连保留**：
+        /// 自动重连后回到锁前状态，不会因为掉线重连把锁悄悄解开。
+        /// 只放在运行时（EmbedConnection）里、不写 config.json —— 这是「防误触」的临时闸，
+        /// 重启应用即复位为未锁。
+        /// </summary>
+        public bool InputLocked { get; set; }
+
+        /// <summary>用户在这格画面上点了「静音」：本机不放远端声音（每通道独立，运行时不落盘）。</summary>
+        public bool LocalMuted { get; set; }
+
         // 事件处理器引用（闭包捕获本对象）——解绑时必须用同一批委托实例
         public EventHandler<(int Session, uint Width, uint Height)>? OnConnected;
         public EventHandler<RdpFrameEventArgs>? OnFrameArrived;
@@ -2540,6 +2554,59 @@ public sealed class MainViewModel : ObservableObject
     /// <summary>这条通道的画面是否已被「弹出独立窗口」占用。</summary>
     public bool IsSurfacePoppedOut(string? channelId)
         => _embeds.TryGetValue(channelId ?? string.Empty, out var conn) && conn.PoppedOut;
+
+    /// <summary>
+    /// 这条通道的内嵌画面是否处于「锁定」状态（鼠标穿透 + 键盘映射都说停就停）。
+    /// 没有内嵌连接时恒为 false —— 没画面就没得锁。
+    /// </summary>
+    public bool IsSurfaceInputLocked(string? channelId)
+        => _embeds.TryGetValue(channelId ?? string.Empty, out var conn) && conn.InputLocked;
+
+    /// <summary>这条通道的内嵌画面是否被本机静音（远端仍在出声，只是本机不放）。</summary>
+    public bool IsSurfaceMuted(string? channelId)
+        => _embeds.TryGetValue(channelId ?? string.Empty, out var conn) && conn.LocalMuted;
+
+    /// <summary>
+    /// 设置某条通道画面的「锁定」状态。返回设置后的实际状态；false 表示没有内嵌连接。
+    /// 只改运行时标志 —— 锁定期间 RdpView 不转发指针/键盘，点解锁按钮仍然有效（它不走画面输入隧道）。
+    /// </summary>
+    public bool SetSurfaceInputLocked(string? channelId, bool locked)
+    {
+        var key = channelId ?? string.Empty;
+        if (!_embeds.TryGetValue(key, out var conn) || conn.Client is null)
+        {
+            return false;
+        }
+
+        conn.InputLocked = locked;
+        AppendSurfaceLog(key, locked
+            ? "已锁定画面输入：鼠标穿透与键盘映射都停用，点「已锁定」可解锁。"
+            : "已解锁画面输入：鼠标与键盘恢复转发。");
+        // 状态栏（1Hz 刷新）会跟着改，这里主动叫一次让 UI 立刻反应
+        SurfaceRefreshRequested?.Invoke();
+        return locked;
+    }
+
+    /// <summary>
+    /// 设置某条通道画面的「静音」状态。返回设置后的实际状态；false 表示没有内嵌连接。
+    /// </summary>
+    public bool SetSurfaceMuted(string? channelId, bool muted)
+    {
+        var key = channelId ?? string.Empty;
+        if (!_embeds.TryGetValue(key, out var conn) || conn.Client is null)
+        {
+            return false;
+        }
+
+        conn.LocalMuted = muted;
+        // 原生侧按本会话静音（rdpsnd 音量置 0）：不用断线重连，立即生效
+        conn.Client.SetMuted(muted);
+        AppendSurfaceLog(key, muted
+            ? "已静音：这条通道的远端声音不在本机播放（远端照常出声）。"
+            : "已取消静音：恢复在本机播放这条通道的远端声音。");
+        SurfaceRefreshRequested?.Invoke();
+        return muted;
+    }
 
     /// <summary>标记 / 撤销「画面已弹出到独立窗口」。</summary>
     public void MarkSurfacePoppedOut(string? channelId, bool poppedOut)
@@ -2655,6 +2722,13 @@ public sealed class MainViewModel : ObservableObject
     /// 内嵌连接集合发生变化（发起连接 / 释放）。可能在任意线程触发，订阅方自行调度到 UI 线程。
     /// </summary>
     public event Action? EmbedClientChanged;
+
+    /// <summary>
+    /// 请求画面格子刷新顶部条（锁定 / 静音这类开关变了）。
+    /// 与 <see cref="EmbedClientChanged"/> 分开：那个是"某一格有连接 / 没连接"的结构性变化，
+    /// 页面要重建网格；这个只是"开关状态变了"，格子重画一遍就行。
+    /// </summary>
+    public event Action? SurfaceRefreshRequested;
 
     /// <summary>
     /// 发起内嵌连接。同步发起、异步回调；凭据取自 Windows 凭据管理器。

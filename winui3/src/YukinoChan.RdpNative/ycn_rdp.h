@@ -96,6 +96,15 @@ YCN_API int ycn_rdp_send_mouse(int session, uint32_t flags, uint16_t x, uint16_t
 /* 键盘注入。scancode 为 RDP 扫描码（VSC），extended 为扩展键位 */
 YCN_API int ycn_rdp_send_key(int session, int down, int extended, uint16_t scancode);
 
+/* 本机静音（只影响本机播放，远端照常发声）。muted 非 0 = 静音。
+ * 立即生效、不需要重连：内部对 rdpsnd 设备的 SetVolume 做**链式挂钩**，
+ * 静音态下任何音量写入（含服务器下发的 volume PDU）都会被压成 0；取消静音则摘钩子并还原全量。
+ * rdpsnd 通道尚未连上时静默成功 —— 连上后会自动装钩子（见 ycn_on_channel_connected）。 */
+YCN_API int ycn_rdp_set_muted(int session, int muted);
+
+/* 查询本机静音标志（1 = 静音；负值为错误码）。供自检与 C# 侧状态对齐。 */
+YCN_API int ycn_rdp_get_muted(int session);
+
 /* 取当前帧。成功返回 YCN_OK；out_data 有效期到下一次 grab / disconnect。
  * stride 单位字节，像素格式 BGRA32（与 D3D11 B8G8R8A8 / SoftwareBitmap Bgra8 对齐）
  *
@@ -130,6 +139,20 @@ YCN_API void ycn_rdp_diag(int session, char* buf, size_t buflen);
 
 /* 版本串（诊断 + 冒烟断言用） */
 YCN_API const char* ycn_rdp_version(void);
+
+/* 静音链路自验证（不依赖服务器推音频，纯本地）。
+ * 内部构造一个假 rdpsnd 插件/设备、挂上与线上完全相同的钩子，然后
+ *   ① 未静音时 Play 收到原始 PCM
+ *   ② 静音时 Play 收到**全零** PCM，且仍被调用（rdpsnd 的 WaveConfirm 回执节奏不变）
+ *   ③ 取消静音后恢复原始 PCM
+ * 返回位掩码（31 = 全部通过）：
+ *   0x01 拿到可用的会话槽位
+ *   0x02 未静音时收到原始数据
+ *   0x04 静音时收到全零数据
+ *   0x08 静音时 Play 仍被调用
+ *   0x10 取消静音后恢复原始数据
+ * 用途：冒烟测试直接断言 (rc & 0x1F) == 0x1F，证明静音闸本身没写错。 */
+YCN_API int ycn_rdp_selftest_mute(void);
 
 #ifdef __cplusplus
 }

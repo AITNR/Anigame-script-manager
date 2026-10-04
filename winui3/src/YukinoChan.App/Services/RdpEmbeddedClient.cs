@@ -247,6 +247,25 @@ namespace YukinoChan.Services
         public int SendKeyRc(bool down, bool extended, ushort scancode)
             => RdpNativeInterop.ycn_rdp_send_key(_session, down ? 1 : 0, extended ? 1 : 0, scancode);
 
+        /// <summary>
+        /// 本机静音 / 取消静音（远端照常发声，只是本机不放）。
+        /// 立即生效、不需要重连；原生侧对 rdpsnd 设备的 SetVolume 做了链式挂钩，
+        /// 静音态下服务器下发的音量 PDU 也盖不掉。只影响**本会话**，不波及其他通道。
+        /// rdpsnd 通道还没连上时也安全（连上后原生侧会自动装钩子）。
+        /// </summary>
+        public bool SetMuted(bool muted)
+            => RdpNativeInterop.ycn_rdp_set_muted(_session, muted ? 1 : 0) == 0;
+
+        /// <summary>当前静音标志（原生侧为准）。会话不存在时返回 false。</summary>
+        public bool IsMuted
+        {
+            get
+            {
+                var rc = RdpNativeInterop.ycn_rdp_get_muted(_session);
+                return rc == 1;
+            }
+        }
+
         public static string GetLastError(int session)
         {
             var buf = new byte[512];
