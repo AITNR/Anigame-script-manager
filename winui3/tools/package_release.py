@@ -62,6 +62,15 @@ _JUNK_SUFFIXES = (
     ".up2date",
 )
 
+# 这些文件由 publish（自包含）说了算，build 那份**一律不复制**过去。
+# 见 main() 里的注释：build 产出的是框架依赖版，混进去会让装好的程序弹
+# "You must install or update .NET to run this application"。
+_PUBLISH_AUTHORITATIVE = {
+    "yukinochan.exe",
+    "yukinochan.runtimeconfig.json",
+    "yukinochan.deps.json",
+}
+
 _JUNK_NAMES = {
     "input.json",
     "output.json",
@@ -94,8 +103,18 @@ def _is_junk(rel: Path) -> bool:
     return False
 
 
-def _copy_tree(src: Path, dst: Path, *, skip_junk: bool, keep_pdb: bool = False) -> int:
-    """把 src 目录内容拷进 dst（合并覆盖），返回拷贝的文件数。"""
+def _copy_tree(
+    src: Path,
+    dst: Path,
+    *,
+    skip_junk: bool,
+    keep_pdb: bool = False,
+    skip_names: set[str] | None = None,
+) -> int:
+    """把 src 目录内容拷进 dst（合并覆盖），返回拷贝的文件数。
+
+    skip_names 是小写文件名集合，命中的直接跳过（用于"publish 权威"的那几个文件）。
+    """
     if not src.is_dir():
         raise SystemExit(f"目录不存在：{src}")
 
@@ -103,6 +122,8 @@ def _copy_tree(src: Path, dst: Path, *, skip_junk: bool, keep_pdb: bool = False)
     for item in src.rglob("*"):
         rel = item.relative_to(src)
         if item.is_dir():
+            continue
+        if skip_names and item.name.lower() in skip_names:
             continue
         if skip_junk and _is_junk(rel) and not (keep_pdb and rel.name.lower().endswith(".pdb")):
             continue
@@ -138,8 +159,10 @@ def _verify(app_dir: Path, *, require_dotnet_runtime: bool) -> None:
     if not xbf:
         problems.append("Views/*.xbf（页面 XAML 编译产物）")
 
-    if require_dotnet_runtime and not (app_dir / "System.Private.CoreLib.dll").exists():
-        problems.append("System.Private.CoreLib.dll（自包含模式应带 .NET 运行时）")
+    if require_dotnet_runtime:
+        if not (app_dir / "System.Private.CoreLib.dll").exists():
+            problems.append("System.Private.CoreLib.dll（自包含模式应带 .NET 运行时）")
+        problems.extend(_verify_self_contained(app_dir))
 
     if (app_dir / "config.json").exists():
         problems.append("config.json（不该出现在发布包里 —— 会泄露使用者本机配置）")
@@ -149,6 +172,42 @@ def _verify(app_dir: Path, *, require_dotnet_runtime: bool) -> None:
         for p in problems:
             print("  - " + p, file=sys.stderr)
         raise SystemExit(1)
+
+
+def _verify_self_contained(app_dir: Path) -> list[str]:
+    """自包含模式必须**真的**是自包含：光看有没有 System.Private.CoreLib.dll 是不够的。
+
+    踩过的坑：build 目录（框架依赖）的 runtimeconfig 覆盖了 publish 的，
+    CoreLib 还在（是 publish 铺的），但 runtimeconfig 写的是
+    `"framework": Microsoft.NETCore.App 8.0.0` → 装完双击就弹
+    "You must install or update .NET to run this application"。
+    所以这里直接读 runtimeconfig：自包含必须是 `includedFrameworks`，出现 `framework` 就是被覆盖了。
+    """
+    import json
+
+    problems: list[str] = []
+    cfg_path = app_dir / "YukinoChan.runtimeconfig.json"
+    if not cfg_path.is_file():
+        return problems  # 缺文件已由 need() 报过
+
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        return [f"YukinoChan.runtimeconfig.json 读不出来（{exc}）"]
+
+    opts = cfg.get("runtimeOptions") or {}
+    included = opts.get("includedFrameworks")
+    framework = opts.get("framework")
+    if framework and not included:
+        problems.append(
+            "YukinoChan.runtimeconfig.json 是**框架依赖**版"
+            f"（framework={framework.get('name')} {framework.get('version')}）—— "
+            "自包含包必须是 includedFrameworks；多半是 build 输出覆盖了 publish 输出"
+        )
+    elif not included:
+        problems.append("YukinoChan.runtimeconfig.json 里既没有 includedFrameworks 也没有 framework（自包含应写 includedFrameworks）")
+
+    return problems
 
 
 # ---------------------------------------------------------------- 说明文件
@@ -226,9 +285,29 @@ def main(argv: list[str] | None = None) -> int:
     app_dir.mkdir(parents=True)
 
     copied = 0
+    # ⚠️ 顺序 + 黑名单要紧：build 先铺、publish 后铺（覆盖），且 build 里的
+    #    exe / runtimeconfig / deps.json 一律不参与覆盖。
+    #
+    #    build 是 `dotnet build`（build.yml 里没带 -r win-x64）→ **框架依赖**产物：
+    #      · YukinoChan.exe               = 框架依赖 apphost
+    #      · YukinoChan.runtimeconfig.json 里写 "framework": Microsoft.NETCore.App 8.0.0
+    #    publish 是 `--self-contained true -r win-x64` → 写的是 "includedFrameworks"。
+    #
+    #    早先的顺序是反的（publish 先、build 后），自包含的那份运行时配置被 build 版盖掉：
+    #    System.Private.CoreLib.dll 还在（publish 铺的），旧自检只看它有没有 → 查不出来，
+    #    CI 全绿，装完双击就弹 "You must install or update .NET to run this application"。
+    #    （同一份代码本机 bin\x64\Release\...\ 与 ...\win-x64\ 两处的 runtimeconfig 就是
+    #      framework / includedFrameworks 的区别，可以直接对比确认。）
+    #
+    #    现在：build 先铺（补 .pri / *.xbf / FreeRDP 运行库），publish 后铺（覆盖同名）。
+    #    同名一律以 publish 为准 —— 那才是"自包含"的那一份。
+    #    框架依赖模式（没给 --publish-dir）时不存在"publish 说了算"，那三个文件照常从 build 取。
+    authoritative = _PUBLISH_AUTHORITATIVE if publish_dir is not None else None
+    copied += _copy_tree(
+        build_dir, app_dir, skip_junk=True, keep_pdb=args.keep_pdb, skip_names=authoritative
+    )
     if publish_dir is not None:
         copied += _copy_tree(publish_dir, app_dir, skip_junk=False)
-    copied += _copy_tree(build_dir, app_dir, skip_junk=True, keep_pdb=args.keep_pdb)
 
     # 看板娘素材：必须在 exe 同级
     copied += _copy_tree(assets_dir, app_dir / "assets", skip_junk=False)

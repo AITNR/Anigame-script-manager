@@ -162,6 +162,16 @@ python winui3/tools/package_release.py --build-dir ci-build --publish-dir ci-pub
 > `package_release.py` 负责把两边合并、补上 `assets/` 素材与使用说明，
 > 并在关键文件缺失或误打包 `config.json` 时**直接失败**（宁可 CI 红，也不发一个跑不起来的包）。
 
+> ⚠️ **合并顺序：build 先铺、publish 后铺，且 build 的 `YukinoChan.exe` /
+> `YukinoChan.runtimeconfig.json` / `YukinoChan.deps.json` 一律不复制。**
+> 第 1 步的 `dotnet build` 没带 `-r win-x64`，产出的是**框架依赖**版 ——
+> 它的 runtimeconfig 写 `"framework": Microsoft.NETCore.App 8.0.0`，
+> 装到没装 .NET 的机器上双击就弹 *"You must install or update .NET to run this application"*。
+> 早先的顺序是反的（publish 先、build 后），框架依赖那份把自包含的盖掉了，
+> 而 `System.Private.CoreLib.dll` 还在（是 publish 铺的），旧自检只看它有没有 → **查不出来，CI 全绿**。
+> 现在打包脚本会直接读 `runtimeconfig.json`：自包含包必须是 `includedFrameworks`，
+> 出现 `framework` 就报错退出；`build.yml` 在编安装程序前也会再核一遍。
+
 ---
 
 ## 四、目录结构

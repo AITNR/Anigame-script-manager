@@ -305,6 +305,23 @@ jobs:
         shell: pwsh
         run: choco install innosetup -y --no-progress
 
+      # 装版之前再核一遍"真的是自包含"。
+      # package_release.py 已经查过 runtimeconfig，这里查的是**发布步骤本身有没有跑成** ——
+      # 自包含 publish 失败时 step 会红，但那种情况下 CI 已经在上一条就断了；
+      # 真正要防的是"有人把 self_contained 关掉却仍然发安装版"（目标机没 .NET 就双击不了）。
+      - name: 确认安装版确实是自包含
+        if: inputs.self_contained
+        shell: pwsh
+        run: |
+          $cfg = 'dist/app/YukinoChan.runtimeconfig.json'
+          if (-not (Test-Path $cfg)) { throw "缺少 $cfg —— 打包自检怎么放过的？" }
+          $j = Get-Content $cfg -Raw | ConvertFrom-Json
+          if (-not $j.runtimeOptions.includedFrameworks) {
+            throw "dist/app 是框架依赖版（runtimeconfig 没有 includedFrameworks），不能当自包含安装版发出去"
+          }
+          $names = @($j.runtimeOptions.includedFrameworks | ForEach-Object { "$($_.name) $($_.version)" })
+          Write-Host ('自包含确认 OK，内置运行时：' + ($names -join ', '))
+
       - name: 编译安装程序
         id: setup
         shell: pwsh
