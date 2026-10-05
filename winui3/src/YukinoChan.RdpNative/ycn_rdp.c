@@ -459,6 +459,50 @@ static UINT ycn_gfx_end_frame(RdpgfxClientContext* ctx, const RDPGFX_END_FRAME_P
 #define YCN_OD_OFF_LPUSERPARAM        88
 #define YCN_OD_OFF_STATS_NAME         0
 
+/* 安全读取 openData 的通道名到 out（最多 8 字节 + 强制 NUL）。
+ *
+ * ❗ 这里**不能**直接 `memcpy(out, od, 8)`：
+ * `statsName` 是 FreeRDP 结构体里的定长 8 字节字段，**不保证 NUL 终止**，
+ * 而 od 又是按硬编码偏移（YCN_CH_OFF_OPENDATA_LIST / YCN_OD_SIZE）算出来的裸指针 ——
+ * 一旦偏移对不上（换 FreeRDP 版本）或该项是野指针，无条件读满 8 字节就会踩到
+ * 不可读页，直接 ACCESS_VIOLATION（0xC0000005）把整个进程带走。
+ *
+ * 现场证据（2026-10-05 09:30，Application 事件 Id=1000）：
+ *   出错模块 ycn_rdp.DLL / 异常 0xC0000005 / 偏移 0x2be5
+ *   崩在 ycn_collect_rdpsnd_plugins 开头（.pdata 函数 #64，RVA 0x3baf..0x3f91）
+ * 触发路径：开始执行 → 两条内嵌通道连上（**音频开着**）→ rdpsnd 扫描读通道名 → 越界。
+ *
+ * 所以这里用 SEH 包住：读不到就当"没名字"，绝不让诊断代码把进程带崩。
+ * 返回 1 = 读到了（含空串）；返回 0 = 读不了。 */
+static int ycn_read_channel_name(const uint8_t* od, char* out, size_t out_size)
+{
+	size_t i;
+	if (!od || !out || out_size == 0)
+		return 0;
+	out[0] = '\0';
+	__try
+	{
+		/* 逐字节最多读 8 个（statsName 的声明长度），遇到 NUL 提前停。
+		 * 逐字节读还有个好处：第 8 字节不可读时，第 0..7 字节已读出来，
+		 * __except 兜住后仍然算成功。 */
+		for (i = 0; i < 8; i++)
+		{
+			char c = ((const char*)od)[i];
+			out[i] = c;
+			if (c == '\0')
+				break;
+		}
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		/* 读不动就返回已经读到的部分（至少保证 NUL 终止） */
+	}
+	if (i >= out_size)
+		i = out_size - 1;
+	out[i] = '\0';
+	return 1;
+}
+
 /* DVC 音频通道（AUDIO_PLAYBACK_DVC）的 rdpsnd 插件**不在** context->channels 里，
  * 而在 drdynvc 的 DVCMAN->plugins 列表里。取值链（探针实测，绑死 FreeRDP 3.32.0）：
  *   context->channels               (+288)
@@ -502,12 +546,13 @@ static void ycn_dump_all_channels(rdpContext* context)
 	for (i = 0; i < count; i++)
 	{
 		uint8_t* od = channels + YCN_CH_OFF_OPENDATA_LIST + (size_t)i * YCN_OD_SIZE;
-		const char* name = (const char*)(od + YCN_OD_OFF_STATS_NAME);
-		void* lp = *(void**)(od + YCN_OD_OFF_LPUSERPARAM);
 		char dbg[256];
 		char safe[9];
-		memcpy(safe, name, 8);
-		safe[8] = '\0';
+		void* lp;
+		/* 先读 lpUserParam，再读名字 —— 名字的读走 SEH 安全辅助（可能踩不可读页） */
+		lp = *(void**)(od + YCN_OD_OFF_LPUSERPARAM);
+		if (!ycn_read_channel_name(od + YCN_OD_OFF_STATS_NAME, safe, sizeof(safe)))
+			safe[0] = '\0';
 		_snprintf_s(dbg, sizeof(dbg), _TRUNCATE, "ch[%d] name='%s' lpUserParam=%p", i, safe, lp);
 		ycn_debug_dump_tag(dbg);
 	}
@@ -924,29 +969,48 @@ static int ycn_collect_rdpsnd_plugins(YcnSession* s, int verbose)
 
 	/* ① 静态 openData 扫描 */
 	{
-		int count = *(int*)(channels + YCN_CH_OFF_OPENDATA_COUNT);
+		int count = 0;
 		int i;
+		/* count 也是从硬编码偏移读的，一起用 SEH 兜住 */
+		__try
+		{
+			count = *(int*)(channels + YCN_CH_OFF_OPENDATA_COUNT);
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			return s->rdpsnd_slot_count;
+		}
 		if (count > 0 && count <= YCN_CH_MAX_COUNT)
 		{
-			for (i = 0; i < count; i++)
-			{
-				uint8_t* od = channels + YCN_CH_OFF_OPENDATA_LIST + (size_t)i * YCN_OD_SIZE;
-				const char* name = (const char*)(od + YCN_OD_OFF_STATS_NAME);
-				void* lp = *(void**)(od + YCN_OD_OFF_LPUSERPARAM);
-				char safe[9];
-				if (!lp)
-					continue;
-				memcpy(safe, name, 8);
-				safe[8] = '\0';
-				if (!(strstr(safe, "rdpsnd") || strstr(safe, "AUDIO")))
-					continue;
-				(void)ycn_add_slot(s, lp, safe);
-			}
+		for (i = 0; i < count; i++)
+		{
+			uint8_t* od = channels + YCN_CH_OFF_OPENDATA_LIST + (size_t)i * YCN_OD_SIZE;
+			void* lp = *(void**)(od + YCN_OD_OFF_LPUSERPARAM);
+			char safe[9];
+			if (!lp)
+				continue;
+			/* ⚠️ 名字走 SEH 安全读取：原先的 memcpy(safe, name, 8) 会越界读
+			 * （statsName 定长 8 字节不保证 NUL 终止，od 又是指针硬算出来的），
+			 * 音频一开这条路径就走到，实测直接把进程带崩（0xC0000005 @ ycn_rdp+0x2be5）。 */
+			if (!ycn_read_channel_name(od + YCN_OD_OFF_STATS_NAME, safe, sizeof(safe)))
+				continue;
+			if (!(strstr(safe, "rdpsnd") || strstr(safe, "AUDIO")))
+				continue;
+			(void)ycn_add_slot(s, lp, safe);
+		}
 		}
 	}
 
 	/* ② DVC 插件列表扫描（AUDIO_PLAYBACK_DVC 的那份）。
-	 * verbose = 前几拍才打详细诊断，避免刷爆文件。 */
+	 * verbose = 前几拍才打详细诊断，避免刷爆文件。
+	 *
+	 * ⚠️ 整条取值链都是**硬编码偏移裸算**：
+	 *     context(+288) -> drdynvc(+5328) -> handle(+0) -> channel_mgr(+192) -> plugins(+56)
+	 * 中间任何一环在当前 FreeRDP 版本里布局不同 / 指针被释放 / 落在不可读页，
+	 * 逐个 `*(ptr + 偏移)` 就是 ACCESS_VIOLATION。诊断代码绝不该把主程序带崩 ——
+	 * 所以整段用 __try 包住：扫不到就当"这次没找到"，槽位保持原样继续跑。 */
+	__try
+	{
 	drdynvc_ctx = *(uint8_t**)(channels + YCN_CH_OFF_DRDYNVC);
 	if (verbose)
 	{
@@ -1001,6 +1065,14 @@ static int ycn_collect_rdpsnd_plugins(YcnSession* s, int verbose)
 				}
 			}
 		}
+	}
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		/* DVC 链路上有不可读内存：这次没扫到，但已收的槽位仍然有效。
+		 * 记一笔便于日后核对偏移是否还对得上 FreeRDP 当前版本。 */
+		if (verbose)
+			ycn_debug_dump_tag("mute-dvc: 扫描时踩到不可读内存（偏移可能已不匹配），本轮跳过 DVC 路径");
 	}
 	return s->rdpsnd_slot_count;
 }
