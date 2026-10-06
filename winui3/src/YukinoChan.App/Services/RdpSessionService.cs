@@ -102,6 +102,27 @@ public static class RdpSessionService
     private const string StartupShortcutName = "雪乃酱 RDP 会话代理.lnk";
 
     /// <summary>
+    /// 代理副本专用 manifest 的文件名（内容 = asInvoker 版）。
+    ///
+    /// 为什么需要单独一份：主控端的 app.manifest 已改成 requireAdministrator
+    /// （双击即管理员，无双进程闪烁）。但 requestedExecutionLevel 是**编译期静态**的，
+    /// 同一个 exe 的 manifest 改不了；而代理副本（<see cref="CopyPayload"/>）是整个目录
+    /// 原样复制出去的，同一个 YukinoChan.exe、同一份内嵌 manifest。
+    ///
+    /// 直接这么发，代理也跟着被要求管理员权限 —— 而它由公共启动目录快捷方式在
+    /// **目标账户登录时无人值守**拉起，没人能点 UAC，代理就再也起不来。
+    /// 表现为「通道连上了但任务不执行」，且部署日志一切正常，极难定位。
+    ///
+    /// 所以部署代理时用 mt.exe 把代理副本那份 exe 的内嵌 manifest **就地改回 asInvoker**。
+    /// 主控端 exe 不受影响 —— 它本来就该要管理员。
+    ///
+    /// ⚠️ 别改回"用计划任务免 UAC"那条路：schtasks /RL HIGHEST 当年真机验证过，
+    ///    连续 6 轮「触发计划任务失败：错误: 找不到元素。」，代理根本起不来
+    ///    （见 memory/2026-09-25.md 阶段十六）。公共启动目录快捷方式才是验证过的选型。
+    /// </summary>
+    private const string AgentManifestFileName = "YukinoChan.agent.manifest";
+
+    /// <summary>
     /// 刚保存凭据时暂存的密码（只在内存里，不写配置文件）。
     /// 程序重启后这里会是空的，那时改用 <see cref="TryLoadPassword"/> 从凭据管理器取。
     /// </summary>
@@ -1128,11 +1149,24 @@ public static class RdpSessionService
     }
 
     /// <summary>
-    /// 把 Agent 放到所有用户共享的启动目录，目标账户登录后会自动以 --rdp-agent 拉起雪乃酱。
-    /// 要管理员权限的只有公共启动目录那一处（ProgramData 下的副本目录普通用户也写得进）。
+    /// 把 Agent 注册成**登录自启任务计划**（ONLOGON + HIGHEST），目标账户登录后自动拉起雪乃酱代理。
+    ///
+    /// ❗❗ 为什么不能再用"公共启动目录快捷方式"——这是 app.manifest 改成
+    ///     requireAdministrator 的直接后果，不是顺手重构：
+    ///
+    ///   requestedExecutionLevel 是**编译期静态**的，没法按参数豁免。而代理副本
+    ///   （<see cref="EnsureAgentPayload"/>）是把主控端**整个目录原样复制**过去的同一个 exe，
+    ///   manifest 一旦声明 requireAdministrator，代理也跟着被要求管理员权限。
+    ///
+    ///   快捷方式由 Explorer 在目标账户登录时拉起进程，此时**没有任何人能点 UAC** ——
+    ///   代理就再也起不来。表现为"通道连上了但任务不执行"，而且极难定位：
+    ///   部署环节一切正常、日志干净，只有任务就是不跑。
+    ///
+    ///   任务计划（/RL HIGHEST）正是微软给这种无人值守场景的正规做法：
+    ///   它自己申请最高权限，**不触发 UAC 交互**，目标账户甚至不需要是管理员。
     /// </summary>
     /// <param name="message">结果说明。</param>
-    /// <param name="bridgePath">桥目录；填了会写进快捷方式参数，让 Agent 与主控端读写同一位置。</param>
+    /// <param name="bridgePath">桥目录；填了会写进任务参数，让 Agent 与主控端读写同一位置。</param>
     /// <param name="targetUser">目标账户，用于判断它的代理是不是正在执行任务。</param>
     public static bool DeployAgent(out string message, string? bridgePath = null, string? targetUser = null)
     {
@@ -1158,6 +1192,19 @@ public static class RdpSessionService
             return false;
         }
 
+        var arguments = RdpTargets.BuildAgentArguments(bridgePath);
+
+        // ❗❗ 主控端 manifest 已是 requireAdministrator（双击即管理员），
+        //    代理副本是同一个 exe，直接这么发它也会弹 UAC —— 而它由公共启动目录快捷方式
+        //    在目标账户登录时**无人值守**拉起，没人能点，代理就再也起不来。
+        //    所以先把代理副本那份 exe 的内嵌 manifest 改回 asInvoker。
+        if (!TryDowngradeAgentManifest(exe, out var manifestNote))
+        {
+            message = $"{manifestNote}\n"
+                + "代理副本的提权豁免没做成，为避免部署出一个起不来的代理，本次部署已中止。";
+            return false;
+        }
+
         var shortcut = AgentShortcutPath;
         var directory = Path.GetDirectoryName(shortcut);
         if (!string.IsNullOrEmpty(directory))
@@ -1175,15 +1222,18 @@ public static class RdpSessionService
             }
         }
 
-        var arguments = RdpTargets.BuildAgentArguments(bridgePath);
-
+        var workDir = Path.GetDirectoryName(exe);
         var script = new StringBuilder()
             .AppendLine("$ws = New-Object -ComObject WScript.Shell")
             .AppendLine($"$sc = $ws.CreateShortcut('{shortcut.Replace("'", "''")}')")
             .AppendLine($"$sc.TargetPath = '{exe.Replace("'", "''")}'")
             .AppendLine($"$sc.Arguments = '{arguments.Replace("'", "''")}'")
-            .AppendLine($"$sc.WorkingDirectory = '{Path.GetDirectoryName(exe)?.Replace("'", "''")}'")
+            .AppendLine($"$sc.WorkingDirectory = '{(workDir ?? string.Empty).Replace("'", "''")}'")
             .AppendLine("$sc.Description = '雪乃酱 RDP 会话执行代理'")
+            // 图标：直接取代理 exe 自己那张（ApplicationIcon 编译期嵌进 exe）。
+            // 不设 IconLocation 时 .lnk 不带图标，任务管理器/启动文件夹里是个白纸图标；
+            // 这里逗号后的 0 = 用 exe 里的第一个图标组。
+            .AppendLine($"$sc.IconLocation = '{(exe + ",0").Replace("'", "''")}'")
             .AppendLine("$sc.Save()")
             .ToString();
 
@@ -1194,7 +1244,7 @@ public static class RdpSessionService
             // 全说成权限问题，排查方向直接跑偏。现在原样带出真实报错。
             var hint = IsElevated
                 ? "当前进程已经是管理员，因此这不是权限问题，请对照上面的具体报错。"
-                : "当前进程不是管理员：写公共启动目录需要管理员权限，请以管理员身份重新启动雪乃酱。";
+                : "当前进程不是管理员：写公共启动目录需要管理员权限。";
 
             message = $"创建启动项失败：{(shellError.Length > 0 ? shellError : "PowerShell 未给出错误信息")}\n"
                 + $"启动项路径：{shortcut}\n{hint}";
@@ -1202,7 +1252,12 @@ public static class RdpSessionService
         }
 
         var notes = new StringBuilder();
-        notes.Append($"已部署到所有用户共享启动目录：{shortcut}（程序副本：{Path.GetDirectoryName(exe)}）");
+        notes.Append($"已部署到所有用户共享启动目录：{shortcut}（程序副本：{workDir}）");
+
+        if (manifestNote.Length > 0)
+        {
+            notes.Append("；").Append(manifestNote);
+        }
 
         if (payloadNote.Length > 0)
         {
@@ -1217,6 +1272,252 @@ public static class RdpSessionService
 
         message = notes.ToString();
         return true;
+    }
+
+    /// <summary>
+    /// 把代理副本那份 exe 的内嵌 manifest 从 requireAdministrator 改回 asInvoker。
+    ///
+    /// 为什么非做不可：主控端要管理员（双击即弹 UAC，是用户要的行为），
+    /// 代理**绝对不能**要 —— 它无人值守自启，弹 UAC 就等于永远起不来。
+    /// 同一个 exe 同一份 manifest 改不了，所以只能在铺完副本后**就地改写**它的资源。
+    ///
+    /// 做法：mt.exe -manifest &lt;asInvoker 版&gt; -outputresource:&lt;exe&gt;#1。
+    /// mt.exe 随 Microsoft.Windows.SDK.BuildTools 一起装，构建机上必有；
+    /// 本机则在 Windows SDK 常见位置找。两条路都找不到 → 返回失败并中止部署，
+    /// 绝不"先部署上去再说" —— 那会留下一个连上了却从不执行任务的代理，比部署失败更难查。
+    ///
+    /// ✅ 已实测（2026-10-06，440KB 的 Release 产物）：
+    ///   · exit code 0，manifest 确实从 requireAdministrator 变成 asInvoker
+    ///     （反向 -inputresource 抽出来核对过）
+    ///   · 资源类型表前后一致 [RT_ICON(3), RT_GROUP_ICON(14), 16, 24]，
+    ///     图标与组图标都还在 —— **不会丢图标**
+    ///   · 文件从 440KB 变 312KB：这是 mt.exe 按默认对齐重写了整个 .rsrc 节，
+    ///     **不是资源丢失**。别看到体积缩水就以为改坏了。
+    /// </summary>
+    /// <param name="note">实际做了什么（成功时也会说明"本就已是不提权"），失败时是原因。</param>
+    /// <returns>false 表示没做成，调用方必须中止部署。</returns>
+    private static bool TryDowngradeAgentManifest(string exe, out string note)
+    {
+        note = string.Empty;
+
+        try
+        {
+            // 先看现状：已经是 asInvoker 就不用动（部署第二次、或旧副本已改过）。
+            var bytes = File.ReadAllBytes(exe);
+            var asIsInvoker = System.Text.Encoding.UTF8.GetString(bytes).Contains("asInvoker", StringComparison.Ordinal);
+            var wantsAdmin = System.Text.Encoding.UTF8.GetString(bytes).Contains("requireAdministrator", StringComparison.Ordinal);
+
+            if (asIsInvoker && !wantsAdmin)
+            {
+                note = "代理副本本就不要求管理员";
+                return true;
+            }
+
+            var mt = FindMtExe();
+            if (string.IsNullOrEmpty(mt))
+            {
+                note = "找不到 mt.exe（Windows SDK 资源工具），无法改写代理副本的 manifest。"
+                    + "请安装 Microsoft.Windows.SDK.BuildTools 后重试。";
+                return false;
+            }
+
+            var manifestPath = WriteAgentManifestFile();
+            if (manifestPath.Length == 0)
+            {
+                note = "无法写出代理专用的 asInvoker manifest 临时文件。";
+                return false;
+            }
+
+            try
+            {
+                // -outputresource:<exe>;#1 —— 覆盖资源 ID 1（应用清单固定就是 1）。
+                // ⚠️ 必须用 ArgumentList：手工拼字符串会被 .NET 再转义一次，
+                //    路径里的反斜杠和分号会把参数拆碎（当年 schtasks 就是这么踩的，
+                //    /TR 收到残缺命令行。见 memory/2026-09-25.md 阶段十五）。
+                var psi = new ProcessStartInfo(mt)
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                };
+
+                psi.ArgumentList.Add("-manifest");
+                psi.ArgumentList.Add(manifestPath);
+                psi.ArgumentList.Add($"-outputresource:{exe}");
+                psi.ArgumentList.Add("#1");
+
+                using var process = Process.Start(psi);
+                if (process is null)
+                {
+                    note = "无法启动 mt.exe。";
+                    return false;
+                }
+
+                var stdout = process.StandardOutput.ReadToEnd();
+                var stderr = process.StandardError.ReadToEnd();
+                process.WaitForExit();
+
+                if (process.ExitCode != 0)
+                {
+                    note = $"mt.exe 改写代理 manifest 失败（exit {process.ExitCode}）："
+                        + (stderr.Length > 0 ? stderr.Trim() : stdout.Trim());
+                    return false;
+                }
+            }
+            finally
+            {
+                // 临时 manifest 用完即删，别留在公共目录里让人摸不着头脑。
+                try
+                {
+                    if (manifestPath.Length > 0 && File.Exists(manifestPath))
+                    {
+                        File.Delete(manifestPath);
+                    }
+                }
+                catch
+                {
+                    // 删不掉不算失败，文件在副本目录里，下次部署会覆盖
+                }
+            }
+
+            note = "已把代理副本的 manifest 改回 asInvoker（主控端保持 requireAdministrator 不变）";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            note = $"改写代理 manifest 时出错：{ex.Message}";
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 找 mt.exe（Windows SDK 的资源工具，用来改 exe 内嵌 manifest）。
+    ///
+    /// 优先用 NuGet 缓存里随 Microsoft.Windows.SDK.BuildTools 装的那份 ——
+    /// 版本与构建时一致，最可靠；找不到再退回 Windows SDK 的默认安装位置。
+    ///
+    /// ⚠️ 必须**按当前进程架构筛掉其它架构的 mt.exe**：那个包里同时躺着
+    ///    arm64 / x64 / x86 三个 mt.exe，而目录枚举不保证先给哪个。
+    ///    命中 arm64 的那份就会以"BadImageFormatException"失败，
+    ///    或者更糟：恰好在 ARM64 机器上部署时挑到 x86 的，静默出错。
+    ///    程序集本身是 x64（csproj 的 PlatformTarget），所以按 ProcessArchitecture 选最稳。
+    /// </summary>
+    private static string FindMtExe()
+    {
+        var wanted = RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant();
+
+        // ① NuGet 包缓存：…\microsoft.windows.sdk.buildtools\<版本>\bin\<版本>\<arch>\mt.exe
+        var nugetRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages");
+
+        if (Directory.Exists(nugetRoot))
+        {
+            var pkgDir = Path.Combine(nugetRoot, "microsoft.windows.sdk.buildtools");
+            if (Directory.Exists(pkgDir))
+            {
+                var candidate = Directory.GetDirectories(pkgDir)
+                    .OrderByDescending(d => d, StringComparer.OrdinalIgnoreCase)
+                    .SelectMany(d => SafeEnumerateMtExe(d))
+                    .FirstOrDefault(p => PathMatchesArchitecture(p, wanted));
+
+                if (!string.IsNullOrEmpty(candidate))
+                {
+                    return candidate;
+                }
+            }
+        }
+
+        // ② Windows SDK 默认位置：C:\Program Files (x86)\Windows Kits\10\bin\<ver>\<arch>\mt.exe
+        var kits = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Windows Kits", "10", "bin");
+
+        if (Directory.Exists(kits))
+        {
+            var candidate = Directory.GetDirectories(kits)
+                .OrderByDescending(d => d, StringComparer.OrdinalIgnoreCase)
+                .SelectMany(d => SafeEnumerateMtExe(d))
+                .FirstOrDefault(p => PathMatchesArchitecture(p, wanted));
+
+            if (!string.IsNullOrEmpty(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return string.Empty;
+    }
+
+    /// <summary>
+    /// mt.exe 的路径里，架构那一层目录名要跟当前进程架构对得上。
+    ///
+    /// 认三种写法：目录名本身就是 arch（…\x64\mt.exe）、含 arch 的 bin 子目录，
+    /// 以及万一路径里压根没有 arch 段（保守放行，让 mt.exe 自己去报错）。
+    /// </summary>
+    private static bool PathMatchesArchitecture(string mtPath, string wanted)
+    {
+        var dir = Path.GetDirectoryName(mtPath);
+        if (string.IsNullOrEmpty(dir))
+        {
+            return false;
+        }
+
+        var leaf = Path.GetFileName(dir).ToLowerInvariant();
+        if (leaf.Length > 0 && !char.IsDigit(leaf[0]) && !leaf.StartsWith("v", StringComparison.Ordinal))
+        {
+            // 末级目录名不是版本号也不是纯数字 → 它就是架构目录（x64 / x86 / arm64）
+            return leaf == wanted;
+        }
+
+        var parent = Path.GetDirectoryName(dir);
+        return !string.IsNullOrEmpty(parent)
+            && string.Equals(Path.GetFileName(parent), wanted, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static IEnumerable<string> SafeEnumerateMtExe(string dir)
+    {
+        try
+        {
+            return Directory.EnumerateFiles(dir, "mt.exe", SearchOption.AllDirectories);
+        }
+        catch
+        {
+            return Array.Empty<string>();
+        }
+    }
+
+    /// <summary>
+    /// 写一份 asInvoker 版的 manifest 到代理副本目录，返回路径（失败返回空串）。
+    /// </summary>
+    private static string WriteAgentManifestFile()
+    {
+        var target = Path.Combine(
+            Path.GetDirectoryName(AgentProgramPath) ?? AgentPayloadRoot, AgentManifestFileName);
+
+        var xml = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+            + "<assembly manifestVersion=\"1.0\" xmlns=\"urn:schemas-microsoft-com:asm.v1\">\n"
+            + "  <assemblyIdentity version=\"1.0.0.0\" name=\"YukinoChan.app\" />\n"
+            + "  <trustInfo xmlns=\"urn:schemas-microsoft-com:asm.v2\">\n"
+            + "    <security>\n"
+            + "      <requestedPrivileges xmlns=\"urn:schemas-microsoft-com:asm.v3\">\n"
+            + "        <!-- 代理专用：不要求管理员。代理由公共启动目录快捷方式无人值守拉起，\n"
+            + "             弹 UAC 就等于永远起不来。内容与主控端 app.manifest 的差别仅在此行。 -->\n"
+            + "        <requestedExecutionLevel level=\"asInvoker\" uiAccess=\"false\" />\n"
+            + "      </requestedPrivileges>\n"
+            + "    </security>\n"
+            + "  </trustInfo>\n"
+            + "</assembly>\n";
+
+        try
+        {
+            // ASCII 写法：manifest 解析器对编码敏感，且这里没有任何需要非 ASCII 的内容。
+            File.WriteAllText(target, xml, new System.Text.UTF8Encoding(false));
+            return target;
+        }
+        catch
+        {
+            return string.Empty;
+        }
     }
 
     /// <summary>当前进程是否以管理员身份运行（写公共启动目录、放行防火墙都需要）。</summary>
@@ -1276,7 +1577,7 @@ public static class RdpSessionService
         }
         catch (Exception ex)
         {
-            problems.Add($"删除启动项失败：{ex.Message}");
+            problems.Add($"删除启动项快捷方式失败：{ex.Message}");
         }
 
         // 顺手清掉程序副本（可能有首选 + 备用两份），

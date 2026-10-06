@@ -198,4 +198,50 @@ internal static class NativeMethods
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool Process32NextW(IntPtr hSnapshot, ref ProcessEntry32W lppe);
+
+    // ---------------- 消息循环（会话代理用，替代隐藏 XAML 窗口） ----------------
+    //
+    // 为什么需要它：WinAppSDK 的 DispatcherQueue **没有**阻塞式 Run() 方法
+    // （那是 UWP CoreDispatcher 才有的，名字像但类型不同，别再踩）。
+    // DispatcherQueueController 只负责建队列与 ShutdownQueue(),
+    // 要真正"跑到没人投消息为止"，得自己拉 Win32 消息循环 ——
+    // 这正是 CoreDispatcher 当年在做的事，行为一致。
+    //
+    // 有了它，agent 模式就不需要 XAML 窗口来维持进程了：
+    // 空载常驻内存比走完整 Application.Start 低几十 MB。
+
+    public const int WmQuit = 0x0012;
+    public const int WmDestroy = 0x0002;
+    public const int WmNull = 0x0000;
+
+    public const uint PmNoRemove = 0x0000;
+    public const uint PmRemove = 0x0001;
+    public const uint PmNoYield = 0x0002;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Message
+    {
+        public IntPtr hwnd;
+        public uint message;
+        public IntPtr wParam;
+        public IntPtr lParam;
+        public uint time;
+        public int ptX;
+        public int ptY;
+        public uint lPrivate;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool PeekMessageW(out Message lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax, uint wRemoveMsg);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr DispatchMessageW(ref Message lpMsg);
+
+    [DllImport("user32.dll")]
+    public static extern int TranslateMessage(ref Message lpMsg);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool PostQuitMessage(int nExitCode);
 }

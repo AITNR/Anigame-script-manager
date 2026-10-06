@@ -178,6 +178,7 @@
     "bridge_path": "",
     "target_user": "zdh",
     "credential_saved": true,
+    "password": "",
     "session_finish": "keep",
     "notify_on_task_done": true,
     "notify_on_all_done": true,
@@ -198,6 +199,7 @@
         "bridge_path": "",
         "credential_saved": true,
         "session_finish": "keep",
+        "password": "",
         "desktop_width": 1920,
         "desktop_height": 1080,
         "enabled": true
@@ -210,6 +212,7 @@
         "bridge_path": "",
         "credential_saved": true,
         "session_finish": "keep",
+        "password": "",
         "desktop_width": 1920,
         "desktop_height": 1080,
         "enabled": true
@@ -217,8 +220,8 @@
     ]
   },
   "window": {
-    "x": 825,
-    "y": 554,
+    "x": 679,
+    "y": 562,
     "width": 2724,
     "height": 1098,
     "maximized": false

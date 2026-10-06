@@ -7,6 +7,12 @@
     <RootNamespace>YukinoChan</RootNamespace>
     <AssemblyName>YukinoChan</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- 程序图标：编译期写进 exe 的 RT_GROUP_ICON。
+         少了这一行，exe 里没有任何图标资源，任务栏 / 资源管理器 / Alt-Tab 全是默认空白图标
+         （MainWindow 里的 AppWindow.SetIcon 只管窗口标题栏那一张，管不到 exe 自身）。
+         路径相对本 csproj：src/YukinoChan.App → src → winui3 → repo，再进 repo\assets。
+         ⚠️ 别改成 assets\icon.ico 之类：项目目录下并没有 assets\，真源在仓库根（见 package_release.py）。 -->
+    <ApplicationIcon>..\..\..\assets\icon.ico</ApplicationIcon>
     <Platforms>x86;x64;ARM64</Platforms>
     <RuntimeIdentifiers>win-x86;win-x64;win-arm64</RuntimeIdentifiers>
     <UseWinUI>true</UseWinUI>

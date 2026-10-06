@@ -1,8 +1,5 @@
 // -*- coding: utf-8 -*-
-using System;
-using System.IO;
 using System.Threading;
-using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using YukinoChan.Services;
 
@@ -10,50 +7,33 @@ namespace YukinoChan;
 
 public partial class App : Application
 {
-    /// <summary>Agent 登录后等待桌面环境就绪的时间（秒）。</summary>
-    private const int AgentStartupDelaySeconds = 5;
-
-    /// <summary>
-    /// 常驻等待指令时的轮询间隔（秒）。
-    /// 既是"查一次有没有新指令"的节奏，也是"写一次心跳"的节奏 ——
-    /// 主控端 RdpHeartbeat.TimeoutSeconds = 20 秒，1 秒一次留足余量，不会误报失联。
-    /// </summary>
-    private const int AgentPollIntervalSeconds = 1;
-
-    /// <summary>
-    /// 连续写心跳失败多少次就判定桥目录彻底不可用（次）。
-    /// 只有到这一步才退出 —— "没有指令"绝不该是退出的理由。
-    /// </summary>
-    private const int AgentBridgeFailureLimit = 30;
-
     public static MainWindow? MainWindow { get; private set; }
 
     /// <summary>全局共享视图模型，必须在 UI 线程上创建（内部会捕获 DispatcherQueue）。</summary>
     public static ViewModels.MainViewModel ViewModel { get; private set; } = null!;
 
-    public static bool IsAgentMode { get; private set; }
-
     public App()
     {
         InitializeComponent();
         UnhandledException += OnUnhandledException;
+
+        // 崩溃落盘必须在构造时就装：App 的构造是 XAML 启动之后第一批跑的代码，
+        // 而崩在它之前的那些（导航、布局、绑定）就归 CrashLog 在 Main 里装的
+        // AppDomain.UnhandledException 兜底 —— 两者互补，缺一个就有一段盲区。
+        Services.CrashLog.Install();
     }
 
+    /// <summary>
+    /// 主控端的正常启动路径。
+    ///
+    /// <b>注意：这里不再处理 <c>--rdp-agent</c>。</b>
+    /// 代理模式由 <see cref="Program"/> 在调 <c>Application.Start</c> <b>之前</b>就分流走
+    /// <see cref="Services.AgentHost"/> 了 —— 那条路不加载 XAML 运行时，
+    /// 空载常驻内存比走完整 WinUI 启动低几十 MB（每个目标账户一份、全天常驻）。
+    /// 所以能走到 OnLaunched 的，一定是主控端。
+    /// </summary>
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        var args0 = Environment.GetCommandLineArgs();
-        if (RdpAgentRunner.IsAgentInvocation(args0))
-        {
-            IsAgentMode = true;
-            // 多账户共用同一份代理副本，日志/统计必须按账户分家（见 AppPaths.AgentMode 说明）
-            AppPaths.AgentMode = true;
-            // 确定代理该读写哪座桥：远程场景由 --bridge: 指定，
-            // 本机多账户场景则按"自己登录的是哪个账户"自动派生（与主控端算出的目录一致）
-            RdpBridge.ConfigureAgent(RdpAgentRunner.ExtractBridgePath(args0));
-            LaunchAgentMode();
-            return;
-        }
-
         ViewModel = new ViewModels.MainViewModel();
         MainWindow = new MainWindow();
         MainWindow.Activate();
@@ -62,133 +42,46 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// RDP 会话代理模式：不显示主界面，只用一个隐藏窗口维持进程与消息循环。
+    /// UI 线程的未处理异常。
     ///
-    /// 【常驻】代理随目标账户登录由公共启动目录的快捷方式拉起后，不再"读一次指令就退出"：
-    /// 读不到指令就保持在线等待（持续刷新心跳），读到指令才执行，执行完回到等待状态。
-    /// 这样主控端在任何时候下发指令，都有人在场接手 —— 不必、也不能再靠"隔空拉起"。
-    /// </summary>
-    private async void LaunchAgentMode()
-    {
-        Microsoft.UI.Xaml.Window? host = null;
-        try
-        {
-            host = new Microsoft.UI.Xaml.Window { Title = "雪乃酱 · RDP 会话代理" };
-            host.Activate();
-            host.AppWindow.Hide();
-            NotificationService.Initialize(host.DispatcherQueue);
-
-            // 刚登录时桌面环境可能还没就绪，等一下再开工，避免脚本启动失败
-            await Task.Delay(TimeSpan.FromSeconds(AgentStartupDelaySeconds)).ConfigureAwait(true);
-
-            await RunAgentLoopAsync().ConfigureAwait(true);
-        }
-        catch (Exception ex)
-        {
-            AppPaths.WriteStartupError(ex);
-            ExitAgent();
-        }
-        finally
-        {
-            _ = host;
-        }
-    }
-
-    /// <summary>
-    /// 常驻主循环：等指令 → 执行 → 回到等待，只有在桥目录彻底不可用时才退出。
+    /// 这里<b>仍然标记 <c>e.Handled = true</c>（不掀进程）</b>：WinUI 3 下一个未捕获的
+    /// UI 异常会直接终止进程，正在跑的任务、已建立的 RDP 会话、尚未落盘的配置全丢 ——
+    /// 那些损失远大于"进程活着但可能有点 inconsistent"。
     ///
-    /// 关键约束：
-    ///   1. "没有指令"进入等待，不再退出（旧实现读不到就 ExitAgent，正是事故根因）。
-    ///   2. 等待期间持续写心跳（UpdatedAt 每秒刷新，Phase=idle），主控端据此判定"代理在线"。
-    ///   3. 写心跳只在【等待】分支执行；任务执行期间本方法正 await 在 RunAsync 上，
-    ///      不会插手，从而不会覆盖 RdpAgentRunner 正在写的任务状态。
+    /// 但代价就是<b>崩溃变成了沉默</b>：界面僵住、进程还在、不留任何痕迹。
+    /// 所以补上两件事，让沉默变成可查：
+    ///   ① 完整异常栈 + 崩前业务日志末尾写进 crash.log；
+    ///   ② 首次异常弹一次通知（只弹一次，否则连着崩会把用户淹了）。
     /// </summary>
-    private async Task RunAgentLoopAsync()
-    {
-        var bridgeFailures = 0;
-        var bridge = RdpBridge.Agent;
-
-        while (true)
-        {
-            if (bridge.TryReadCommand(out var command) && command is not null)
-            {
-                bridgeFailures = 0;
-
-                // 立刻删掉指令，防止代理被再次拉起时重复执行同一批任务
-                bridge.ConsumeCommand();
-
-                // 注意：这里【不挂】Completed → ExitAgent。
-                // 常驻代理执行完必须回到等待状态继续待命，而不是退出。
-                var runner = new RdpAgentRunner(command);
-                await runner.RunAsync(CancellationToken.None).ConfigureAwait(true);
-                continue;
-            }
-
-            // 没有指令：清掉桥里可能残留的停止请求。
-            //
-            // 为什么会残留：停止请求只有在执行期间才会被检查，而"点停止 → 清理跑十几秒 →
-            // 收尾"这段时间里如果主控端又补了一份（或代理当时正卡在清理里没读），
-            // 那份 stop.json 就会一直躺到下一轮。靠 CommandId 校验虽然不会误停新指令，
-            // 但排障时看到一份没人消费的 stop.json 极其误导。
-            // 这里能安全删除的前提：本分支只在"没有待执行指令"时才走到 ——
-            // 有指令在跑时不会进来，不存在把正在用的停止请求删掉的风险。
-            bridge.ClearStop();
-
-            // 没有指令：写一条 idle 心跳，证明"代理在线，等待指令"。
-            // 任务在跑时不会走到这里，因此不会覆盖 Runner 的任务状态。
-            var alive = bridge.UpdateStatus(status =>
-            {
-                status.Phase = "idle";
-                status.StatusText = "代理在线，等待指令。";
-                status.AgentUser = Environment.UserName;
-                status.CurrentTask = string.Empty;
-                return status;
-            });
-
-            if (alive)
-            {
-                bridgeFailures = 0;
-            }
-            else
-            {
-                // 连状态都写不出去 —— 共享目录已不可用，累加到阈值再退出，避免死撑
-                bridgeFailures++;
-                if (bridgeFailures >= AgentBridgeFailureLimit)
-                {
-                    AppPaths.WriteStartupError(new IOException(
-                        $"会话代理无法写入指令桥目录 {bridge.BridgeDir}：{bridge.LastError}"));
-                    ExitAgent();
-                    return;
-                }
-            }
-
-            await Task.Delay(TimeSpan.FromSeconds(AgentPollIntervalSeconds)).ConfigureAwait(true);
-        }
-    }
-
-    private static void ExitAgent()
+    private void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
     {
         try
         {
-            Environment.Exit(0);
+            Services.CrashLog.WriteManaged("UI 线程未处理异常（已标记 Handled，进程继续）", e.Exception);
         }
         catch
         {
-            // 忽略
+            // 落盘失败不再抛出，避免二次崩溃
         }
-    }
 
-    private static void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
-    {
-        try
+        if (Interlocked.Exchange(ref _uiCrashNotified, 1) == 0)
         {
-            Services.AppPaths.WriteStartupError(e.Exception);
-        }
-        catch
-        {
-            // 启动阶段兜底，失败也不再抛出，避免二次崩溃
+            // 通知是"锦上添花"：崩在 OnLaunched 之前时它还没注册，Show 会返回 false。
+            // 那时用户什么提示都收不到 —— 顺手把"为什么没弹出来"记进 crash.log，
+            // 否则下次看到"用户说没收到提示"时无从判断是通知坏了还是本来就没发。
+            var path = Services.CrashLog.CrashLogPath;
+            if (!Services.NotificationService.Show(
+                    "雪乃酱遇到问题",
+                    "界面出现了一个未处理的错误，程序没有关闭。详情见 " + path))
+            {
+                Services.CrashLog.WriteNote(
+                    "UI 崩溃提示未投递（通知尚未注册或不可用）：" + Services.NotificationService.LastError);
+            }
         }
 
         e.Handled = true;
     }
+
+    /// <summary>UI 崩溃通知只发一次（1 = 已发过）。</summary>
+    private static int _uiCrashNotified;
 }

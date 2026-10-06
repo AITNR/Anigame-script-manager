@@ -5,7 +5,21 @@
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>
       <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
-        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
+        <!-- requireAdministrator：双击即由系统弹 UAC，直接以管理员身份启动。
+             之前是 asInvoker + Program.cs 里 runas 自提权（TryRelaunchElevated），
+             代价是要先起一个普通权限进程再拉起第二个，双进程且偶发窗口闪烁；
+             双击时还可能先看到界面再弹 UAC。声明式提权没有这些毛刺。
+
+             ⚠️❗ 代价：requestedExecutionLevel 是「编译期静态」的，没法按参数豁免。
+                会话代理（rdp-agent 参数）跟主控端是同一个 exe
+                （代理副本 = 整个目录原样复制），一并被要求管理员权限。
+                代理由目标账户登录时自动拉起、无人值守，靠 UAC 弹窗是起不来的，
+                所以代理的启动方式必须同步换成任务计划程序（以最高权限自动运行、不弹 UAC）。
+                见 RdpSessionService.DeployAgent 的说明。改这里之前先读那段。
+
+             ⚠️ 注意：本注释里不能出现连续两个 ASCII 连字符（XML 注释的语法限制），
+                连提到 rdp-agent 参数名都不行 —— 那个名字本身就带两个连字符。 -->
+        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
       </requestedPrivileges>
     </security>
   </trustInfo>

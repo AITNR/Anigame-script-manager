@@ -132,9 +132,21 @@ CI 的每次构建都会建一个自己的预发布 tag，资产不会被下一�
 
 安装脚本是 `winui3/tools/installer.iss`（Inno Setup 6，CI 里用 `choco install innosetup` 装，本机要先装 Inno Setup 6 才能编译）。
 
-装到 Program Files 后，程序要往安装目录写 `config.json` / `logs` / `runtime_stats` —— 所以**主控端启动会自检提权**：
-非管理员时用 `runas` 重启自己（`Program.cs` 里的 `TryRelaunchElevated`），UAC 被拒就按原权限继续跑。
-会话代理（`--rdp-agent`）**不跟着提权**：它是目标账户登录时由启动目录快捷方式拉起的，弹 UAC 没人点。
+装到 Program Files 后，程序要往安装目录写 `config.json` / `logs` / `runtime_stats` —— 所以主控端**声明式要求管理员**：
+`app.manifest` 里是 `requestedExecutionLevel = requireAdministrator`，**双击即由系统弹 UAC**，一次到位，
+不会出现"先起一个普通权限进程再拉起第二个"的双进程与窗口闪烁。
+UAC 被拒时会弹窗说明原因并引导「以管理员身份运行」——不会静默按原权限往下跑
+（那样只会在后续某处报一个跟权限八竿子打不着的错，用户极难反推回真正原因）。
+
+会话代理（`--rdp-agent`）**必须保持不提权**：它是目标账户登录时由启动目录快捷方式**无人值守**拉起的，弹 UAC 没人点。
+但代理副本是主控端**整个目录原样复制**的同一个 exe、同一份内嵌 manifest，而 `requestedExecutionLevel` 是
+**编译期静态**的、没法按参数豁免 —— 所以 `DeployAgent` 在铺完副本后会用 `mt.exe` 把**代理那份 exe** 的
+内嵌 manifest **就地改回 `asInvoker`**，主控端那份不动。少这一步，整个 RDP 代理功能会失效
+（表现为「通道连上了但任务不执行」，而部署日志一切正常）。
+
+> ❌ 别改用「计划任务 / schtasks + `/RL HIGHEST`」那条路来做免 UAC：那条路真机验证过，
+> 连续 6 轮 `触发计划任务失败：错误: 找不到元素。`，代理根本起不来（见 `docs/` 与历史记录）。
+> 公共启动目录快捷方式才是被验证过的选型。
 
 > 数据文件不在安装脚本的 `[Files]` 里 —— 覆盖安装会保留配置；卸载后 `config.json` / `logs` 仍留在安装目录，要清掉自己删。
 - 正式版会校验版本号格式，并**拒绝复用已存在的 tag**；可勾「先存为草稿」再公开；

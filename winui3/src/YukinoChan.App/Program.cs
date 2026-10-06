@@ -28,12 +28,6 @@ public static class Program
     /// <summary>agent 模式下把启动上下文写进该文件，便于排查「进程秒退」。</summary>
     private const string AgentBootLogName = "agent_boot.log";
 
-    /// <summary>
-    /// 提权重启标记：带它说明本进程已经是「提权重启后的那一轮」，不要再提一次。
-    /// 少了它，用户在 UAC 上点「否」会导致无限弹窗。
-    /// </summary>
-    private const string ElevatedFlag = "--elevated";
-
     /// <summary>M4 自检通道：--embed-auto <host> <user> <password> 启动时自动连接内嵌预览。
     /// 状态全走 VM.AppendLog（日志文件），供外部无人值守验收。</summary>
     /// <summary>M5/M6 自检：--embed-vm host user password 走正式 VM 连接路径（client_mode=embedded）。</summary>
@@ -76,18 +70,94 @@ public static class Program
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetStartupInfoW(out StartupInfo lpStartupInfo);
 
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern int SetCurrentProcessExplicitAppUserModelID(string appID);
+
+    /// <summary>
+    /// 提权被拒时的兜底对话框。
+    ///
+    /// 为什么用 MessageBoxW 而不是项目里常用的 <c>DialogHelper.ShowAsync</c>（ContentDialog）：
+    /// 走到这里 XAML 运行时还没起来（崩溃日志装完、界面没建），而 ContentDialog 依赖 XAML 就绪，
+    /// 用它会在最需要提示的场合抛异常。MessageBox 是纯 Win32，与运行时无关，最稳。
+    ///
+    /// 局部声明而非放进 NativeMethods：只有这一处用，凑进公共类反而让那儿的"全项目 P/Invoke 收口"
+    /// 名不副实（顺带也免了冒烟 RdpNativeAbiCheck 那边跟着改）。
+    /// </summary>
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern int MessageBoxW(IntPtr hWnd, string text, string caption, uint type);
+
+    private const uint MB_OK = 0x00000000;
+    private const uint MB_ICONWARNING = 0x00000030;
+
+    /// <summary>
+    /// 任务栏 / 任务栏分组用的 AppUserModelID。
+    ///
+    /// 必须是**稳定**的一串：改掉它，用户固定过的快捷方式、任务栏分组、跳转列表都会失联重排。
+    /// 命名按惯例用反向域名式，别跟 Company/Product 随手改。
+    /// </summary>
+    private const string AppUserModelId = "com.aitnr.yukinochan.app";
+
+    /// <summary>
+    /// 给本进程打上显式 AppUserModelID。
+    ///
+    /// unpackaged（WindowsPackageType=None）模式没有 MSIX 清单替我们声明 AUMID，
+    /// 不显式设置的话任务栏只认"所有 unpackaged Win32 共享同一段无名身份"：
+    ///   · 任务栏可能不显示图标，退回 exe 自己的默认图标；
+    ///   · 多窗口 / 多实例被并进同一个无名分组；
+    ///   · 固定到任务栏后再换图标，缓存的旧位图不会跟着刷新。
+    ///
+    /// 必须在 Application.Start（进而创建第一个窗口）**之前**调：身份是进程级属性，
+    /// 窗口创建完再补，任务栏已经按旧身份登记过了。
+    ///
+    /// 失败不致命 —— 图标会退回到 exe 内嵌图标那条路（ApplicationIcon），所以只吞异常。
+    /// </summary>
+    private static void ApplyAppUserModelId()
+    {
+        try
+        {
+            SetCurrentProcessExplicitAppUserModelID(AppUserModelId);
+        }
+        catch
+        {
+            // 非交互窗口站等场景下可能失败，不影响启动
+        }
+    }
+
     [STAThread]
     private static void Main(string[] args)
     {
         var isAgent = IsAgentInvocation(args);
 
+        // 崩溃日志必须先于一切业务代码装上：装晚了，从进程起到装上之间这段代码崩掉就没人管。
+        //
+        // 顺序上有两处讲究：
+        //   ① 先置 AgentMode 再 Install —— CrashLog 的落盘位置跟着 AppPaths.LogDir 走，
+        //      而代理模式与主控端的 LogDir 不同（logs/<账户>/ vs logs/）。装的时候就要定好。
+        //   ② 在提权判定之前 —— UAC 被拒后退出那一轮不是"上一轮"的真实结局，
+        //      标记逻辑见下面的 MarkHandoff。
+        AppPaths.AgentMode = isAgent;
+        Services.CrashLog.Install();
+
         if (isAgent)
         {
             WriteAgentBootLog(args);
         }
-        else if (TryRelaunchElevated(args))
+        else if (RdpSessionService.IsElevated)
         {
-            // 已经拉起提权实例，本实例到此为止（新实例会带 --elevated 走完剩下的流程）
+            // 管理员身份已就位，继续往下走。
+            // 提权由 app.manifest 的 requireAdministrator **声明式**完成，不再自己 runas 重启
+            // （那套要先起普通权限进程再拉第二个，双进程且偶发窗口闪烁）。
+        }
+        else
+        {
+            // manifest 已经声明 requireAdministrator，还能走到这里只有两种可能：
+            // 用户在 UAC 上点了「否」，或进程被非交互式宿主拉起（弹不出 UAC）。
+            // 别再 runas 重试 —— manifest 仍生效，重试只会**再弹一次 UAC**，多半还是被拒。
+            //
+            // 这一轮要 MarkHandoff：它是"没跑起来"的一轮，不该把 last_run.state 写成 clean-exit，
+            // 否则下次启动的"上次退出"判据会把提权被拒误判成正常退出。
+            Services.CrashLog.MarkHandoff();
+            ReportElevationRefused(isAgent: false);
             return;
         }
 
@@ -102,6 +172,39 @@ public static class Program
             }
         }
 
+        // 会话代理：在这里就分流，**不进 WinUI 启动**。
+        //
+        // 为什么必须放在 Application.Start 之前：Application.Start 会加载 App.xaml 的
+        // 主题资源与 XBF、并把整个 XAML 运行时拉起来（空载就要几十 MB 常驻内存）。
+        // 而代理的执行链（RdpAgentRunner / ScriptRunner / RdpBridge / 截图 / 关机）
+        // 不引用任何 XAML 类型，那个运行时纯属白付 —— 代理是每个目标账户一份、全天常驻。
+        // AgentHost 内部用 DispatcherQueueController 建消息泵维持进程，语义与原来的
+        // 隐藏 XAML 窗口一致（详见 Services/AgentHost.cs 的类注释）。
+        //
+        // 放在这里还有一个附带好处：XAML 启动失败（窗口站非交互、缺桌面会话）这条老故障
+        // 对代理彻底不存在了 —— 代理根本不需要 XAML。
+        if (isAgent)
+        {
+            try
+            {
+                AgentHost.Run(args);
+            }
+            catch (Exception ex)
+            {
+                AppPaths.WriteStartupError(ex);
+                AppendAgentBootLog("代理宿主启动失败：" + ex);
+                Environment.Exit(1);
+            }
+
+            return;
+        }
+
+        // 任务栏身份要在第一个窗口创建之前定下来，代理模式不涉及窗口、跳过。
+        if (!isAgent)
+        {
+            ApplyAppUserModelId();
+        }
+
         try
         {
             // 走 WinUI 的标准启动流程。unpackaged 模式下用 Application.Start，
@@ -111,72 +214,57 @@ public static class Program
         catch (Exception ex)
         {
             AppPaths.WriteStartupError(ex);
-
-            if (isAgent)
-            {
-                AppendAgentBootLog("XAML 启动失败：" + ex);
-            }
-
-            // agent 模式下不要静默退出，留个非零退出码方便从外部观察启动失败
             Environment.Exit(1);
         }
     }
 
     /// <summary>
-    /// 主控端以管理员重启自己（装到 Program Files 后要往安装目录写 config.json / logs / runtime_stats，
-    /// 部署会话代理也要写 ProgramData 与公共启动目录 —— 标准用户都做不了）。
+    /// UAC 被拒绝时给用户一句能看懂的说明，然后退出。
     ///
-    /// 只在主控模式用：代理是目标账户登录时由启动目录快捷方式拉起的，弹 UAC 没人点，
-    /// 所以它保持原权限启动。
+    /// 提权本身已交给 app.manifest 的 <c>requireAdministrator</c> 声明式完成
+    /// （双击时由系统直接弹 UAC，不存在"先起普通权限进程再拉第二个"那套双进程毛刺），
+    /// 所以这里**不再自己 runas 重启** —— 那套逻辑已经不需要，且留着会在
+    /// "已经是管理员"时白白多跑一次。
+    ///
+    /// 走到这里只有一种可能：用户在 UAC 上点了「否」，或者进程被非交互式宿主拉起
+    /// （UAC 弹不出来）。两种情况下继续跑都没有意义 ——
+    /// 程序要往安装目录写 config.json / logs / runtime_stats，还要写 ProgramData 部署会话代理，
+    /// 标准用户都做不了，跑起来只会在后续某处报一个跟"权限"八竿子打不着的错，
+    /// 用户很难反推回真正原因（这跟 MEMORY「权限误报」那条同一个教训）。
+    /// 这里直接说清楚，并给出正确做法。
+    ///
+    /// 代理模式（--rdp-agent）不适用：它由任务计划程序以最高权限拉起，
+    /// 拿到的本来就是管理员令牌，进到这里说明环境异常，但也别弹窗打断 ——
+    /// 没人看得见弹窗，只会把日志写下来就算。
     /// </summary>
-    /// <returns>已拉起提权实例（调用方应直接退出）。</returns>
-    private static bool TryRelaunchElevated(string[] args)
+    private static void ReportElevationRefused(bool isAgent)
     {
+        AppPaths.WriteStartupError(new InvalidOperationException(
+            "进程未以管理员权限运行（UAC 被拒绝或无法交互），主控端无法写入安装目录与 ProgramData。"));
+
+        if (isAgent)
+        {
+            Environment.Exit(2);
+        }
+
         try
         {
-            if (RdpSessionService.IsElevated)
-            {
-                return false; // 本来就是管理员
-            }
-
-            if (Array.Exists(args, a => string.Equals(a, ElevatedFlag, StringComparison.OrdinalIgnoreCase)))
-            {
-                return false; // 上一轮提权没成功（多半是 UAC 被拒），别再弹了
-            }
-
-            var exe = Environment.ProcessPath;
-            if (string.IsNullOrEmpty(exe) || !File.Exists(exe))
-            {
-                return false; // 单文件发布 / 拿不到自身路径时不折腾
-            }
-
-            var psi = new ProcessStartInfo(exe)
-            {
-                UseShellExecute = true,
-                Verb = "runas",
-                WorkingDirectory = AppContext.BaseDirectory,
-            };
-
-            foreach (var argument in args)
-            {
-                psi.ArgumentList.Add(argument);
-            }
-
-            psi.ArgumentList.Add(ElevatedFlag);
-
-            using var child = Process.Start(psi);
-            return child is not null;
+            // 提权被拒时还没起 XAML 运行时，不能用 ContentDialog（那需要 XAML 就绪）。
+            // 这里退到最朴素可靠的通道：系统消息框。
+            MessageBoxW(
+                IntPtr.Zero,
+                "雪乃酱需要管理员权限才能运行。\n\n"
+                + "原因：要写入安装目录（配置与日志）与 ProgramData（部署会话代理），这些位置标准用户没有权限。\n\n"
+                + "请关闭本窗口，然后右键程序图标 →「以管理员身份运行」。",
+                "雪乃酱 — 需要管理员权限",
+                MB_OK | MB_ICONWARNING);
         }
-        catch (Win32Exception)
+        catch
         {
-            // 用户拒绝 UAC，或以非交互方式启动（弹不出 UAC）：按原权限继续跑
-            return false;
+            // 连消息框都弹不出来（非交互式宿主）就静默退出，日志已经写过了
         }
-        catch (Exception ex)
-        {
-            AppPaths.WriteStartupError(ex);
-            return false;
-        }
+
+        Environment.Exit(3);
     }
 
     private static bool IsAgentInvocation(string[] args)
