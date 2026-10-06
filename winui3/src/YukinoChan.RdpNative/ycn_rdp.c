@@ -542,36 +542,23 @@ static int ycn_read_channel_name(const uint8_t* od, char* out, size_t out_size)
 #define YCN_RDPSND_OFFSET_ONOPENCALLED    416   /* BOOL OnOpenCalled */
 #define YCN_RDPSND_OFFSET_ASYNC           420   /* BOOL async */
 
-/* 诊断：枚举 context->channels 里所有 openData 项的 channelName + lpUserParam。
- * 目的：确认 rdpsnd / AUDIO_PLAYBACK_DVC 到底是同一个 plugin 还是两个。 */
-static void ycn_dump_all_channels(rdpContext* context)
-{
-	uint8_t* channels;
-	int count, i;
-
-	if (!context)
-		return;
-	channels = *(uint8_t**)((uint8_t*)context + YCN_CTX_OFF_CHANNELS);
-	if (!channels)
-		return;
-	count = *(int*)(channels + YCN_CH_OFF_OPENDATA_COUNT);
-	if (count <= 0 || count > YCN_CH_MAX_COUNT)
-		return;
-
-	for (i = 0; i < count; i++)
-	{
-		uint8_t* od = channels + YCN_CH_OFF_OPENDATA_LIST + (size_t)i * YCN_OD_SIZE;
-		char dbg[256];
-		char safe[9];
-		void* lp;
-		/* 先读 lpUserParam，再读名字 —— 名字的读走 SEH 安全辅助（可能踩不可读页） */
-		lp = *(void**)(od + YCN_OD_OFF_LPUSERPARAM);
-		if (!ycn_read_channel_name(od + YCN_OD_OFF_STATS_NAME, safe, sizeof(safe)))
-			safe[0] = '\0';
-		_snprintf_s(dbg, sizeof(dbg), _TRUNCATE, "ch[%d] name='%s' lpUserParam=%p", i, safe, lp);
-		ycn_debug_dump_tag(dbg);
-	}
-}
+/* [已删除] ycn_dump_all_channels —— 一次性诊断函数，2026-10-07 移除。
+ *
+ * 原用途：枚举 context->channels 里所有 openData 项的 channelName + lpUserParam，
+ * 用来确认 rdpsnd 与 AUDIO_PLAYBACK_DVC 到底是不是同一个 plugin 实例。
+ * 结论早已写进 ycn_collect_rdpsnd_plugins 的文件注释（两个实例，DVC 那份在 drdynvc 链上），
+ * 诊断使命完成。
+ *
+ * 为什么必须**删掉**而不是「加个 SEH 让它别崩」：
+ *   ① 2026-10-07 07:42 的原生崩溃（ycn_rdp.DLL 0xC0000005 @偏移 0x2be5，
+ *      .pdata 函数 #64）就发生在这个函数里 —— 它在热路径上每连接必跑一次。
+ *   ② 它按 FreeRDP 3.32.0 私有结构的硬编码偏移解裸指针，
+ *      一旦升级 FreeRDP（偏移变了）就是一个必然崩的地雷，而它的价值已经是零。
+ *   ③ 更贵的代价是**认知负债**：留在生产路径上，几个月后没人记得它是干什么的，
+ *      也不会有人想到去修它的偏移。
+ *
+ * 🔑 由此定下的纪律：查完的诊断代码要删掉，不能只加护栏就长期留着。
+ *    真需要留参考，就把结论写进注释（已做），别留可执行代码。 */
 
 
 /* 按 device 指针反查所属会话与槽位（表很小，线性扫足够）。
@@ -910,26 +897,42 @@ YCN_API int ycn_rdp_selftest_mute(void)
  * （静态那份、DVC 另建的那份，注册名都可能是 "rdpsnd"，只能靠形态认）。 */
 static rdpsndDevicePlugin* ycn_probe_rdpsnd_device(void* plugin)
 {
-	rdpsndDevicePlugin* dev;
+	rdpsndDevicePlugin* dev = NULL;
 	HMODULE mod = NULL;
+	BOOL selfHooked = FALSE;
+	BOOL hasSetVolume = FALSE;
 
 	if (!plugin)
 		return NULL;
+	/* 🔴 这里有**两层**裸指针解引用，全都要在 SEH 内：
+	 *   第 1 层：dev = *(plugin + 312)      —— plugin 是按硬编码偏移从 openData /
+	 *             DVC plugins 列表里算出来的裸指针，本身就可能是野的。
+	 *   第 2 层：dev->SetVolume              —— dev 刚从野指针里读出来，
+	 *             它指向的结构体**极可能已经 Free 掉了**（rdpsnd Close 时会 Free device）。
+	 * 只护第 1 层的话，第 2 层照样把进程带走 —— 这就是"知道危险但只护了一半"。
+	 * 出错就地返回 NULL = "这轮认不出这个插件"，槽位保持原样继续跑。
+	 *
+	 * ⚠️ 注意 hasSetVolume 也要在 SEH 内算出来：判据里再写一次 `dev->SetVolume`
+	 * 就等于把第 2 层又漏到护栏外面了（写代码时自己刚犯过一次，别重蹈）。 */
 	__try
 	{
 		dev = *(rdpsndDevicePlugin**)((uint8_t*)plugin + YCN_RDPSND_OFFSET_DEVICE);
+		if (dev && dev->SetVolume)
+		{
+			hasSetVolume = TRUE;
+			/* SetVolume 落在本模块内 = 布局不对/是我们自己的钩子，跳过 */
+			if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+			                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			                       (LPCWSTR)(uintptr_t)dev->SetVolume, &mod) &&
+			    mod == (HMODULE)(uintptr_t)&__ImageBase)
+				selfHooked = TRUE;
+		}
 	}
 	__except (EXCEPTION_EXECUTE_HANDLER)
 	{
 		return NULL;
 	}
-	if (!dev || !dev->SetVolume)
-		return NULL;
-	/* SetVolume 落在本模块内 = 布局不对/是我们自己的钩子，跳过 */
-	if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-	                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-	                       (LPCWSTR)(uintptr_t)dev->SetVolume, &mod) &&
-	    mod == (HMODULE)(uintptr_t)&__ImageBase)
+	if (!dev || !hasSetVolume || selfHooked)
 		return NULL;
 	return dev;
 }
@@ -978,7 +981,21 @@ static int ycn_collect_rdpsnd_plugins(YcnSession* s, int verbose)
 
 	if (!s || !s->instance || !s->instance->context)
 		return 0;
-	channels = *(uint8_t**)((uint8_t*)s->instance->context + YCN_CTX_OFF_CHANNELS);
+	{
+		uint8_t* ch = NULL;
+		/* 🔴 context->channels 同样是硬编码偏移裸算，多通道并发连接/断开时
+		 * 它可能正在被改写 → 读出野指针。与下面 ① 段一样用 SEH 兜住。
+		 * 这条在**每拍都跑**的热路径上（ycn_refresh_mute），不能裸奔。 */
+		__try
+		{
+			ch = *(uint8_t**)((uint8_t*)s->instance->context + YCN_CTX_OFF_CHANNELS);
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			ch = NULL;
+		}
+		channels = ch;
+	}
 	if (!channels)
 		return s->rdpsnd_slot_count;
 
@@ -997,22 +1014,41 @@ static int ycn_collect_rdpsnd_plugins(YcnSession* s, int verbose)
 		}
 		if (count > 0 && count <= YCN_CH_MAX_COUNT)
 		{
-		for (i = 0; i < count; i++)
-		{
-			uint8_t* od = channels + YCN_CH_OFF_OPENDATA_LIST + (size_t)i * YCN_OD_SIZE;
-			void* lp = *(void**)(od + YCN_OD_OFF_LPUSERPARAM);
-			char safe[9];
-			if (!lp)
-				continue;
-			/* ⚠️ 名字走 SEH 安全读取：原先的 memcpy(safe, name, 8) 会越界读
-			 * （statsName 定长 8 字节不保证 NUL 终止，od 又是指针硬算出来的），
-			 * 音频一开这条路径就走到，实测直接把进程带崩（0xC0000005 @ ycn_rdp+0x2be5）。 */
-			if (!ycn_read_channel_name(od + YCN_OD_OFF_STATS_NAME, safe, sizeof(safe)))
-				continue;
-			if (!(strstr(safe, "rdpsnd") || strstr(safe, "AUDIO")))
-				continue;
-			(void)ycn_add_slot(s, lp, safe);
-		}
+			for (i = 0; i < count; i++)
+			{
+				uint8_t* od = channels + YCN_CH_OFF_OPENDATA_LIST + (size_t)i * YCN_OD_SIZE;
+				void* lp = NULL;
+				char safe[9];
+				BOOL lpOk = FALSE;
+				/* 🔴 lpUserParam 的读取**必须**在 SEH 内 —— 上一轮只在下面读 statsName 时加了 SEH，
+				 * 却在上面留了一句裸的 `*(void**)(od + 88)`，正是 2026-10-07 07:42 的崩点
+				 * （ycn_rdp.DLL 0xC0000005 @偏移 0x2be5，mov rcx,[r13+0xAD8] 读出 0 后当数组下标）。
+				 * 「知道危险但只护了一半」最坑：代码看起来像已经处理过了。
+				 * 教训：**凡是按硬编码偏移解裸指针，整个读取动作都得进 SEH**。
+				 *
+				 * ⚠️ 这里刻意**不在 __except 里写 continue**：跳转型控制流从异常处理块
+				 * 里穿出去在 MSVC 上语义微妙（且不同版本行为不同）。改成置标志位、
+				 * 在 __except 之后统一判断，行为完全确定。 */
+				__try
+				{
+					lp = *(void**)(od + YCN_OD_OFF_LPUSERPARAM);
+					lpOk = TRUE;
+				}
+				__except (EXCEPTION_EXECUTE_HANDLER)
+				{
+					lpOk = FALSE; /* 这一项读不动，跳过 */
+				}
+				if (!lpOk || !lp)
+					continue;
+				/* ⚠️ 名字走 SEH 安全读取：原先的 memcpy(safe, name, 8) 会越界读
+				 * （statsName 定长 8 字节不保证 NUL 终止，od 又是指针硬算出来的），
+				 * 音频一开这条路径就走到，实测直接把进程带崩（0xC0000005 @ ycn_rdp+0x2be5）。 */
+				if (!ycn_read_channel_name(od + YCN_OD_OFF_STATS_NAME, safe, sizeof(safe)))
+					continue;
+				if (!(strstr(safe, "rdpsnd") || strstr(safe, "AUDIO")))
+					continue;
+				(void)ycn_add_slot(s, lp, safe);
+			}
 		}
 	}
 
@@ -1098,12 +1134,15 @@ static int ycn_rdpsnd_hook_slot(YcnSession* s, int slot)
 	rdpsndDevicePlugin* device = (rdpsndDevicePlugin*)s->rdpsnd_device[slot];
 	rdpsndDevicePlugin* dev;
 	HMODULE selfMod = NULL;
+	BOOL alreadyHooked = FALSE;
+	BOOL deviceUsable = FALSE;
+	void* selfHookSource = NULL;
 
 	if (!s->rdpsnd_plugin[slot])
 		return 0;
 
 	/* 每次都从插件里重新读 device —— device 会在 Close→Free 后被换成新对象，
-	 * 缓存旧指针会指向已释放内存。 */
+	 * 缓存旧指针会指向已释放内存。ycn_probe_rdpsnd_device 内部已用 SEH 兜住。 */
 	dev = ycn_probe_rdpsnd_device(s->rdpsnd_plugin[slot]);
 	if (dev && s->rdpsnd_device[slot] != (void*)dev)
 	{
@@ -1113,17 +1152,36 @@ static int ycn_rdpsnd_hook_slot(YcnSession* s, int slot)
 		s->rdpsnd_orig_play_ex[slot] = NULL;
 	}
 	device = (rdpsndDevicePlugin*)s->rdpsnd_device[slot];
-	if (!device || !device->SetVolume)
+
+	/* 🔴 device 来自**跨拍的槽位缓存**：上一拍读到的地址，这一拍那块内存可能已经被
+	 * FreeRDP 释放。所以连"device->SetVolume 是否存在""是否已经是我的钩子"这类**读**
+	 * 都必须进 SEH —— 本函数是本文件里唯一会对 FreeRDP 结构体**写**的地方，
+	 * 在野指针上读写不可分。写之前先在 SEH 内把要用的函数指针全取出来缓存到局部变量，
+	 * 后面一律用缓存值，不再重复解引用 device（重复解引用 = 把护栏又捅了个洞）。 */
+	__try
+	{
+		if (device && device->SetVolume)
+		{
+			deviceUsable = TRUE;
+			selfHookSource = (void*)device->SetVolume;
+			alreadyHooked = (device->SetVolume == ycn_rdpsnd_set_volume_hook);
+		}
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		return 0;
+	}
+	if (!deviceUsable)
 		return 0;
 
 	/* 已挂钩？只看「当前 device 上的函数指针就是我的钩子」——不掺 orig 缓存，
 	 * 否则重扫时 orig 被清就误判成未挂钩 → 反复重装。 */
-	if (device->SetVolume == ycn_rdpsnd_set_volume_hook)
+	if (alreadyHooked)
 		return 1;
 
 	if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
 	                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-	                       (LPCWSTR)(uintptr_t)device->SetVolume, &selfMod) &&
+	                       (LPCWSTR)(uintptr_t)selfHookSource, &selfMod) &&
 	    selfMod == (HMODULE)(uintptr_t)&__ImageBase)
 	{
 		return -1;
@@ -1132,15 +1190,25 @@ static int ycn_rdpsnd_hook_slot(YcnSession* s, int slot)
 	/* 存 orig 前先排雷：若当前指针**已经是本模块的钩子**（上轮挂完 device 地址没变、
 	 * 但上一轮被判定为"未挂钩"而重进这里），绝不能把它存成 orig —— 那会让钩子
 	 * 转调自己 → 无限递归 / 调用野指针（实测出现过 play=000000E400000001 这种垃圾）。
-	 * 判据：指针落在本模块内 = 我们的钩子，此时保留旧 orig 不动。 */
+	 * 判据：指针落在本模块内 = 我们的钩子，此时保留旧 orig 不动。
+	 *
+	 * 🔴 下面三段是对 FreeRDP 结构体的**写**操作，必须整体进 SEH：
+	 * 上一页的校验只能证明"刚才能读"，而 FreeRDP 的音频线程随时可能把 device Free 掉；
+	 * 读得到、写不到是完全可能的（堆块 Free 后可能已归还 OS）。
+	 * 代价是"可能只装上部分钩子"（例如 SetVolume 装上、Play 没装上）——
+	 * 这远小于进程崩掉：静音降级成部分失效，下一拍还会重扫重装。 */
+	__try
+	{
+	/* 排雷用的原始 SetVolume 指针：上面 SEH 里已校验过非空，这里复用缓存值 selfHookSource，
+	 * 不再重复解引用 device（重复解引用 = 把护栏又捅了个洞）。 */
 	{
 		HMODULE m = NULL;
 		if (!(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
 		                         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-		                         (LPCWSTR)(uintptr_t)device->SetVolume, &m) &&
+		                         (LPCWSTR)(uintptr_t)selfHookSource, &m) &&
 		      m == (HMODULE)(uintptr_t)&__ImageBase))
 		{
-			s->rdpsnd_orig_set_volume[slot] = (void*)device->SetVolume;
+			s->rdpsnd_orig_set_volume[slot] = (void*)selfHookSource;
 			device->SetVolume = ycn_rdpsnd_set_volume_hook;
 		}
 		else
@@ -1150,35 +1218,46 @@ static int ycn_rdpsnd_hook_slot(YcnSession* s, int slot)
 	}
 	{
 		HMODULE m = NULL;
-		if (device->Play &&
+		void* cur = (void*)device->Play;
+		if (cur &&
 		    !(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
 		                         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-		                         (LPCWSTR)(uintptr_t)device->Play, &m) &&
+		                         (LPCWSTR)(uintptr_t)cur, &m) &&
 		      m == (HMODULE)(uintptr_t)&__ImageBase))
 		{
-			s->rdpsnd_orig_play[slot] = (void*)device->Play;
+			s->rdpsnd_orig_play[slot] = cur;
 			device->Play = ycn_rdpsnd_play_hook;
 		}
-		else if (device->Play)
+		else if (cur)
 		{
 			device->Play = ycn_rdpsnd_play_hook;
 		}
 	}
 	{
 		HMODULE m = NULL;
-		if (device->PlayEx &&
+		void* cur = (void*)device->PlayEx;
+		if (cur &&
 		    !(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
 		                         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-		                         (LPCWSTR)(uintptr_t)device->PlayEx, &m) &&
+		                         (LPCWSTR)(uintptr_t)cur, &m) &&
 		      m == (HMODULE)(uintptr_t)&__ImageBase))
 		{
-			s->rdpsnd_orig_play_ex[slot] = (void*)device->PlayEx;
+			s->rdpsnd_orig_play_ex[slot] = cur;
 			device->PlayEx = ycn_rdpsnd_play_ex_hook;
 		}
-		else if (device->PlayEx)
+		else if (cur)
 		{
 			device->PlayEx = ycn_rdpsnd_play_ex_hook;
 		}
+	}
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		/* device 在校验与写入之间被 Free 了。这轮放弃，返回 0（不是 -1：
+		 * -1 会被当成"布局不对"去刷警告，而这里只是时序不巧）。
+		 * 已经写进去的那部分保持原样，下一拍 ycn_rdpsnd_hook 会重新扫、重新装。 */
+		WLog_WARN(TAG, "audio mute: slot%d device 在装钩子时失效（已被释放），本轮跳过", slot);
+		return 0;
 	}
 
 	{
@@ -1207,8 +1286,17 @@ static int ycn_rdpsnd_hook(YcnSession* s)
 	tick = InterlockedIncrement(&s->mute_dbg_tick);
 	ycn_collect_rdpsnd_plugins(s, tick <= 5);
 
-	if (tick == 3 && s->instance && s->instance->context)
-		ycn_dump_all_channels(s->instance->context);
+	/* ❗ 原先这里有一句 `if (tick == 3) ycn_dump_all_channels(context);` —— **已删除**。
+	 *
+	 * 它是查「rdpsnd 到底有几个插件实例」时加的一次性诊断，结论早已写进代码注释
+	 * （rdpsnd 有两个实例，DVC 那份在 drdynvc 链上，见 ycn_collect_rdpsnd_plugins）。
+	 * 留着却要付出**每连接必崩的代价**：那个函数按硬编码偏移去解裸指针，
+	 * 2026-10-07 07:42 就崩在这里（ycn_rdp.DLL 0xC0000005 偏移 0x2be5，函数 #64）。
+	 *
+	 * 🔑 结论：查完的诊断代码要**删掉**，不能只「加个 SEH 让它别崩」——
+	 * 一次性的探针留在生产路径上，几个月后就会变成没人记得用途的地雷。
+	 * `ycn_dump_all_channels` 这个函数本身已整段删除，只把它查到的结论
+	 * 留在了 ycn_collect_rdpsnd_plugins 的注释里。 */
 
 	for (k = 0; k < s->rdpsnd_slot_count; k++)
 	{
@@ -1216,25 +1304,58 @@ static int ycn_rdpsnd_hook(YcnSession* s)
 		if (rc == 1)
 			hooked++;
 
-		/* 诊断快照（前几拍 + 之后每 120 拍一次，避免刷爆） */
+		/* 诊断快照（前几拍 + 之后每 120 拍一次，避免刷爆）
+		 *
+		 * 🔴 这一段原先是 7 句裸的 `*(BOOL*)(p + YCN_RDPSND_OFFSET_*)`，
+		 * 全部在 SEH 之外 —— 同一个错犯了两轮：上一轮修了 channels/lpUserParam，
+		 * 却忘了**同一个函数里还有另一族硬编码偏移读**（rdpsndPlugin 私有字段）。
+		 *
+		 * 为什么这在热路径上尤其危险：`p` 来自槽位缓存（上一次扫描时记下的 plugin），
+		 * 而 plugin/device 在 rdpsnd Close 时会被 Free。槽位缓存的寿命比 plugin 的寿命长，
+		 * 于是「上一拍还好好的 plugin，这一拍已经躺在已释放的堆上」—— 正是
+		 * 2026-10-07 07:42 那种多通道并发 connect/disconnect 时的写照。
+		 *
+		 * 教训（比"记得加 SEH"更可执行的一条）：
+		 * 🔑 **加护栏要按"解引用动作"逐条清点，不是按"我这次改的是哪个函数"**。
+		 * 同一个语义族（按硬编码偏移读 FreeRDP 私有结构）在文件里有 4 处，
+		 * 只改 2 处就等于没改 —— 而且剩下的 2 处还给人"这里已经防过了"的错觉。 */
 		if (tick <= 5 || (tick % 120) == 0)
 		{
 			uint8_t* p = (uint8_t*)s->rdpsnd_plugin[k];
 			char dbg[320];
 			if (p)
 			{
-				_snprintf_s(dbg, sizeof(dbg), _TRUNCATE,
-				            "mute-snap#%ld slot%d dync=%d att=%d open=%d onopen=%d isopen=%d "
-				            "applyv=%d nfmt=%u dev=%p rc=%d",
-				            tick, k,
-				            (int)*(BOOL*)(p + YCN_RDPSND_OFFSET_DYNAMIC),
-				            (int)*(BOOL*)(p + YCN_RDPSND_OFFSET_ATTACHED),
-				            (int)*(DWORD*)(p + YCN_RDPSND_OFFSET_OPENDATA_HANDLE),
-				            (int)*(BOOL*)(p + YCN_RDPSND_OFFSET_ONOPENCALLED),
-				            (int)*(BOOL*)(p + YCN_RDPSND_OFFSET_ISOPEN),
-				            (int)*(BOOL*)(p + YCN_RDPSND_OFFSET_APPLYVOLUME),
-				            (unsigned)*(UINT16*)(p + YCN_RDPSND_OFFSET_NUM_CLIENT_FMT),
-				            s->rdpsnd_device[k], rc);
+				BOOL snap_ok = FALSE;
+				int v_dync = 0, v_att = 0, v_handle = 0, v_onopen = 0, v_isopen = 0, v_applyv = 0;
+				unsigned v_nfmt = 0;
+				/* 先把 7 个字段**一次性**读进局部变量，全程在 SEH 内；
+				 * 任何一脚踩空就整段放弃快照（日志里少一行，程序继续活着）。
+				 * 不做"读到几个算几个"—— 半截快照比没有快照更容易误导排障。 */
+				__try
+				{
+					v_dync = *(BOOL*)(p + YCN_RDPSND_OFFSET_DYNAMIC);
+					v_att = *(BOOL*)(p + YCN_RDPSND_OFFSET_ATTACHED);
+					v_handle = *(DWORD*)(p + YCN_RDPSND_OFFSET_OPENDATA_HANDLE);
+					v_onopen = *(BOOL*)(p + YCN_RDPSND_OFFSET_ONOPENCALLED);
+					v_isopen = *(BOOL*)(p + YCN_RDPSND_OFFSET_ISOPEN);
+					v_applyv = *(BOOL*)(p + YCN_RDPSND_OFFSET_APPLYVOLUME);
+					v_nfmt = *(UINT16*)(p + YCN_RDPSND_OFFSET_NUM_CLIENT_FMT);
+					snap_ok = TRUE;
+				}
+				__except (EXCEPTION_EXECUTE_HANDLER)
+				{
+					snap_ok = FALSE;
+				}
+				if (snap_ok)
+					_snprintf_s(dbg, sizeof(dbg), _TRUNCATE,
+					            "mute-snap#%ld slot%d dync=%d att=%d open=%d onopen=%d isopen=%d "
+					            "applyv=%d nfmt=%u dev=%p rc=%d",
+					            tick, k, v_dync, v_att, v_handle, v_onopen, v_isopen,
+					            v_applyv, v_nfmt, s->rdpsnd_device[k], rc);
+				else
+					_snprintf_s(dbg, sizeof(dbg), _TRUNCATE,
+					            "mute-snap#%ld slot%d <plugin 已不可读，跳过快照> dev=%p rc=%d",
+					            tick, k, s->rdpsnd_device[k], rc);
 				ycn_debug_dump_tag(dbg);
 			}
 		}
