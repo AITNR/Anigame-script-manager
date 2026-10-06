@@ -298,23 +298,36 @@ namespace YukinoChan.Views
 
         private void OnClientConnected(object? sender, (int Session, uint Width, uint Height) e)
         {
-            _remoteWidth = e.Width;
-            _remoteHeight = e.Height;
             // 锁状态必须在**任何按键之前**同步过去：小键盘与方向键共用扫描码，
             // 差异全靠服务器侧 NumLock（见 KeyboardToggleState 注释）。
             // 事件在原生线程触发，同步是线程安全的入队操作，直接调即可。
             _client?.SyncKeyboardState();
+            // 🔑 尺寸写入与其他 D3D 操作一样排到 UI 线程，与 OnDesktopResized /
+            // OnFrameArrived 的写点收口到同一线程 —— 三处曾各写各的，双线程可见性不一致
+            // 时 Present 会拿旧尺寸比对帧尺寸，误判成「需要重建交换链」。
             var enqueued = _dispatcher?.TryEnqueue(() =>
-                ShowOverlay($"已连接 {e.Width}×{e.Height}", progress: false, hide: true));
+            {
+                _remoteWidth = e.Width;
+                _remoteHeight = e.Height;
+                ShowOverlay($"已连接 {e.Width}×{e.Height}", progress: false, hide: true);
+            });
         }
 
         private void OnDesktopResized(object? sender, (int Session, uint Width, uint Height) e)
         {
-            // 原生线程直接更新：远端分辨率 + D3D 交换链重建；软渲染路线靠下一帧自然适配
-            _remoteWidth = e.Width;
-            _remoteHeight = e.Height;
-            _renderer?.ResizeRemote(e.Width, e.Height);
-            var enqueued = _dispatcher?.TryEnqueue(UpdatePanelLayout);
+            // 🔑 远端分辨率**只在 UI 线程改**。本回调由原生帧线程触发，
+            // 而 D3D 设备的其余全部操作（Initialize / Present / 回退时Dispose）都在 UI 线程
+            // —— 一个隐式「单线程独占」的资源曾被这里从第二个线程戳了一下，
+            // 于是 ResizeBuffers 与 Present/CopyResource 撞在一起（偶发，表现为整个窗口假死）。
+            // 原代码把 _remoteWidth/_remoteHeight 也在原生线程直接写，双线程同时改同一组尺寸，
+            // 正好让 Present 里的尺寸不一致分支（自己也会 ResizeRemote）与这里互相踩。
+            var enqueued = _dispatcher?.TryEnqueue(() =>
+            {
+                _remoteWidth = e.Width;
+                _remoteHeight = e.Height;
+                _renderer?.ResizeRemote(e.Width, e.Height);
+                UpdatePanelLayout();
+            });
         }
 
         private void OnFrameArrived(object? sender, RdpFrameEventArgs e)
@@ -349,11 +362,9 @@ namespace YukinoChan.Views
             // （实测：服务器 37 帧/秒 → 呈现只有 31 帧/秒，就是被这个窗口吃掉的）
             System.Threading.Interlocked.Increment(ref _frameSeq);
 
-            if (_remoteWidth == 0 || _remoteHeight == 0)
-            {
-                _remoteWidth = e.Width;
-                _remoteHeight = e.Height;
-            }
+            // 🔑 远端尺寸只在 UI 线程写（本回调与 OnDesktopResized 都排到 dispatcher 上），
+            // 原生线程**只读不写**。原代码在这里直接赋值，等于两个线程同时写同一组字段，
+            // 而 Present 要拿它跟帧尺寸比对后决定是否重建交换链 —— 读到撕裂值就会误判。
 
             // 惰性初始化 D3D（用事件参数里的尺寸，无需 memcpy）；失败后本实例固定走软渲染。
             // 注意：panel 尺寸直接用帧尺寸 —— VM 路径下 Connected 事件可能在挂钩前
@@ -388,11 +399,36 @@ namespace YukinoChan.Views
                     PartPanel.Width = initW;
                     PartPanel.Height = initH;
                     PartViewbox.Visibility = PartPanel.Visibility;
+                    // Connected 事件可能被错过（HookClient 晚于连接），这里补写尺寸 ——
+                    // 必须写，否则 UpdatePanelLayout / 坐标映射会一直拿到 0（M5 黑屏同源问题）。
+                    _remoteWidth = initW;
+                    _remoteHeight = initH;
                 });
                 if (enqueued != true)
                 {
+                    //排队失败（无dispatcher / 页面已卸载）：必须复位，否则再也不会有初始化，
+                    // 且下面那个补写分支会误以为「已排队」而只写尺寸、不建渲染器。
                     _initQueued = false;
+                    _remoteWidth = e.Width;
+                    _remoteHeight = e.Height;
                 }
+            }
+            else if (_remoteWidth == 0 || _remoteHeight == 0)
+            {
+                // ⚠️ 走软渲染（--embed-nod3d）或渲染器已存在但尺寸还没落地时，
+                // 上面的初始化分支不会执行，尺寸就永远停在 0 —— UpdatePanelLayout 会直接 return，
+                // 坐标映射也会拿到 0 视口。
+                // 🔑 本方法由**原生帧线程**触发，所以必须排到 UI 线程写 —— 直接赋值正是我们
+                // 刚修掉的那个竞态（原生线程与 UI 线程双写尺寸，Present 读到撕裂值会误判成
+                // 「帧尺寸变了」而重建交换链）。判据也放进UI 线程里读，保证读写同线程。
+                _dispatcher?.TryEnqueue(() =>
+                {
+                    if (_remoteWidth == 0 || _remoteHeight == 0)
+                    {
+                        _remoteWidth = e.Width;
+                        _remoteHeight = e.Height;
+                    }
+                });
             }
 
             if (_renderer is { Initialized: true })

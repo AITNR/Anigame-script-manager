@@ -7,7 +7,15 @@
 //     Viewbox(Stretch=Uniform) 里，框架自动维护 CompositionScale 并由 DWM 组合器采样缩放；
 //     不要改回手动 COM SetCompositionScale——它会被 XAML 布局重置为 1，画面变 1:1 裁切；
 //   - Present(0,0)：不等待 vsync——vsync 阻塞会卡住 FreeRDP 事件循环线程（网络/输入同线程）；
-//   - 整条管线在原生帧回调线程上跑，零 UI 线程参与；失败回退 M2 SoftwareBitmap 路线。
+//   - 🔴 整条管线**在 UI 线程上**跑（Present 由 RdpView 的 DispatcherTimer 驱动，
+//     16ms 一拍）。原先这里写着「零 UI 线程参与」——**那是错的**，实现早已是UI 线程驱动，
+//     而这条错注释会让下一个人以为可以随便从别的线程调 Initialize/Present/Dispose。
+//     D3D11 设备与 immediate context 不是线程安全的：从原生帧线程直接调 ResizeRemote，
+//     会与 UI 线程的 CopyResource/Present 撞在一起，驱动内部互锁 →
+//     **整窗假死**（进程活着、Responding=False、UI 线程卡在 Wait=LpcReply、CPU 零增长），
+//     用户实测为**偶发**（竞态特征）。修法是把尺寸与 D3D 写点全部收口到 UI 线程，
+//     并在类内用 _gate 串行化作纵深防御；回归防线见 _smoke/RenderThreadAffinityCheck.cs。
+//   - 失败回退 M2 SoftwareBitmap 路线。
 using System;
 using System.Runtime.InteropServices;
 using Vortice.Direct3D;
@@ -31,6 +39,20 @@ namespace YukinoChan.Services
         /// <summary>--embed-nod3d 时强制 SoftwareBitmap 路线（诊断开关）。</summary>
         public static bool DisableD3D { get; } = Array.Exists(
             Environment.GetCommandLineArgs(), a => a == "--embed-nod3d");
+
+        /// <summary>🔒 序列化本实例的全部状态变更（Initialize / ResizeRemote / Present / Dispose）。
+        ///
+        /// D3D11 设备与 immediate context **不是线程安全的**，而这些方法的调用来源曾经不统一：
+        /// 多数在 UI 线程（Present 由 DispatcherTimer 驱动），但 OnDesktopResized 一度从
+        /// 原生帧线程直接调 ResizeRemote。ResizeBuffers 与 CopyResource/Present 撞在一起
+        /// 表现为偶发的整窗假死（UI 线程 Responding=False，栈上LpcReply 等GPU/合成器回复）。
+        ///
+        /// 注意：这把锁只保证**本对象内部**一致，**不能**让 D3D 调用变成可跨线程的——
+        /// SetSwapChain 仍必须在 UI 线程调。调用方纪律见RdpView 的尺寸/D3D 写点注释。
+        /// 锁用 Monitor 是因为 Present 内部有 unsafe/fixed 块（不能跨 await 持锁，Present 也不 await）。
+        /// </summary>
+        private readonly object _gate = new();
+
         private ID3D11Device? _device;
         private ID3D11DeviceContext? _context;
         private IDXGISwapChain1? _swapChain;
@@ -44,8 +66,18 @@ namespace YukinoChan.Services
 
         public string? LastError { get; private set; }
 
-        /// <summary>创建设备/交换链（远端分辨率）并绑定到 SwapChainPanel。</summary>
+        /// <summary>创建设备/交换链（远端分辨率）并绑定到 SwapChainPanel。
+        /// ⚠️ **必须在 UI 线程调**：内部 SetSwapChain 要触碰 XAML 面板。</summary>
         public bool Initialize(Microsoft.UI.Xaml.Controls.SwapChainPanel panel,
+            uint remoteWidth, uint remoteHeight)
+        {
+            lock (_gate)
+            {
+                return InitializeLocked(panel, remoteWidth, remoteHeight);
+            }
+        }
+
+        private bool InitializeLocked(Microsoft.UI.Xaml.Controls.SwapChainPanel panel,
             uint remoteWidth, uint remoteHeight)
         {
             try
@@ -144,8 +176,18 @@ namespace YukinoChan.Services
             });
         }
 
-        /// <summary>远端分辨率变化：重建交换链与 staging（同尺寸原则）。</summary>
+        /// <summary>远端分辨率变化：重建交换链与 staging（同尺寸原则）。
+        /// ⚠️ 必须在 UI 线程调（会重建 D3D 资源）。锁是 Monitor（可重入），
+        /// 因为 Present 在尺寸不一致时会调用本方法。</summary>
         public bool ResizeRemote(uint width, uint height)
+        {
+            lock (_gate)
+            {
+                return ResizeRemoteLocked(width, height);
+            }
+        }
+
+        private bool ResizeRemoteLocked(uint width, uint height)
         {
             if (!Initialized || (_remoteWidth == width && _remoteHeight == height))
             {
@@ -169,8 +211,18 @@ namespace YukinoChan.Services
             }
         }
 
-        /// <summary>上传一帧（同尺寸 CopyResource）并呈现。失败返回 false。</summary>
+        /// <summary>上传一帧（同尺寸 CopyResource）并呈现。失败返回 false。
+        /// ⚠️ 必须在 UI 线程调（本方法整体在一个 GPU 阻塞段里，绝不能拖到后台线程 ——
+        /// 那会让 UI 线程与 GPU 互相等，成假死）。</summary>
         public bool Present(ReadOnlySpan<byte> pixels, uint width, uint height, uint stride)
+        {
+            lock (_gate)
+            {
+                return PresentLocked(pixels, width, height, stride);
+            }
+        }
+
+        private bool PresentLocked(ReadOnlySpan<byte> pixels, uint width, uint height, uint stride)
         {
             if (!Initialized || _staging is null || _backBuffer is null || _context is null)
             {
@@ -179,7 +231,7 @@ namespace YukinoChan.Services
             }
             if (width != _remoteWidth || height != _remoteHeight)
             {
-                if (!ResizeRemote(width, height))
+                if (!ResizeRemoteLocked(width, height))
                 {
                     return false;
                 }
@@ -228,18 +280,21 @@ namespace YukinoChan.Services
 
         public void Dispose()
         {
-            Initialized = false;
-            _staging?.Dispose();
-            _backBuffer?.Dispose();
-            _swapChain?.Dispose();
-            _context?.Dispose();
-            _device?.Dispose();
-            _staging = null;
-            _backBuffer = null;
-            _swapChain = null;
-            _context = null;
-            _device = null;
-            _panelPtr = IntPtr.Zero;
+            lock (_gate)
+            {
+                Initialized = false;
+                _staging?.Dispose();
+                _backBuffer?.Dispose();
+                _swapChain?.Dispose();
+                _context?.Dispose();
+                _device?.Dispose();
+                _staging = null;
+                _backBuffer = null;
+                _swapChain = null;
+                _context = null;
+                _device = null;
+                _panelPtr = IntPtr.Zero;
+            }
         }
     }
 }
