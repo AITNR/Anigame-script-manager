@@ -107,10 +107,14 @@ namespace YukinoChan.Models
         }
 
         /// <summary>滚轮 delta（WinUI MouseWheelDelta，+120=向上一步）→ (flags, encodedDelta)。
-        /// MS-RDPBCGR：wheelDelta 以 120 为一步，取值范围 0..0xFF；向下再叠 WHEEL_NEGATIVE。</summary>
+        /// MS-RDPBCGR 2.2.8.1.1.1.1：WheelRotationMask=0x01FF 名义上占 bit0-8，但 **bit8 实际是
+        /// PTRFLAGS_WHEEL_NEGATIVE**、bit9 是 WHEEL —— 格数只许用低 8 位（这里收一位到 0x7F），
+        /// 否则大 delta 会把格数顶进方向位，向上/向下又编码成同一个值。
+        /// ⚠️ 格数**绝不能左移**：左移直接改写 WHEEL/NEGATIVE 标志本身
+        /// （曾经的 bug：调用点写 `flags | (encoded &lt;&lt; 8)`，向上/向下都退化成 0x0300）。</summary>
         public static (uint Flags, uint EncodedDelta) MapWheel(int wheelDelta)
         {
-            var steps = (uint)Math.Clamp(Math.Abs(wheelDelta) / 120, 0, 0xFF);
+            var steps = (uint)Math.Clamp(Math.Abs(wheelDelta) / 120, 0, YcnPointerFlags.WheelRotationMax);
             if (steps == 0)
             {
                 return (0, 0);
@@ -120,7 +124,8 @@ namespace YukinoChan.Models
         }
     }
 
-    /// <summary>PTR_FLAGS 组合常量（与 C# interop 的 YcnPtrFlags 同值；单测引用用，避免 _smoke 链 interop）。</summary>
+    /// <summary>PTR_FLAGS 组合常量（与 FreeRDP input.h 同值；单测引用用，避免 _smoke 链 interop）。
+    /// 完整定义见 MS-RDPBCGR 2.2.8.1.1.1.1 TS_POINTER_EVENT。</summary>
     public static class YcnPointerFlags
     {
         public const uint Move = 0x0800;
@@ -130,5 +135,14 @@ namespace YukinoChan.Models
         public const uint Button3 = 0x4000;
         public const uint Wheel = 0x0200;
         public const uint WheelNegative = 0x0100;
+        public const uint WheelHorizontal = 0x0400;
+
+        /// <summary>滚轮格数字段（协议名义掩码 0x01FF）。与上面三个标志位**叠加**而非互斥——
+        /// 协议规定滚轮事件里只有 WHEEL/HWHEEL + WHEEL_NEGATIVE + 本字段有效。</summary>
+        public const uint WheelRotationMask = 0x01FF;
+
+        /// <summary>格数实际上界：bit8 归 WHEEL_NEGATIVE 所有，故只给 0x7F。
+        /// 用 0x01FF 收口会让 ≥256 格的大 delta 溢出到方向位（向上/向下退化为同值）。</summary>
+        public const uint WheelRotationMax = 0x7F;
     }
 }

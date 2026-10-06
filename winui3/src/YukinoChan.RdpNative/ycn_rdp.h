@@ -96,6 +96,23 @@ YCN_API int ycn_rdp_send_mouse(int session, uint32_t flags, uint16_t x, uint16_t
 /* 键盘注入。scancode 为 RDP 扫描码（VSC），extended 为扩展键位 */
 YCN_API int ycn_rdp_send_key(int session, int down, int extended, uint16_t scancode);
 
+/* ---- 键盘 toggle 同步位（KBD_SYNC_*，TS_SYNCHRONIZE；与 FreeRDP input.h 同值） ----
+ * ⚠️ 每位只在对应锁**开启**时置 1 —— 这是状态快照，不是「按一下」的动作。
+ * 0x01 ScrollLock / 0x02 NumLock / 0x04 CapsLock / 0x08 KanaLock */
+#define YCN_KBD_SYNC_SCROLL_LOCK 0x00000001u
+#define YCN_KBD_SYNC_NUM_LOCK    0x00000002u
+#define YCN_KBD_SYNC_CAPS_LOCK   0x00000004u
+#define YCN_KBD_SYNC_KANA_LOCK   0x00000008u
+#define YCN_KBD_SYNC_ALL         0x0000000Fu
+
+/* 同步键盘 toggle 状态到服务器（幂等；连接后就绪则入队，下一拍由 RDP 线程发出）。
+ *
+ * 为什么必须有：小键盘 0-9 与 Insert/Home/PgUp/End/PgDn/方向键在 Set1 里**共用扫描码**
+ * （Numpad1 与 End 同为 0x4F），只靠 extended 位 + 服务器侧 NumLock 区分。
+ * 不同步 → 服务器按自己的锁状态解释，按小键盘会打出方向键。
+ * 传 0 表示「三个锁全关」，是合法状态（不是「不更新」）。 */
+YCN_API int ycn_rdp_send_keyboard_sync(int session, uint32_t flags);
+
 /* 本机静音（只影响本机播放，远端照常发声）。muted 非 0 = 静音。
  * 立即生效、不需要重连：内部对 rdpsnd 设备的 SetVolume 做**链式挂钩**，
  * 静音态下任何音量写入（含服务器下发的 volume PDU）都会被压成 0；取消静音则摘钩子并还原全量。

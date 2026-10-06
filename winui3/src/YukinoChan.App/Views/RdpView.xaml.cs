@@ -40,6 +40,8 @@ namespace YukinoChan.Views
         private double _remoteHeight;
         private bool _inputLocked;             // 锁定：鼠标穿透 + 键盘映射全部停用
 
+        private const ulong VkNumLock = 0x90;  // 见 OnKeyDown：切换后需补发锁状态快照
+
         /// <summary>画面刷新次数（诊断/验收计数）。</summary>
         public ulong FramesRendered { get; private set; }
 
@@ -298,6 +300,10 @@ namespace YukinoChan.Views
         {
             _remoteWidth = e.Width;
             _remoteHeight = e.Height;
+            // 锁状态必须在**任何按键之前**同步过去：小键盘与方向键共用扫描码，
+            // 差异全靠服务器侧 NumLock（见 KeyboardToggleState 注释）。
+            // 事件在原生线程触发，同步是线程安全的入队操作，直接调即可。
+            _client?.SyncKeyboardState();
             var enqueued = _dispatcher?.TryEnqueue(() =>
                 ShowOverlay($"已连接 {e.Width}×{e.Height}", progress: false, hide: true));
         }
@@ -698,8 +704,10 @@ namespace YukinoChan.Views
             var pt = e.GetCurrentPoint(this);
             var (x, y) = RdpInputMapper.MapPointerToRemote(
                 pt.Position.X, pt.Position.Y, ActualWidth, ActualHeight, _remoteWidth, _remoteHeight);
-            // 滚轮 delta 编码在 PTR_FLAGS 的 0x0000FF00 段（MS-RDPBCGR 2.2.8.1.1.1.1）
-            client.SendMouse(flags | (encoded << 8), x, y);
+            // 格数直接叠在 bit0-8（WheelRotationMask），**不能左移**：
+            // bit8=WHEEL_NEGATIVE、bit9=WHEEL，移上去会把方向标志本身改写，
+            // 向上/向下会编码成同一个值（表现为两个方向滚出一样的效果）。
+            client.SendMouse(flags | encoded, x, y);
             e.Handled = true;
         }
 
@@ -725,6 +733,13 @@ namespace YukinoChan.Views
             {
                 KeysForwarded++;
                 e.Handled = true;
+                // NumLock 键本身照常转发给服务器（它会跟着切），
+                // 随后补一次状态快照，让本机锁状态与服务器对齐 ——
+                // 否则用户在本机切了 NumLock，远端仍按旧状态解释小键盘（0-9 ↔ 方向键）。
+                if ((ulong)e.Key == VkNumLock)
+                {
+                    _client.SyncKeyboardState();
+                }
             }
         }
 

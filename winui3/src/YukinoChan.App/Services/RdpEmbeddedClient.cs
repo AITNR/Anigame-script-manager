@@ -248,6 +248,23 @@ namespace YukinoChan.Services
             => RdpNativeInterop.ycn_rdp_send_key(_session, down ? 1 : 0, extended ? 1 : 0, scancode);
 
         /// <summary>
+        /// 把本机键盘 toggle 状态（NumLock/CapsLock/ScrollLock）同步给服务器。
+        ///
+        /// 为什么必须有：小键盘 0-9 与 Insert/Home/PgUp/End/PgDn/方向键在 Set1 里**共用扫描码**
+        /// （Numpad1 与 End 同为 0x4F），只靠 extended 位 + **服务器侧** NumLock 区分。
+        /// 服务器不知道本机锁状态时只能按自己那份解释 —— 本机 NumLock 开、服务器关，
+        /// 用户按小键盘 1 就变成按 End，光标乱跳。mstsc / xfreerdp 都会发这个同步事件。
+        ///
+        /// 幂等；连接未就绪返回 false（不抛）。
+        /// </summary>
+        public bool SyncKeyboardState()
+            => SyncKeyboardState(KeyboardToggleState.SnapshotLocal());
+
+        /// <summary>按给定锁状态同步（测试/重连复用；未连接时返回 false）。</summary>
+        public bool SyncKeyboardState(KeyboardToggleState state)
+            => _session > 0 && RdpNativeInterop.ycn_rdp_send_keyboard_sync(_session, state.ToWireFlags()) == 0;
+
+        /// <summary>
         /// 本机静音 / 取消静音（远端照常发声，只是本机不放）。
         /// 立即生效、不需要重连；原生侧对 rdpsnd 设备的 SetVolume 做了链式挂钩，
         /// 静音态下服务器下发的音量 PDU 也盖不掉。只影响**本会话**，不波及其他通道。

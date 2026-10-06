@@ -61,6 +61,14 @@ EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 
 /* ---------------- 会话状态 ---------------- */
 
+/* KBD_SYNC_* —— TS_SYNCHRONIZE 的 toggle 位（FreeRDP input.h 同名常量同值，
+ * MS-RDPBCGR 2.2.8.1.1.3.1.1.1）。每位只在对应锁**开启**时置 1。 */
+#define YCN_KBD_SYNC_SCROLL_LOCK 0x00000001u
+#define YCN_KBD_SYNC_NUM_LOCK    0x00000002u
+#define YCN_KBD_SYNC_CAPS_LOCK   0x00000004u
+#define YCN_KBD_SYNC_KANA_LOCK   0x00000008u
+#define YCN_KBD_SYNC_ALL         0x0000000Fu
+
 typedef enum
 {
 	YCN_STATE_IDLE = 0,
@@ -121,6 +129,13 @@ typedef struct
 	YcnKeyReq key_q[YCN_INPUT_QUEUE_CAP];
 	int key_head;
 	int key_tail;
+	/* 待同步的键盘 toggle 状态（KBD_SYNC_* 位掩码）。
+	 * ⚠️ 小键盘 0-9 与 Insert/Home/PgUp/End/PgDn/方向键在 Set1 里**共用扫描码**
+	 *   （如 Numpad1 与 End 都是 0x4F），唯一区别就是 extended 位 + 服务器侧 NumLock。
+	 *   不同步 NumLock → 服务器按自己的锁状态解释，用户按小键盘却打出方向键（Home/End…）。
+	 * 置 pending_sync=1 让事件循环线程下一拍发 TS_SYNCHRONIZE（跨线程直发同 send_* 禁忌）。*/
+	uint32_t sync_flags;
+	int pending_sync;
 
 	/* 连接参数副本（connect 时深拷贝，C# 侧内存随时可释放） */
 	char host[256];
@@ -1702,6 +1717,8 @@ static DWORD WINAPI event_loop(LPVOID arg)
 				YcnKeyReq k;
 				int have_m = 0;
 				int have_k = 0;
+				uint32_t sync_flags = 0;
+				int have_sync = 0;
 				EnterCriticalSection(&g_lock);
 				if (s->mouse_head != s->mouse_tail)
 				{
@@ -1715,7 +1732,20 @@ static DWORD WINAPI event_loop(LPVOID arg)
 					s->key_tail = (s->key_tail + 1) % YCN_INPUT_QUEUE_CAP;
 					have_k = 1;
 				}
+				if (s->pending_sync)
+				{
+					sync_flags = s->sync_flags;
+					s->pending_sync = 0;
+					have_sync = 1;
+				}
 				LeaveCriticalSection(&g_lock);
+				/* 同步必须排在键事件**之前**：它是服务器解释后续扫描码的基准，
+				 * 反过来（先按 NumLock 再同步）会让本拍按键仍按旧锁状态解释。 */
+				if (have_sync)
+				{
+					BOOL sent = freerdp_input_send_synchronize_event(instance->context->input, sync_flags);
+					WLog_DBG(TAG, "input drain: keyboard sync sent=%d flags=0x%08X", sent, sync_flags);
+				}
 				if (have_m)
 				{
 					BOOL sent = freerdp_input_send_mouse_event(instance->context->input, m.flags, m.x, m.y);
@@ -1729,7 +1759,7 @@ static DWORD WINAPI event_loop(LPVOID arg)
 					freerdp_input_send_keyboard_event_ex(instance->context->input,
 					                                     k.down ? TRUE : FALSE, TRUE, rdp_scancode);
 				}
-				if (!have_m && !have_k)
+				if (!have_m && !have_k && !have_sync)
 					break;
 			}
 
@@ -1851,6 +1881,8 @@ YCN_API int ycn_rdp_connect(const ycn_rdp_params* params, const ycn_rdp_callback
 	s->mouse_tail = 0;
 	s->key_head = 0;
 	s->key_tail = 0;
+	s->sync_flags = 0;
+	s->pending_sync = 0;
 
 	instance = freerdp_new();
 	if (!instance)
@@ -2037,6 +2069,8 @@ YCN_API void ycn_rdp_disconnect(int session)
 	s->mouse_tail = 0;
 	s->key_head = 0;
 	s->key_tail = 0;
+	s->sync_flags = 0;
+	s->pending_sync = 0;
 	InterlockedExchange(&s->state, YCN_STATE_IDLE);
 	s->used = 0;
 	LeaveCriticalSection(&g_lock);
@@ -2124,6 +2158,47 @@ YCN_API int ycn_rdp_send_key(int session, int down, int extended, uint16_t scanc
 	}
 	LeaveCriticalSection(&g_lock);
 	return rc;
+}
+
+/* 同步键盘 toggle 状态（NumLock / CapsLock / ScrollLock）到服务器。
+ *
+ * 为什么必须有：小键盘 0-9 与 Insert/Home/PgUp/End/PgDn/↑↓←→ 在 Set1 里**共用扫描码**
+ * （Numpad1 与 End 同为 0x4F，Numpad0 与 Insert 同为 0x52……），唯一区别是 extended 位
+ * **加上服务器侧的 NumLock 状态**。服务器拿不到本机锁状态，就只能按它自己那份锁状态解释：
+ * 本机 NumLock 开、服务器关 → 用户按小键盘 1，服务器当成 End，光标乱跳。
+ * mstsc / xfreerdp 都会在连接建立与窗口获得焦点时发一次 TS_SYNCHRONIZE，本桥接层原先没有。
+ *
+ * flags 取值（FreeRDP input.h 的 KBD_SYNC_*，与 MS-RDPBCGR 2.2.8.1.1.3.1.1.1 一致）：
+ *   0x01 ScrollLock / 0x02 NumLock / 0x04 CapsLock / 0x08 KanaLock
+ * **每个位只在对应锁处于开启状态时置 1**（是状态快照，不是 toggle 动作）。
+ *
+ * 与 send_* 同纪律：只置标志，实际发送在事件循环线程（跨线程直发会破坏协议流）。
+ * 幂等——同一状态连发多次无副作用；连接未就绪返回 YCN_ERR_NOT_CONNECTED。 */
+YCN_API int ycn_rdp_send_keyboard_sync(int session, uint32_t flags)
+{
+	YcnSession* s;
+	EnterCriticalSection(&g_lock);
+	s = find_session(session);
+	if (!s)
+	{
+		LeaveCriticalSection(&g_lock);
+		return YCN_ERR_SESSION_NOT_FOUND;
+	}
+	if (InterlockedCompareExchange(&s->state, 0, 0) != YCN_STATE_RUNNING)
+	{
+		LeaveCriticalSection(&g_lock);
+		return YCN_ERR_NOT_CONNECTED;
+	}
+	/* 未知位一律拒收：位定义是协议契约，放错位会静默误解锁状态 */
+	if (flags & ~(uint32_t)YCN_KBD_SYNC_ALL)
+	{
+		LeaveCriticalSection(&g_lock);
+		return YCN_ERR_INVALID_ARG;
+	}
+	s->sync_flags = flags;
+	s->pending_sync = 1;
+	LeaveCriticalSection(&g_lock);
+	return YCN_OK;
 }
 
 /* 设置本机静音：静音态由 SetVolume 钩子持续执行（服务器下发的 volume PDU 也盖不掉）。
