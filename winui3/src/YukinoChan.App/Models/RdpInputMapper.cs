@@ -106,21 +106,52 @@ namespace YukinoChan.Models
             return ((ushort)Math.Round(cx), (ushort)Math.Round(cy));
         }
 
-        /// <summary>滚轮 delta（WinUI MouseWheelDelta，+120=向上一步）→ (flags, encodedDelta)。
-        /// MS-RDPBCGR 2.2.8.1.1.1.1：WheelRotationMask=0x01FF 名义上占 bit0-8，但 **bit8 实际是
-        /// PTRFLAGS_WHEEL_NEGATIVE**、bit9 是 WHEEL —— 格数只许用低 8 位（这里收一位到 0x7F），
-        /// 否则大 delta 会把格数顶进方向位，向上/向下又编码成同一个值。
-        /// ⚠️ 格数**绝不能左移**：左移直接改写 WHEEL/NEGATIVE 标志本身
-        /// （曾经的 bug：调用点写 `flags | (encoded &lt;&lt; 8)`，向上/向下都退化成 0x0300）。</summary>
-        public static (uint Flags, uint EncodedDelta) MapWheel(int wheelDelta)
+        /// <summary>单次滚轮事件的绝对旋转单位上限。正常一格=120，64 格=7680 单位已经远超
+        /// 人手能一帧滚出的量；再大的 delta 一律夹住，避免失控输入灌爆输入队列。</summary>
+        private const long MaxTotalWheelUnits = YcnPointerFlags.WheelRotationMax * 64L;
+
+        /// <summary>滚轮 delta（WinUI MouseWheelDelta，+120=向上一步）→ (flags, rotationUnits, repeats)。
+        ///
+        /// ⚠️⚠️ **单位是「旋转单位」不是「格数」**（MS-RDPBCGR 2.2.8.1.1.1.1 WheelRotationMask）。
+        /// 服务器按 **120 旋转单位 = 1 格** 解释这个字段（FreeRDP 官方示例 `rotationUnits = 0x0078`）。
+        /// 曾经的 bug：这里发的是 `|delta| / 120`，也就是格数 —— 1 格只发 1 个单位，
+        /// 服务器当成 1/120 格，症状是**方向对了但上滑距离只有正常的 1/120**（用户实测反馈）。
+        /// WinUI 的 MouseWheelDelta 本身就是 120/格，**直接当旋转单位用，不要再除 120**。
+        /// 顺带好处：高精度触控板的小 delta（±15/±30 等亚格量）不再被当噪声丢掉，能平滑传给服务器。
+        ///
+        /// ⚠️ **旋转单位绝不能左移**：bit8=WHEEL_NEGATIVE、bit9=WHEEL，移上去等于改写方向标志本身
+        /// （曾经的 bug：调用点写 `flags | (units &lt;&lt; 8)`，向上/向下都退化成 0x0300）。
+        ///
+        /// ⚠️ **超出 0xFF 的量不能 clamp 了事**：bit8 归 WHEEL_NEGATIVE 所有，每事件最多 0xFF 单位，
+        /// 而一格就要 120 单位（两格 240 已超）。所以这里**拆成 repeats 个事件重发**并把总量均摊，
+        /// 保证滚过的总距离与本地一致 —— 否则快速滚动/触控板甩动依旧表现为「距离太短」。
+        /// </summary>
+        public static (uint Flags, uint RotationUnits, int Repeats) MapWheel(int wheelDelta)
         {
-            var steps = (uint)Math.Clamp(Math.Abs(wheelDelta) / 120, 0, YcnPointerFlags.WheelRotationMax);
-            if (steps == 0)
+            // Math.Abs(int.MinValue) 会溢出成负数，必须先转 long
+            var total = Math.Abs((long)wheelDelta);
+            if (total == 0)
             {
-                return (0, 0);
+                return (0, 0, 0);
             }
+
+            if (total > MaxTotalWheelUnits)
+            {
+                total = MaxTotalWheelUnits;
+            }
+
+            // 向上取整的事件数，再把总量均摊到各事件 —— 每片都非零且都 ≤ WheelRotationMax
+            const uint cap = YcnPointerFlags.WheelRotationMax;
+            var repeats = (int)((total + cap - 1) / cap);
+            if (repeats < 1)
+            {
+                repeats = 1;
+            }
+
+            var units = (uint)((total + repeats - 1) / repeats);
+
             uint flags = wheelDelta > 0 ? 0u : YcnPointerFlags.WheelNegative;
-            return (YcnPointerFlags.Wheel | flags, steps);
+            return (YcnPointerFlags.Wheel | flags, units, repeats);
         }
     }
 
@@ -137,12 +168,17 @@ namespace YukinoChan.Models
         public const uint WheelNegative = 0x0100;
         public const uint WheelHorizontal = 0x0400;
 
-        /// <summary>滚轮格数字段（协议名义掩码 0x01FF）。与上面三个标志位**叠加**而非互斥——
-        /// 协议规定滚轮事件里只有 WHEEL/HWHEEL + WHEEL_NEGATIVE + 本字段有效。</summary>
+        /// <summary>滚轮旋转单位字段（协议名义掩码 0x01FF = bit0-8）。与上面三个标志位**叠加**而非互斥——
+        /// 协议规定滚轮事件里只有 WHEEL/HWHEEL + WHEEL_NEGATIVE + 本字段有效。
+        /// ⚠️ 名义 9 位但 bit8 被 WHEEL_NEGATIVE 占着，故实际可用数量位只有 bit0-7。</summary>
         public const uint WheelRotationMask = 0x01FF;
 
-        /// <summary>格数实际上界：bit8 归 WHEEL_NEGATIVE 所有，故只给 0x7F。
-        /// 用 0x01FF 收口会让 ≥256 格的大 delta 溢出到方向位（向上/向下退化为同值）。</summary>
-        public const uint WheelRotationMax = 0x7F;
+        /// <summary>单次滚轮事件能携带的旋转单位上限 0xFF。
+        /// 协议写的是 0x01FF，但 bit8 归 WHEEL_NEGATIVE 所有 —— 取值越过 0xFF 会把方向标志顶开
+        /// （向上变向下）。所以 255 是硬上限：够放两格（240），再多的量由 MapWheel 拆成多次事件。</summary>
+        public const uint WheelRotationMax = 0xFF;
+
+        /// <summary>Windows 标准滚轮单位：1 格（detent）= 120 旋转单位。</summary>
+        public const uint WheelUnitsPerDetent = 120;
     }
 }

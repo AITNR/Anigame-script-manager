@@ -696,18 +696,23 @@ namespace YukinoChan.Views
                 return;
             }
             var delta = e.GetCurrentPoint(this).Properties.MouseWheelDelta;
-            var (flags, encoded) = RdpInputMapper.MapWheel(delta);
-            if (flags == 0)
+            var (flags, units, repeats) = RdpInputMapper.MapWheel(delta);
+            if (flags == 0 || repeats <= 0)
             {
                 return;
             }
             var pt = e.GetCurrentPoint(this);
             var (x, y) = RdpInputMapper.MapPointerToRemote(
                 pt.Position.X, pt.Position.Y, ActualWidth, ActualHeight, _remoteWidth, _remoteHeight);
-            // 格数直接叠在 bit0-8（WheelRotationMask），**不能左移**：
+            // units 是**旋转单位**（1 格 = 120），直接叠在 bit0-8（WheelRotationMask），**不能左移**：
             // bit8=WHEEL_NEGATIVE、bit9=WHEEL，移上去会把方向标志本身改写，
             // 向上/向下会编码成同一个值（表现为两个方向滚出一样的效果）。
-            client.SendMouse(flags | encoded, x, y);
+            // 也不能发格数：服务器按 120 单位/格解释，发 1 格(=1单位)只会滚 1/120 的距离。
+            var wire = flags | units;
+            for (var i = 0; i < repeats; i++)
+            {
+                client.SendMouse(wire, x, y);
+            }
             e.Handled = true;
         }
 
