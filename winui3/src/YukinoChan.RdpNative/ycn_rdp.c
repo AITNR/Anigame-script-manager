@@ -484,8 +484,12 @@ static UINT ycn_gfx_end_frame(RdpgfxClientContext* ctx, const RDPGFX_END_FRAME_P
  *
  * 现场证据（2026-10-05 09:30，Application 事件 Id=1000）：
  *   出错模块 ycn_rdp.DLL / 异常 0xC0000005 / 偏移 0x2be5
- *   崩在 ycn_collect_rdpsnd_plugins 开头（.pdata 函数 #64，RVA 0x3baf..0x3f91）
- * 触发路径：开始执行 → 两条内嵌通道连上（**音频开着**）→ rdpsnd 扫描读通道名 → 越界。
+ * ⚠️ 纠错（2026-10-07 晚）：早先这里写的是「崩在 ycn_collect_rdpsnd_plugins 开头
+ *   （.pdata 函数 #64，RVA 0x3baf..0x3f91）」——**错的**，那是把一个 funclet 的
+ *   .pdata 区间当成了真函数入口。真实崩点是 ycn_probe_rdpsnd_device（旧版无 __try），
+ *   由 ycn_rdp_set_muted 在 UI 线程调用；同一个偏移 0x2be5 在 10-06 20:52 /
+ *   10-07 07:42 / 10-07 08:01 又复现三次，全部是同一个 use-after-free。
+ *   本函数的 SEH 仍然保留（读不可读页确实该兜住），但它**不是**那三次崩溃的止血点。
  *
  * 所以这里用 SEH 包住：读不到就当"没名字"，绝不让诊断代码把进程带崩。
  * 返回 1 = 读到了（含空串）；返回 0 = 读不了。 */
@@ -549,16 +553,28 @@ static int ycn_read_channel_name(const uint8_t* od, char* out, size_t out_size)
  * 结论早已写进 ycn_collect_rdpsnd_plugins 的文件注释（两个实例，DVC 那份在 drdynvc 链上），
  * 诊断使命完成。
  *
- * 为什么必须**删掉**而不是「加个 SEH 让它别崩」：
- *   ① 2026-10-07 07:42 的原生崩溃（ycn_rdp.DLL 0xC0000005 @偏移 0x2be5，
- *      .pdata 函数 #64）就发生在这个函数里 —— 它在热路径上每连接必跑一次。
- *   ② 它按 FreeRDP 3.32.0 私有结构的硬编码偏移解裸指针，
+ * 删除理由（与崩点归属无关，别把两件事混为一谈）：
+ *   ① 它按 FreeRDP 3.32.0 私有结构的硬编码偏移解裸指针，
  *      一旦升级 FreeRDP（偏移变了）就是一个必然崩的地雷，而它的价值已经是零。
- *   ③ 更贵的代价是**认知负债**：留在生产路径上，几个月后没人记得它是干什么的，
+ *   ② 更贵的代价是**认知负债**：留在生产路径上，几个月后没人记得它是干什么的，
  *      也不会有人想到去修它的偏移。
+ *   ③ 它在热路径上每连接必跑一次，却只为了打印调试串。
  *
  * 🔑 由此定下的纪律：查完的诊断代码要删掉，不能只加护栏就长期留着。
- *    真需要留参考，就把结论写进注释（已做），别留可执行代码。 */
+ *    真需要留参考，就把结论写进注释（已做），别留可执行代码。
+ *
+ * ⚠️ 纠错（2026-10-07 晚，推翻了本注释早先的错误版本）：
+ *    2026-10-07 07:42/08:01 的原生崩溃（ycn_rdp.DLL 0xC0000005 @ 偏移 0x2be5）
+ *    **不在**本函数里，而在 ycn_probe_rdpsnd_device（旧版无 __try）。
+ *    证据（对崩溃时那份 PE=0x6AC2203E 的 DLL 做的静态判定）：
+ *      - 崩点所在 .pdata 区间 0x2bc0..0x2c25（101 字节）是**单一完整函数**，
+ *        首条 `mov [rsp+0x20],rbx` 有序言特征，且只引用 GetModuleHandleExW
+ *        (IAT slot 0x60b8) 与 __ImageBase —— 与 probe 的源码逐条对得上。
+ *      - 本函数的两个独有字符串指纹 `ch[%d] name='%s' lpUserParam=%p`(0x6470) 与
+ *        `mute-snap#%ld...`(0x6650) 分别只在 0x45f3 / 0x46c5 被引用，
+ *        与崩点相距 0x1a00 以上，崩点函数**根本不碰**它们。
+ *    早先误判的根源：把一个**funclet** 的 .pdata 区间当成了真函数入口，
+ *    于是落到了隔壁的诊断函数上。教训见 MEMORY.md「崩溃偏移定位」节。 */
 
 
 /* 按 device 指针反查所属会话与槽位（表很小，线性扫足够）。
@@ -589,6 +605,12 @@ static YcnSession* ycn_session_of_device(void* device, int* slot)
 		}
 	}
 	LeaveCriticalSection(&g_lock);
+	/* ⚠️ 本函数**只**用 g_lock 做查找，返回后在锁外读 s->rdpsnd_orig_*[slot]。
+	 * 这在当前架构下是安全的：调用方是 FreeRDP 的 rdpsnd 回调（Play/SetVolume），
+	 * 跑在**同一个 RDP 线程**上，与 ycn_rdp_disconnect 的 freerdp_context_free 串行，
+	 * 不存在 free 与解引用交错的窗口。
+	 * ⚠️ 但若将来把钩子挪到别的线程（跨线程回调），这里必须改成把 orig 函数指针
+	 *   一起在锁内拷出来返回，**不能**返回 s 让调用方在锁外读槽位。 */
 	return s;
 }
 
@@ -937,7 +959,13 @@ static rdpsndDevicePlugin* ycn_probe_rdpsnd_device(void* plugin)
 	return dev;
 }
 
-/* 把候选 plugin 收进空闲槽位（已在槽里的跳过）。返回是否新收。 */
+/* 把候选 plugin 收进空闲槽位（已在槽里的跳过）。返回是否新收。
+ *
+ * ⚠️ 契约：**调用方必须已持有 g_lock**（唯一调用链是
+ *    ycn_rdpsnd_hook → ycn_collect_rdpsnd_plugins → 本函数）。
+ *    本函数写 rdpsnd_plugin[]/ rdpsnd_device[] / rdpsnd_orig_*[]，
+ *    这些数组的读侧（set_muted / disconnect 的 free+清槽）都在 g_lock 下，
+ *    写侧也必须在同一把锁里，否则又回到 use-after-free。 */
 static int ycn_add_slot(YcnSession* s, void* plugin, const char* tag_name)
 {
 	int k;
@@ -1282,6 +1310,22 @@ static int ycn_rdpsnd_hook(YcnSession* s)
 	if (!s)
 		return 0;
 
+	/* 🔑 本函数是**槽位数组（rdpsnd_plugin / rdpsnd_device / rdpsnd_orig_*）的唯一写入侧**，
+	 * 必须与读侧（ycn_rdp_set_muted、ycn_rdpsnd_disconnect 的 free+清槽）共用 g_lock。
+	 *
+	 * 修复前：写侧完全不持锁 + 读侧把 device 缓存到锁外再用 =
+	 *         经典的 use-after-free（10-06 20:52 / 10-07 07:42 / 10-07 08:01 三次
+	 *         ycn_rdp.DLL 0xC0000005 @0x2be5，fault addr=0x0）。
+	 *
+	 * 为什么这样加锁不会死锁：
+	 *   两个调用点（ycn_rdpsnd_attach 的通道事件、event_loop 的 500ms 一拍）
+	 *   都在 **RDP 线程**上，且进入本函数前都不持 g_lock。
+	 *   本函数内部调的 collect / add_slot / hook_slot 都**不再单独加锁**，
+	 *   靠这里一把锁全覆盖（Windows CRITICAL_SECTION 可重入，
+	 *   即便下面某个子函数以后自己加了锁也不会自锁死）。
+	 *   锁内不做耗时操作：只读几个偏移 + 装函数指针。 */
+	EnterCriticalSection(&g_lock);
+
 	/* 每拍重扫一次槽位（plugin/device 都可能出现/更换；数量很少，开销可忽略） */
 	tick = InterlockedIncrement(&s->mute_dbg_tick);
 	ycn_collect_rdpsnd_plugins(s, tick <= 5);
@@ -1290,13 +1334,16 @@ static int ycn_rdpsnd_hook(YcnSession* s)
 	 *
 	 * 它是查「rdpsnd 到底有几个插件实例」时加的一次性诊断，结论早已写进代码注释
 	 * （rdpsnd 有两个实例，DVC 那份在 drdynvc 链上，见 ycn_collect_rdpsnd_plugins）。
-	 * 留着却要付出**每连接必崩的代价**：那个函数按硬编码偏移去解裸指针，
-	 * 2026-10-07 07:42 就崩在这里（ycn_rdp.DLL 0xC0000005 偏移 0x2be5，函数 #64）。
 	 *
-	 * 🔑 结论：查完的诊断代码要**删掉**，不能只「加个 SEH 让它别崩」——
-	 * 一次性的探针留在生产路径上，几个月后就会变成没人记得用途的地雷。
-	 * `ycn_dump_all_channels` 这个函数本身已整段删除，只把它查到的结论
-	 * 留在了 ycn_collect_rdpsnd_plugins 的注释里。 */
+	 * 🔑 纪律：查完的诊断代码要**删掉**，不能只「加个 SEH 让它别崩」——
+	 *    一次性的探针留在生产路径上，几个月后就会变成没人记得用途的地雷。
+	 *    `ycn_dump_all_channels` 这个函数本身已整段删除，只把它查到的结论
+	 *    留在了 ycn_collect_rdpsnd_plugins 的注释里。
+	 *
+	 * ⚠️ 纠错（2026-10-07 晚）：早先这里写的是「2026-10-07 07:42 就崩在这里」——**错的**。
+	 *    崩点（ycn_rdp.DLL 0xC0000005 @ 0x2be5）在 ycn_probe_rdpsnd_device，
+	 *    由 ycn_rdp_set_muted 调用，与本诊断函数无关。判定证据见上面
+	 *    [已删除] ycn_dump_all_channels 那段注释末尾的「纠错」小节。 */
 
 	for (k = 0; k < s->rdpsnd_slot_count; k++)
 	{
@@ -1314,6 +1361,12 @@ static int ycn_rdpsnd_hook(YcnSession* s)
 		 * 而 plugin/device 在 rdpsnd Close 时会被 Free。槽位缓存的寿命比 plugin 的寿命长，
 		 * 于是「上一拍还好好的 plugin，这一拍已经躺在已释放的堆上」—— 正是
 		 * 2026-10-07 07:42 那种多通道并发 connect/disconnect 时的写照。
+		 *
+		 * ⚠️ 但要分清主次：**这族SEH 只挡住"读已释放内存"这一个动作，
+		 *   并没有解决"槽位缓存的寿命比 plugin 长"这个根因**。
+		 *   根因是槽位数组的读写两侧没共用 g_lock（写侧完全不持锁 + 读侧锁外用缓存指针），
+		 *   已在 ycn_rdpsnd_hook（写侧加锁）与 ycn_rdp_set_muted（读侧锁内用）两处修掉。
+		 *   两处都要改：只加 SEH 会让崩溃变成"读到垃圾但不崩"，属于更坏的静默失败。
 		 *
 		 * 教训（比"记得加 SEH"更可执行的一条）：
 		 * 🔑 **加护栏要按"解引用动作"逐条清点，不是按"我这次改的是哪个函数"**。
@@ -1360,6 +1413,7 @@ static int ycn_rdpsnd_hook(YcnSession* s)
 			}
 		}
 	}
+	LeaveCriticalSection(&g_lock);
 	return hooked;
 }
 
@@ -2326,18 +2380,24 @@ YCN_API int ycn_rdp_send_keyboard_sync(int session, uint32_t flags)
  * 这里只改标志 + 立刻推一次让当前音量即时生效。
  *
  * ⚠️ 线程安全：本函数从 **UI 线程**调用，而钩子/RDP 结构归 **RDP 线程**（event_loop）所有。
- * 所以这里**绝不**改 `device->SetVolume`（那是 event_loop 的活，避免数据竞争）；
- * 只做两件跨线程安全的事：
+ * 所以这里**绝不**改 `device->SetVolume` 字段本身（那是 event_loop 的活，避免数据竞争）；
+ * 只做两件事：
  *   ① 原子写 `s->muted`（钩子按它决定是否压 0）；
- *   ② 用记录的**原函数指针**直接推一次目标音量（就是 waveOutSetVolume，任何线程可调）。
- * 钩子的装卸交给 event_loop（500ms 一拍 + 通道事件）。
+ *   ② 在 **g_lock 内**用记录的**原函数指针**推一次目标音量。
+ *
+ * 🔑 为什么第② 步必须在锁内（2026-10-07 三次 0xC0000005 的根因）：
+ *   `orig_setVolume` 是 waveOutSetVolume 家族，**函数本身**确实可跨线程调用；
+ *   但它的**实参 device 会被FreeRDP 在 disconnect 时 free 掉**。
+ *   「函数可调用」≠「指向的对象还活着」—— 把 device 指针缓存到锁外再用就是 use-after-free。
+ *   而 disconnect 的 free 是在**持有同一把 g_lock** 时做的，所以锁内调用才真正互斥。
+ *   （详见下面推音量循环处的完整注释。）
+ *
+ * 钩子的装卸交给 event_loop（500ms 一拍 + 通道事件），与本函数共用 g_lock 互斥。
  * rdpsnd 尚未连上/钩子还没装时静默成功（装好后由 event_loop / 下次调用补上）。
  * muted 非 0 = 静音。 */
 YCN_API int ycn_rdp_set_muted(int session, int muted)
 {
 	YcnSession* s;
-	void* orig[YCN_RDPSND_SLOTS];
-	void* device[YCN_RDPSND_SLOTS];
 	int n = 0, k;
 
 	EnterCriticalSection(&g_lock);
@@ -2348,29 +2408,47 @@ YCN_API int ycn_rdp_set_muted(int session, int muted)
 		return YCN_ERR_SESSION_NOT_FOUND;
 	}
 	InterlockedExchange(&s->muted, muted ? 1 : 0);
-	/* 锁内重新从 plugin 取当前 device（比缓存的新鲜；plugin 为 NULL 则跳过）。
-	 * 仍不能完全消除与 RDP 线程的竞争，但这是"副闸"，拿不准就不推 —— 主闸是 Play 钩子。 */
+
+	/* 🔑 推音量**必须在锁内**完成，且必须当场调 orig，不能把 device 指针缓存到锁外再用。
+	 *
+	 * 旧写法（2026-10-07 崩在这）：
+	 *     EnterCriticalSection; probe(plugin[k]) -> device[k]; 拷贝到局部数组;
+	 *     LeaveCriticalSection;
+	 *     for (k) orig[k](device[k], vol);          <-- 锁外解引用
+	 * 而 ycn_rdp_disconnect 是在**持有同一把 g_lock** 时
+	 * freerdp_context_free() 释放 rdpsnd 的 device，再清 rdpsnd_plugin[]/orig[]。
+	 * 两个窗口一叠加就是 use-after-free：
+	 *     UI 线程 probe 拿到 device（当时有效）→ 放锁
+	 *     RDP 线程 disconnect 持锁 free 掉 device、把所有槽清成 NULL
+	 *     UI 线程拿**已释放**的 device 调 orig_set_volume → 0xC0000005
+	 * 这正是 10-06 20:52 / 10-07 07:42 / 10-07 08:01 三次崩溃同一条偏移 0x2be5
+	 * （fault addr=0x0，说明读到的是释放后的垃圾）的原因。
+	 *
+	 * 为什么原来注释里那句"函数指针任何线程可调"是错的：
+	 *   waveOutSetVolume 本身确实可跨线程，但**实参 device 已被 free**。
+	 *   函数可调用 ≠ 指向的对象还活着 —— 以前把这两件事混成一件了。
+	 *
+	 * 为什么锁内调不会死锁：
+	 *   orig 是 rdpsndDevicePlugin 自己的 SetVolume（waveOutSetVolume 家族），
+	 *   它不回头调本 DLL 的任何导出，也就不碰 g_lock。
+	 *   ⚠️ 若将来换成可能回调进来的实现，就必须改成"代次号 + 事件"方案，不能放锁内。
+	 *
+	 * 双重保险：这里仍套 IFCALLRESULT（真出 AV 时降级为无声，而不是掀进程），
+	 * 因为 device 的有效性最终由FreeRDP 决定，本 DLL 无法从锁上完全保证。 */
 	for (k = 0; k < YCN_RDPSND_SLOTS; k++)
 	{
 		rdpsndDevicePlugin* d = ycn_probe_rdpsnd_device(s->rdpsnd_plugin[k]);
-		orig[k] = s->rdpsnd_orig_set_volume[k];
-		device[k] = (void*)d;
-		if (d && orig[k])
-			n++;
-	}
-	LeaveCriticalSection(&g_lock);
-
-	/* 立刻推一次目标音量，让「正在播的声音」即时停/响。
-	 * 静音 → 0；取消 → 全量 0xFFFFFFFF。*不*动钩子本身。
-	 * ⚠️ 这只是副闸；主闸是 Play 钩子（静音时丢数据），它按 s->muted 自动生效。 */
-	for (k = 0; k < YCN_RDPSND_SLOTS; k++)
-	{
-		if (device[k] && orig[k])
+		void* orig_setvol = s->rdpsnd_orig_set_volume[k];
+		/* 复核：probe 拿到的 d 必须仍是我们已登记 orig 的那一个槽的 device。
+		 * 不一致说明这一拍里 plugin 与 orig 不同步（装/卸钩子途中），跳过而不是硬调。 */
+		if (d && orig_setvol && d == s->rdpsnd_device[k])
 		{
-			(void)IFCALLRESULT(FALSE, ((pcSetVolume)orig[k]), (rdpsndDevicePlugin*)device[k],
+			(void)IFCALLRESULT(FALSE, ((pcSetVolume)orig_setvol), d,
 			                   muted ? 0u : 0xFFFFFFFFu);
+			n++;
 		}
 	}
+	LeaveCriticalSection(&g_lock);
 
 	/* 诊断：把「设了静音后 Play/SetVolume 钩子各被调了多少次」落盘。
 	 * Play 计数不动 = 服务器根本没推音频（或钩子没挂在这条路径上）；
@@ -2379,17 +2457,23 @@ YCN_API int ycn_rdp_set_muted(int session, int muted)
 	{
 		char buf[320];
 		int hooked[YCN_RDPSND_SLOTS];
+		void* dbg_dev[YCN_RDPSND_SLOTS];
+		/* ⚠️ 这段诊断同样必须锁内做：`d->SetVolume` 是解引用 device。
+		 * 早先版本把它放在锁外，与上面同一个 use-after-free 同源（只是崩在不同指令）。 */
+		EnterCriticalSection(&g_lock);
 		for (k = 0; k < YCN_RDPSND_SLOTS; k++)
 		{
-			rdpsndDevicePlugin* d = (rdpsndDevicePlugin*)device[k];
+			rdpsndDevicePlugin* d = (rdpsndDevicePlugin*)s->rdpsnd_device[k];
+			dbg_dev[k] = d;
 			hooked[k] = (d && d->SetVolume == ycn_rdpsnd_set_volume_hook) ? 1 : 0;
 		}
 		_snprintf_s(buf, sizeof(buf), _TRUNCATE,
 		            "mute: set=%d slots=%d dev0=%p dev1=%p hooked0=%d hooked1=%d "
 		            "play_hits=%ld setvol_hits=%ld",
-		            muted, n, device[0], device[1], hooked[0], hooked[1],
+		            muted, n, dbg_dev[0], dbg_dev[1], hooked[0], hooked[1],
 		            (long)InterlockedCompareExchange(&s->mute_play_hits, 0, 0),
 		            (long)InterlockedCompareExchange(&s->mute_setvol_hits, 0, 0));
+		LeaveCriticalSection(&g_lock);
 		ycn_debug_dump_tag(buf);
 	}
 	return YCN_OK;
