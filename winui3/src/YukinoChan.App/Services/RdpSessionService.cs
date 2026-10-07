@@ -1332,8 +1332,10 @@ public static class RdpSessionService
             {
                 // -outputresource:<exe>;#1 —— 覆盖资源 ID 1（应用清单固定就是 1）。
                 // ⚠️ 必须用 ArgumentList：手工拼字符串会被 .NET 再转义一次，
-                //    路径里的反斜杠和分号会把参数拆碎（当年 schtasks 就是这么踩的，
-                //    /TR 收到残缺命令行。见 memory/2026-09-25.md 阶段十五）。
+                //    路径里的反斜杠会把参数拆碎（当年 schtasks 的 /TR 就这么丢过参数，
+                //    见 memory/2026-09-25.md 阶段十五）。
+                //    但注意 ArgumentList **只保证"一个元素 = 一个 argv"**，
+                //    拼错参数形状它救不了 —— 见下面关于 `#1` 的说明。
                 var psi = new ProcessStartInfo(mt)
                 {
                     UseShellExecute = false,
@@ -1344,8 +1346,26 @@ public static class RdpSessionService
 
                 psi.ArgumentList.Add("-manifest");
                 psi.ArgumentList.Add(manifestPath);
-                psi.ArgumentList.Add($"-outputresource:{exe}");
-                psi.ArgumentList.Add("#1");
+                // 🔑🔑 `-outputresource:<exe>;#1` 必须作为**一个**参数传给 mt.exe。
+                //
+                // 错在哪：早先写成两个参数
+                //     ArgumentList.Add($"-outputresource:{exe}");
+                //     ArgumentList.Add("#1");            // <-- 独立参数
+                // mt.exe 于是把 `#1` 当成未知选项：
+                //     mt.exe : command line error c1010007: Unexpected/Unknown option "#1".
+                // 退出码 31，整个代理部署被中止（"为避免部署出起不来的代理，本次部署已中止"）。
+                //
+                // ⚠️ `ArgumentList` 只保证"每个元素作为一个参数传给子进程"，
+                //   **不保证 mt.exe 自己会把它当一个选项值** —— 拼错的是参数本身的形状，
+                //   不是转义问题。所以"用 ArgumentList 就不会再拆参数"这个说法只对了一半：
+                //   它解决的是 .NET 二次转义（路径里的反斜杠/分号），解决不了语义拼写。
+                //
+                // ✅ 实测（2026-10-07，440320 字节的 Release 产物，本机 mt.exe 10.0.26100.0）：
+                //     写法 A（分开）：exit=31，c1010007，manifest 未改写
+                //     写法 B（合并）：exit=0，回读 -inputresource 得 level="asInvoker"
+                //   B 的体积 440320 -> 312320，这是 mt.exe 按默认对齐重写整个 .rsrc 节，
+                //   **不是资源丢失**（见方法头注释）。
+                psi.ArgumentList.Add($"-outputresource:{exe};#1");
 
                 using var process = Process.Start(psi);
                 if (process is null)
