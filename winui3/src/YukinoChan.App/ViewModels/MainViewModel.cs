@@ -1485,7 +1485,33 @@ public sealed class MainViewModel : ObservableObject
 
     // ---------------- 看板娘状态机 ----------------
 
+    /// <summary>
+    /// 切换看板娘状态。
+    ///
+    /// 🔑 **必须同步切回 UI 线程**（2026-10-07 崩在这条链上）。
+    /// 它会写 <c>MascotState</c>（面板有 <c>x:Bind</c>）、<c>LoadMascotImage</c>、
+    /// <c>SetBubble</c>，全是 WinRT 对象，只能在 UI 线程碰。
+    /// 调用点包含 <c>WaitForChannelReadyAsync</c> 里 <c>await Task.Run(...)</c> 之后那几行，
+    /// 那时已经在线程池上了。
+    ///
+    /// 为什么用「阻塞等待」而不是像 <see cref="MirrorSessionIfActive"/> 那样只投递：
+    /// 这个方法自带状态机（错误锁计数 / 冷却窗口 / force 清零），
+    /// 异步化会让「判断状态 → 改状态」两半落在不同线程上交错，冷却逻辑直接失效。
+    /// 它是短操作（贴图 + 一次属性通知），阻塞 UI 线程几十微秒换取状态机正确是划算的。
+    /// </summary>
     public void SetMascotState(string state, bool force = false, string errorReason = "")
+    {
+        if (_dispatcher.HasThreadAccess)
+        {
+            SetMascotStateOnUi(state, force, errorReason);
+            return;
+        }
+
+        RunOnUiThreadSync(() => SetMascotStateOnUi(state, force, errorReason));
+    }
+
+    /// <summary>在 UI 线程上执行 <see cref="SetMascotState"/> 的真正逻辑（调用方保证已在 UI 线程）。</summary>
+    private void SetMascotStateOnUi(string state, bool force, string errorReason)
     {
         if (state is not (MascotStates.Idle or MascotStates.Work or MascotStates.Rest or MascotStates.Error))
         {
@@ -1817,6 +1843,59 @@ public sealed class MainViewModel : ObservableObject
         }
 
         return tcs.Task;
+    }
+
+    /// <summary>
+    /// 在 UI 线程上**同步**执行 <paramref name="action"/>，并把异常搬回调用线程。
+    ///
+    /// 🔑 与 <see cref="RunOnUiThreadAsync"/> 的分工（别混用）：
+    /// <list type="bullet">
+    /// <item>需要「改完再按结果继续」→ 用本方法（如 <see cref="SetMascotState"/>：
+    /// 它有状态机，异步化会让判断与赋值在两个线程上交错）。</item>
+    /// <item>只是「把值刷到界面」，晚一帧无所谓 → 用 <c>TryEnqueue</c> 投递即可
+    /// （如 <see cref="MirrorSessionIfActive"/>），绝不阻塞。</item>
+    /// </list>
+    ///
+    /// ⚠️ 绝不能在 UI 线程上同步等一个还没排到队里的任务（自己等自己 = 死锁），
+    /// 所以本方法只在**非 UI 线程**时才会阻塞；已在 UI 线程就直接执行。
+    /// </summary>
+    private void RunOnUiThreadSync(Action action)
+    {
+        if (_dispatcher.HasThreadAccess)
+        {
+            action();
+            return;
+        }
+
+        using var done = new ManualResetEventSlim(false);
+        Exception? failure = null;
+
+        if (!_dispatcher.TryEnqueue(() =>
+            {
+                try
+                {
+                    action();
+                }
+                catch (Exception ex)
+                {
+                    failure = ex;
+                }
+                finally
+                {
+                    // 必须在 try/finally 里放行：action 抛异常时也要唤醒等待方，否则调用线程死等。
+                    done.Set();
+                }
+            }))
+        {
+            throw new InvalidOperationException("UI 线程队列已关闭，无法继续更新界面状态。");
+        }
+
+        done.Wait();
+
+        if (failure is not null)
+        {
+            throw failure;
+        }
     }
 
     // ==================================================================
@@ -4227,12 +4306,45 @@ public sealed class MainViewModel : ObservableObject
         return session;
     }
 
-    /// <summary>把某条通道的状态镜像到界面（仅当它正在被展示）。</summary>
+    /// <summary>
+    /// 把某条通道的状态镜像到界面（仅当它正在被展示）。
+    ///
+    /// 🔑 **收口在方法自己身上，不要指望调用方在 UI 线程**（2026-10-07 崩在这）。
+    ///
+    /// 现场栈（repo/logs/crash.log，17:21:17）：
+    ///   RunChannelsAsync → RunChannelAsync → WaitForChannelReadyAsync
+    ///   → MirrorSessionIfActive → MirrorActiveSession → RaisePanelChanged
+    ///   → OnPropertyChanged → MascotPanel.g.cs set_Text
+    ///   → COMException 0x8001010E (RPC_E_WRONG_THREAD)，随后原生 AV 掀进程。
+    ///
+    /// 原因：<c>WaitForChannelReadyAsync</c> 里两处 <c>await Task.Run(...)</c>
+    /// （等会话建立、等代理上线）都是**同步阻塞**的等待，续体落在线程池上；
+    /// 后面紧跟的 <c>MirrorSessionIfActive</c> / <c>IsRdpBusy</c> / <c>SetMascotState</c>
+    /// 全都会触发 <c>x:Bind</c> 重新求值 → <c>TextBlock.set_Text</c>，
+    /// 而 WinRT 对象只能在它所属的 UI 线程上碰。
+    ///
+    /// 为什么之前没炸：早先只有单通道，镜像发生在 <c>await</c> 之前；
+    /// 改成多通道并行（<c>RunChannelsAsync</c>）后等待被包进了 async 方法，线程就变了。
+    /// 所以**这不是"某处写漏了"，是所有 await Task.Run 之后的绑定刷新都得收口**。
+    /// </summary>
     private void MirrorSessionIfActive(RdpChannelSession session)
     {
-        if (ReferenceEquals(_activeSession, session))
+        if (!ReferenceEquals(_activeSession, session))
+        {
+            return;
+        }
+
+        if (_dispatcher.HasThreadAccess)
         {
             MirrorActiveSession();
+            return;
+        }
+
+        // 非 UI 线程：只投递，不在这里等结果（调用点多在状态机里，阻塞会互相等死）。
+        // 镜像只是"把当前值刷到界面"，晚一帧无所谓；真出错也不该炸掉状态机本身。
+        if (!_dispatcher.TryEnqueue(MirrorActiveSession))
+        {
+            AppendLog("[界面] 界面线程队列已关闭，本次状态镜像被丢弃（通常正在关窗口）。");
         }
     }
 
