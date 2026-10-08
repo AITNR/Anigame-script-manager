@@ -6,15 +6,13 @@
     xmlns:models="using:YukinoChan.Models">
 
     <!-- 横向必须 Stretch：ScrollViewer 默认不给内容无限宽，StackPanel 若再带
-         HorizontalAlignment="Left" 就会按内容期望宽度收缩，卡片宽度不随窗口变。
-         MaxWidth 只在窗口特别宽时兜底（被 MaxWidth 夹住时对齐退化为居中）。 -->
+         HorizontalAlignment="Left" 就会按内容期望宽度收缩，卡片宽度不随窗口变。 -->
     <ScrollViewer Padding="16,12"
                   HorizontalScrollBarVisibility="Disabled"
                   HorizontalScrollMode="Disabled"
                   HorizontalContentAlignment="Stretch"
                   VerticalScrollBarVisibility="Auto">
         <StackPanel Spacing="12"
-                    MaxWidth="860"
                     HorizontalAlignment="Stretch">
 
             <TextBlock Text="全局设置" Style="{StaticResource SubtitleTextBlockStyle}" />
