@@ -152,7 +152,14 @@ def _verify(app_dir: Path, *, require_dotnet_runtime: bool) -> None:
     need("YukinoChan.runtimeconfig.json", ".NET 运行时配置")
     need("ycn_rdp.dll", "内嵌 RDP 原生层")
     need("freerdp3.dll", "FreeRDP 运行库")
+    need("freerdp-client3.dll", "FreeRDP 客户端运行库")
     need("winpr3.dll", "WinPR 运行库")
+    # FreeRDP 是动态链接的：少了下面这几个，ycn_rdp.dll 会在「开始执行」时
+    # 抛 DllNotFoundException 直接卡死（2026-10-09 复现过）。打包自检挡在发布前。
+    need("z.dll", "zlib（FreeRDP 依赖）")
+    need("cjson.dll", "cJSON（FreeRDP 依赖）")
+    need("libssl-3-x64.dll", "OpenSSL libssl（FreeRDP 依赖）")
+    need("libcrypto-3-x64.dll", "OpenSSL libcrypto（FreeRDP 依赖）")
     need("assets/mascot", "看板娘素材（也是程序根目录的定位标记）")
 
     xbf = list(app_dir.glob("Views/*.xbf"))

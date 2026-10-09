@@ -50,6 +50,26 @@ target_link_libraries(ycn_rdp PRIVATE
   ws2_32.lib)
 
 # 运行时 DLL 拷到输出目录（freerdp3/winpr3/openssl/zlib/cjson…）
+# ⚠️ 只拷 freerdp3 / winpr3 / freerdp-client3 是不够的：它们是**动态链接**的，
+#    还依赖同目录下的 z.dll、cjson.dll、libssl-3-x64.dll、libcrypto-3-x64.dll。
+#    2026-10-09：本机 -DVCPKG_INST 指向的 SDK bin 里只有那三个 DLL，copy_directory
+#    照抄了这份不完整集合，于是运行/发布目录缺依赖 → ycn_rdp.dll 加载即
+#    DllNotFoundException，点「开始执行」直接卡死。
+#    所以拷完必须显式校验依赖齐全，缺一个就让构建失败 —— 绝不静默产出会崩的包。
+set(YCN_RUNTIME_DLLS
+  ycn_rdp.dll
+  freerdp3.dll
+  freerdp-client3.dll
+  winpr3.dll
+  z.dll
+  cjson.dll
+  libssl-3-x64.dll
+  libcrypto-3-x64.dll)
+
 add_custom_command(TARGET ycn_rdp POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E echo "Deploying FreeRDP runtime DLLs <- ${VCPKG_INST}/bin"
-  COMMAND ${CMAKE_COMMAND} -E copy_directory "${VCPKG_INST}/bin" "$<TARGET_FILE_DIR:ycn_rdp>")
+  COMMAND ${CMAKE_COMMAND} -E copy_directory "${VCPKG_INST}/bin" "$<TARGET_FILE_DIR:ycn_rdp>"
+  COMMAND ${CMAKE_COMMAND}
+          "-DYCN_OUT_DIR=$<TARGET_FILE_DIR:ycn_rdp>"
+          "-DYCN_RUNTIME_DLLS=${YCN_RUNTIME_DLLS}"
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/verify_runtime_dlls.cmake")
