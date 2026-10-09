@@ -233,14 +233,6 @@
                              Title="检查结果"
                              Message="{x:Bind VM.ChannelReadinessText, Mode=OneWay}" />
 
-                    <!-- 同主机多通道提示（D5：只提示不禁用）。
-                         Windows 客户端版同时只允许一个交互式会话，同一台机器上的两条通道会互相接管桌面。 -->
-                    <InfoBar IsOpen="{x:Bind VM.HasSameHostHint, Mode=OneWay}"
-                             IsClosable="False"
-                             Severity="Warning"
-                             Title="同一主机有多条通道"
-                             Message="{x:Bind VM.ChannelSameHostHint, Mode=OneWay}" />
-
                     <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="120" />

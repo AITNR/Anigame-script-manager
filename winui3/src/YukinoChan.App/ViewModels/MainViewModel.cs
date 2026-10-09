@@ -2117,7 +2117,6 @@ public sealed class MainViewModel : ObservableObject
     private RdpChannel? _selectedChannel;
     private string _channelReadinessText = string.Empty;
     private string _channelSessionSummary = string.Empty;
-    private string _channelSameHostHint = string.Empty;
     private string _channelAgentStatusText = string.Empty;
     private string _channelCredentialText = string.Empty;
 
@@ -2162,27 +2161,6 @@ public sealed class MainViewModel : ObservableObject
         private set => SetProperty(ref _channelSessionSummary, value);
     }
 
-    /// <summary>
-    /// 同主机多通道提示（空 = 没有冲突）。
-    ///
-    /// Windows 客户端版同时只允许一个交互式会话（计划书 §3.3 / D5）：
-    /// 同一台机器上配多条通道，它们会互相接管同一块桌面 —— 后连的把先连的顶掉。
-    /// 按 D5 的决定**只提示不限制**（不禁用、不排队），所以这里只是把事实说清楚。
-    /// </summary>
-    public string ChannelSameHostHint
-    {
-        get => _channelSameHostHint;
-        private set
-        {
-            if (SetProperty(ref _channelSameHostHint, value))
-            {
-                OnPropertyChanged(nameof(HasSameHostHint));
-            }
-        }
-    }
-
-    /// <summary>有没有同主机冲突（XAML 里直接绑 InfoBar 的 IsOpen）。</summary>
-    public bool HasSameHostHint => _channelSameHostHint.Length > 0;
 
     /// <summary>该通道的代理状态（「已部署/在线」两件事分开说，与全局页口径一致）。</summary>
     public string ChannelAgentStatusText
@@ -2282,13 +2260,9 @@ public sealed class MainViewModel : ObservableObject
             ChannelSessionSummary = "－";
             ChannelAgentStatusText = "－";
             ChannelCredentialText = "－";
-            ChannelSameHostHint = string.Empty;
             OnPropertyChanged(nameof(ChannelBridgeDir));
             return;
         }
-
-        // 同主机多通道提示（D5：只提示不禁用）
-        ChannelSameHostHint = DescribeSameHostConflict(channel);
 
         // 桥目录可能刚被改过，检查前确保它存在（目录按目标账户派生）
         RdpBridge.For(RdpChannelPaths.Resolve(channel.BridgePath, channel.User)).EnsureDirectory();
@@ -2327,39 +2301,6 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(ChannelResolutionKey));
         OnPropertyChanged(nameof(ChannelResolutionLabel));
         OnPropertyChanged(nameof(ChannelBridgeDir));
-    }
-
-    /// <summary>
-    /// 同主机冲突提示：找出配置里与当前通道指向同一台主机的其它**启用**通道。
-    ///
-    /// 按计划书 §3.3 / D5：只提示、不限制（不禁止并行、也不排队）——
-    /// 但要如实告诉用户「Windows 客户端版同时只允许一个交互式会话」，
-    /// 所以这两条通道会互相接管同一块桌面，任务挤在一个会话里跑。
-    /// 按 id 比对（不是引用）：配置对象在 ReloadChannels 里会整体重建。
-    /// </summary>
-    private string DescribeSameHostConflict(RdpChannel channel)
-    {
-        var host = RdpTargets.Normalize(channel.Host);
-        if (host.Length == 0)
-        {
-            return string.Empty;
-        }
-
-        var sameHost = Config.Rdp.Channels
-            .Where(c => !string.Equals(c.Id, channel.Id, StringComparison.OrdinalIgnoreCase)
-                        && c.Enabled
-                        && string.Equals(RdpTargets.Normalize(c.Host), host, StringComparison.OrdinalIgnoreCase))
-            .Select(c => c.DisplayName)
-            .ToList();
-
-        if (sameHost.Count == 0)
-        {
-            return string.Empty;
-        }
-
-        return $"通道「{string.Join("」「", sameHost)}」与当前通道指向同一台机器（{host}）。" +
-               "Windows 客户端版同时只允许一个交互式会话 —— 后连的通道会接管先连的那块桌面，" +
-               "两条通道的任务会挤在同一个会话里。想真正并行，请让它们连不同的机器。";
     }
 
     public ICommand AddChannelCommand => _addChannelCommand ??= new RelayCommand(AddChannel);
