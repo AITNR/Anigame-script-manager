@@ -30,6 +30,8 @@ public sealed class RdpChannel : ObservableObject, ICloneable
     private int _desktopWidth;
     private int _desktopHeight;
     private bool _enabled = true;
+    private bool _localMuted;
+    private bool _inputLocked;
 
     /// <summary>生成一个通道 id（8 位十六进制，够用且不啰嗦）。</summary>
     public static string NewId() => Guid.NewGuid().ToString("N")[..8];
@@ -144,6 +146,29 @@ public sealed class RdpChannel : ObservableObject, ICloneable
     {
         get => _desktopHeight;
         set => SetProperty(ref _desktopHeight, RdpResolutions.Normalize(value, RdpResolutions.MinHeight, RdpResolutions.MaxHeight));
+    }
+
+    /// <summary>
+    /// 上次在这条通道画面上选择的「本机静音」。
+    /// 断开 / 重启后仍保留，下一次连接建立时自动恢复；只影响主控端本机播放，
+    /// 不会关闭远端会话的音频输出。
+    /// </summary>
+    [JsonPropertyName("local_muted")]
+    public bool LocalMuted
+    {
+        get => _localMuted;
+        set => SetProperty(ref _localMuted, value);
+    }
+
+    /// <summary>
+    /// 上次在这条通道画面上选择的「锁定输入」。
+    /// 断开 / 重启后仍保留，下一次连接建立时自动恢复。
+    /// </summary>
+    [JsonPropertyName("input_locked")]
+    public bool InputLocked
+    {
+        get => _inputLocked;
+        set => SetProperty(ref _inputLocked, value);
     }
 
     /// <summary>停用后该通道的任务不会被下发（开始执行时归入"未启动"并给出原因）。</summary>

@@ -3016,11 +3016,13 @@ public sealed class MainViewModel : ObservableObject
     /// 没有内嵌连接时恒为 false —— 没画面就没得锁。
     /// </summary>
     public bool IsSurfaceInputLocked(string? channelId)
-        => _embeds.TryGetValue(channelId ?? string.Empty, out var conn) && conn.InputLocked;
+        => (_embeds.TryGetValue(channelId ?? string.Empty, out var conn) && conn.InputLocked)
+           || SurfaceChannelPreference(channelId)?.InputLocked == true;
 
     /// <summary>这条通道的内嵌画面是否被本机静音（远端仍在出声，只是本机不放）。</summary>
     public bool IsSurfaceMuted(string? channelId)
-        => _embeds.TryGetValue(channelId ?? string.Empty, out var conn) && conn.LocalMuted;
+        => (_embeds.TryGetValue(channelId ?? string.Empty, out var conn) && conn.LocalMuted)
+           || SurfaceChannelPreference(channelId)?.LocalMuted == true;
 
     /// <summary>
     /// 设置某条通道画面的「锁定」状态。返回设置后的实际状态；false 表示没有内嵌连接。
@@ -3035,6 +3037,7 @@ public sealed class MainViewModel : ObservableObject
         }
 
         conn.InputLocked = locked;
+        PersistSurfaceToggle(key, channel => channel.InputLocked = locked);
         AppendSurfaceLog(key, locked
             ? "已锁定画面输入：鼠标穿透与键盘映射都停用，点「已锁定」可解锁。"
             : "已解锁画面输入：鼠标与键盘恢复转发。");
@@ -3055,6 +3058,7 @@ public sealed class MainViewModel : ObservableObject
         }
 
         conn.LocalMuted = muted;
+        PersistSurfaceToggle(key, channel => channel.LocalMuted = muted);
         // 原生侧按本会话静音（rdpsnd 音量置 0）：不用断线重连，立即生效
         conn.Client.SetMuted(muted);
         AppendSurfaceLog(key, muted
@@ -3062,6 +3066,49 @@ public sealed class MainViewModel : ObservableObject
             : "已取消静音：恢复在本机播放这条通道的远端声音。");
         SurfaceRefreshRequested?.Invoke();
         return muted;
+    }
+
+    /// <summary>按通道 id 找运行时快照或配置里的通道（找不到返回 null）。</summary>
+    private RdpChannel? SurfaceChannelPreference(string? channelId)
+    {
+        var key = channelId ?? string.Empty;
+        return _sessions.FirstOrDefault(s => s.IsRemote
+                && string.Equals(s.ChannelId, key, StringComparison.OrdinalIgnoreCase))?.Channel
+            ?? Config.Rdp.Channels.FirstOrDefault(c =>
+                string.Equals(c.Id, key, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// 把当前这套运行期配置写回对应通道并立刻落盘。
+    /// 只改动目标通道本身，不触发 <see cref="SaveConfig"/> —— 那个入口会连同界面里
+    /// 尚未点「保存配置」的任务草稿一起写入，静音/锁定这种小开关不该有这种副作用。
+    /// </summary>
+    private void PersistSurfaceToggle(string key, Action<RdpChannel> apply)
+    {
+        // 空 id = 设置页那个不属于任何通道的入口，没有可持久化的归属；
+        // 它仍然在当前会话内即时生效，但不应该借道写到任意默认通道上。
+        if (key.Length == 0)
+        {
+            return;
+        }
+
+        var channel = SurfaceChannelPreference(key);
+        if (channel is null)
+        {
+            return;
+        }
+
+        apply(channel);
+
+        try
+        {
+            _configManager.Save(Config);
+        }
+        catch (Exception ex)
+        {
+            // 开关本身已经生效，不让落盘失败回滚用户刚做的选择；只把问题写进运行日志。
+            AppendSurfaceLog(key, $"保存画面开关失败：{ex.Message}");
+        }
     }
 
     /// <summary>标记 / 撤销「画面已弹出到独立窗口」。</summary>
@@ -3230,6 +3277,13 @@ public sealed class MainViewModel : ObservableObject
         conn.Width = width;
         conn.Height = height;
         conn.UserDisconnect = false; // 主动连接：解除自动重连抑制
+        // 连接实例会换新，但用户选择的静音 / 锁定属于这一条通道：
+        // 从持久配置回填运行态，确保手动重连与掉线自动重连都会恢复上次选择。
+        if (SurfaceChannelPreference(key) is { } preference)
+        {
+            conn.LocalMuted = preference.LocalMuted;
+            conn.InputLocked = preference.InputLocked;
+        }
 
         // 事件处理器闭包捕获 conn 本身 —— 多通道并存时才知道回调属于哪条通道。
         // 引用存在 conn 上，释放时用同一批委托实例解绑。
@@ -3242,6 +3296,12 @@ public sealed class MainViewModel : ObservableObject
         client.Disconnected += conn.OnDisconnected;
         conn.Client = client;
         _embedActiveKey = key;
+        // 静音状态需要在会话建立前就写入原生标志：rdpsnd 可能随后才起 DVC，
+        // 原生钩子会按当前标志接管音量，避免刚连上的一瞬间漏出一帧声音。
+        if (conn.LocalMuted)
+        {
+            client.SetMuted(true);
+        }
         EmbedClientChanged?.Invoke();
 
         var (address, port) = RdpSessionService.SplitHostPort(normalized);
