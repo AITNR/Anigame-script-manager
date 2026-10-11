@@ -113,8 +113,9 @@
     "audio_enabled": true,
     "gfx_enabled": false,
     "connect_timeout_seconds": 120,
-    "notify_on_task_done": true,
-    "notify_on_all_done": true,
+    "notify_on_task_done": true,      // 每个任务完成在主控端发一条
+    "notify_on_channel_done": true,   // 每条通道整条跑完 / 失联时发一条（后加）
+    "notify_on_all_done": true,       // 整轮结束发一条汇总（多块才发）
 
     // ↓ 旧字段保留（迁移源 + 新建通道时的默认值）：target_host / target_user /
     //   bridge_path / credential_saved / session_finish / desktop_width / desktop_height
@@ -374,7 +375,8 @@ public void Start()
   跑过任务后才出现（`VM.HasChannelOverview`），点一行跳到那条通道的画面页。
   数据源是 `VM.ChannelOverview`（`ChannelOverviewItem` 快照集合），页面按 1Hz 重建 ——
   `RdpChannelSession` 的属性不是可观察的，重建快照最省事又足够便宜（最多 8 条）。
-- 通知：**已实现**按通道分别弹「任务完成」；全部结束后**一条汇总**
+- 通知：**已实现**按通道分别弹「任务完成」；每条通道整条跑完再弹一条该通道的收尾通知
+  （`rdp.notify_on_channel_done`）；全部结束后**一条汇总**
   （`RunSummary.Title` + `ComposeHeadline`，正文形如 `共 3 块（本地 1 / 通道 2）：成功 2、异常 1。`）。
   单块（只有本地、或只有一条通道）**不发汇总** —— 与按块反馈完全重复。
 - 看板娘：**取最差**由 `FinalizeRunSummary()` 在**整轮结束**时统一决定 ——

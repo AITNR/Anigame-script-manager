@@ -83,14 +83,25 @@ public static class NotificationService
         }
     }
 
-    /// <summary>任务完成专用通知：标题带序号，正文带耗时。</summary>
-    public static bool ShowTaskDone(string taskName, int index, int total, int elapsedSeconds, bool abnormal)
+    /// <summary>
+    /// 任务完成通知的标题（带序号，形如「任务已完成（2/5）」）。
+    ///
+    /// 单独拆出来是为了让调用方在「窗口没激活、横幅不会显示」时，能把<b>同一份</b>
+    /// 标题与正文原样落进 PendingNotificationStore 等回前台补发 —— 文案只在这里定义一次。
+    /// </summary>
+    public static string TaskDoneTitle(int index, int total, bool abnormal)
     {
         var prefix = abnormal ? "任务异常结束" : "任务已完成";
-        var head = total > 0 && index > 0 ? $"{prefix}（{index}/{total}）" : prefix;
-        var body = $"{taskName}　耗时 {Helpers.FormatHelper.FormatSeconds(elapsedSeconds)}";
-        return Show(head, body);
+        return total > 0 && index > 0 ? $"{prefix}（{index}/{total}）" : prefix;
     }
+
+    /// <summary>任务完成通知的正文（任务名 + 耗时）。与 <see cref="TaskDoneTitle"/> 配套。</summary>
+    public static string TaskDoneBody(string taskName, int elapsedSeconds) =>
+        $"{taskName}　耗时 {Helpers.FormatHelper.FormatSeconds(elapsedSeconds)}";
+
+    /// <summary>任务完成专用通知：标题带序号，正文带耗时。</summary>
+    public static bool ShowTaskDone(string taskName, int index, int total, int elapsedSeconds, bool abnormal) =>
+        Show(TaskDoneTitle(index, total, abnormal), TaskDoneBody(taskName, elapsedSeconds));
 
     public static bool ShowSummary(string title, string body) => Show(title, body);
 

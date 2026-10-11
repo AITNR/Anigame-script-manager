@@ -342,8 +342,9 @@
 - 每条通道按它自己配的「会话处理」方式收尾（保持 / 断开 / 注销）；
 - 整轮全部结束后，日志出现一行 `[汇总] 共 N 块（本地 X / 通道 Y）：成功 …、异常 …。`，
   下面跟逐块明细（**异常块排在最前面**）；
-- 只弹**一条**汇总通知（`rdp.notify_on_all_done`）。单块执行（只有本地，或只有一条通道）不发汇总 ——
-  它和按块通知重复；
+- 通知**只从主控端发**（目标会话里弹的你看不到，代理侧已不再发）：每条通道整条跑完 / 失联时弹一条
+  「雪乃酱：通道「x」任务结束」（`rdp.notify_on_channel_done`），整轮结束时再弹**一条**汇总
+  （`rdp.notify_on_all_done`）。单块执行（只有本地，或只有一条通道）不发汇总 —— 它和按块通知重复；
 - 看板娘在**整轮结束**时才从「工作」变「休息」。某条通道先跑完的那一刻它仍在工作态 —— 那是故意的。
 
 ---
@@ -446,8 +447,9 @@
     "audio_enabled": true,
     "gfx_enabled": false,
     "connect_timeout_seconds": 120,
-    "notify_on_task_done": true,      // 每个任务完成都发通知
-    "notify_on_all_done": true,       // 整轮结束发一条汇总
+    "notify_on_task_done": true,      // 每个任务完成在主控端发一条通知
+    "notify_on_channel_done": true,   // 每条通道整条跑完 / 失联时发一条
+    "notify_on_all_done": true,       // 整轮结束发一条汇总（多块才发）
 
     "channels": [
       {

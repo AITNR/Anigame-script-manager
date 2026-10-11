@@ -460,6 +460,7 @@ public sealed class RdpConfig : ObservableObject, ICloneable
     private string _targetUser = string.Empty;
     private string _sessionFinish = SessionFinishModes.Keep;
     private bool _notifyOnTaskDone = true;
+    private bool _notifyOnChannelDone = true;
     private bool _notifyOnAllDone = true;
     private bool _notifyLocalTaskDone;
     private int _connectTimeoutSeconds = 120;
@@ -540,7 +541,15 @@ public sealed class RdpConfig : ObservableObject, ICloneable
         set => SetProperty(ref _notifyOnTaskDone, value);
     }
 
-    /// <summary>全部任务完成后弹汇总通知。</summary>
+    /// <summary>某条通道（一整条会话通道）跑完后，在主控端弹一条该通道的收尾通知。</summary>
+    [JsonPropertyName("notify_on_channel_done")]
+    public bool NotifyOnChannelDone
+    {
+        get => _notifyOnChannelDone;
+        set => SetProperty(ref _notifyOnChannelDone, value);
+    }
+
+    /// <summary>全部通道都跑完后，在主控端弹一条整轮汇总通知。</summary>
     [JsonPropertyName("notify_on_all_done")]
     public bool NotifyOnAllDone
     {
@@ -715,6 +724,9 @@ public sealed class RdpConfig : ObservableObject, ICloneable
                 case "notifyontaskdone":
                     NotifyOnTaskDone = element.ValueKind == JsonValueKind.True;
                     break;
+                case "notifyonchanneldone":
+                    NotifyOnChannelDone = element.ValueKind == JsonValueKind.True;
+                    break;
                 case "notifyonalldone":
                     NotifyOnAllDone = element.ValueKind == JsonValueKind.True;
                     break;
@@ -779,8 +791,17 @@ public sealed class RdpCommand
     /// <summary>任务全部结束后的会话处理方式，见 <see cref="SessionFinishModes"/>。</summary>
     public string SessionFinish { get; set; } = SessionFinishModes.Keep;
 
-    public bool NotifyOnTaskDone { get; set; } = true;
-    public bool NotifyOnAllDone { get; set; } = true;
+    /// <summary>
+    /// 已废弃：通知一律在主控端发，目标会话里的代理不再弹任何 Toast。
+    ///
+    /// 这两个键保留下来只为<b>让已经部署在目标账户里的旧代理闭嘴</b> —— 旧版代理会读它们
+    /// 并在本会话弹通知，而那种通知在主控端桌面上根本看不见，纯属噪音。主控端现在一律发
+    /// <c>false</c>，于是旧代理装了也不再弹；新版代理里压根没有发通知的代码。
+    /// </summary>
+    public bool NotifyOnTaskDone { get; set; }
+
+    /// <inheritdoc cref="NotifyOnTaskDone"/>
+    public bool NotifyOnAllDone { get; set; }
 }
 
 /// <summary>

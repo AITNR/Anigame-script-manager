@@ -300,15 +300,20 @@
                                SpinButtonPlacementMode="Compact"
                                Value="{x:Bind VM.RdpSettings.ConnectTimeoutSeconds, Mode=TwoWay}" />
 
-                    <ToggleSwitch Header="每完成一个任务都发系统通知"
-                                  IsOn="{x:Bind VM.RdpSettings.NotifyOnTaskDone, Mode=TwoWay}" />
-                    <ToggleSwitch Header="全部任务完成后发汇总通知"
-                                  IsOn="{x:Bind VM.RdpSettings.NotifyOnAllDone, Mode=TwoWay}" />
+                    <ToggleSwitch Header="每完成一个任务都发通知（仅本机主控端）"
+                                  IsOn="{x:Bind VM.RdpSettings.NotifyOnTaskDone, Mode=TwoWay}"
+                                  ToolTipService.ToolTip="每个任务跑完在你正在看的桌面上弹一条「任务已完成（i/n）」。目标会话里不再弹任何通知。" />
+                    <ToggleSwitch Header="每条会话通道跑完都发通知（仅本机主控端）"
+                                  IsOn="{x:Bind VM.RdpSettings.NotifyOnChannelDone, Mode=TwoWay}"
+                                  ToolTipService.ToolTip="某条通道整条跑完（含失联）时弹一条「雪乃酱：通道「x」任务结束」。" />
+                    <ToggleSwitch Header="全部通道跑完后发汇总通知（仅本机主控端）"
+                                  IsOn="{x:Bind VM.RdpSettings.NotifyOnAllDone, Mode=TwoWay}"
+                                  ToolTipService.ToolTip="整轮结束发一条汇总（多块才发）。" />
                     <ToggleSwitch Header="本地（非远程会话）执行时也发通知"
                                   IsOn="{x:Bind VM.RdpSettings.NotifyLocalTaskDone, Mode=TwoWay}" />
 
                     <TextBlock TextWrapping="Wrap" Opacity="0.65" FontSize="12"
-                               Text="系统通知只在发出它的那个用户会话里显示，所以远程任务完成时，目标会话和主控端会各发一次，你在哪边都看得到。" />
+                               Text="通知只从主控端发出：系统 Toast 只能在发出它的那个用户会话里显示，目标会话里弹的你根本看不到，所以代理侧已不再发任何通知。主控端轮询到事件后自己弹；主控端会话锁定时先落暂存，回前台补发。" />
 
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <Button Content="连接并执行（当前设置那一组）"

@@ -727,6 +727,7 @@ public sealed class MainViewModel : ObservableObject
         rdp.TargetUser = source.TargetUser;
         rdp.SessionFinish = source.SessionFinish;
         rdp.NotifyOnTaskDone = source.NotifyOnTaskDone;
+        rdp.NotifyOnChannelDone = source.NotifyOnChannelDone;
         rdp.NotifyOnAllDone = source.NotifyOnAllDone;
         rdp.NotifyLocalTaskDone = source.NotifyLocalTaskDone;
         rdp.ConnectTimeoutSeconds = source.ConnectTimeoutSeconds;
@@ -4438,8 +4439,11 @@ public sealed class MainViewModel : ObservableObject
             ShutdownDelaySeconds = Config.ShutdownDelaySeconds,
             EnableTimeoutScreenshot = Config.EnableTimeoutScreenshot,
             SessionFinish = channel.SessionFinish,
-            NotifyOnTaskDone = RdpSettings.NotifyOnTaskDone,
-            NotifyOnAllDone = RdpSettings.NotifyOnAllDone,
+            // 通知一律由主控端发（见下面的 ApplyChannelTick / ReportSessionCompletion）。
+            // 这两个键现在只用来让"目标账户里仍部署着的旧版代理"闭嘴 —— 它的通知在主控端
+            // 看不到，纯属噪音。所以这里**固定发 false**，不跟随设置开关。
+            NotifyOnTaskDone = false,
+            NotifyOnAllDone = false,
         };
 
         bridge.EnsureDirectory();
@@ -4756,13 +4760,25 @@ public sealed class MainViewModel : ObservableObject
         {
             AppendLog($"[通道：{tag}] {ev.Time} {ev.Headline}");
 
-            // 目标会话里的 Toast 在当前桌面上是看不到的，主控端这一侧也要弹一次
+            // 通知只在这里（主控端）发：目标会话里弹的 Toast 在主控端桌面上看不到，
+            // 所以代理侧已经完全不发通知了，全部由主控端轮询到事件后补发，
+            // 锁屏期间先落暂存、回前台补发（见 PendingNotificationStore）。
             if (ev.Kind == RdpEventKinds.TaskDone && RdpSettings.NotifyOnTaskDone)
             {
-                if (!NotificationService.ShowTaskDone(
-                        ev.TaskName, ev.Index, ev.Total, ev.ElapsedSeconds, ev.IsAbnormal))
+                var title = NotificationService.TaskDoneTitle(ev.Index, ev.Total, ev.IsAbnormal);
+                var body = NotificationService.TaskDoneBody(ev.TaskName, ev.ElapsedSeconds);
+
+                // 窗口没激活时横幅不会显示（锁屏 / 被 mstsc 顶掉），落暂存等回前台补发。
+                // 窗口是激活的却投递失败 = 通知注册本身就是坏的（见 NotificationService），
+                // 那种情况下只有应用内气泡能让人看到，所以退到看板娘气泡。
+                if (!MainWindow.IsWindowActive)
+                {
+                    PendingNotificationStore.Save(title, body);
+                }
+                else if (!NotificationService.Show(title, body))
                 {
                     ShowTemporaryMascotMessage($"远程任务完成：{ev.TaskName}", 8, 70);
+                    WarnNotificationOnce();
                 }
             }
         }
@@ -4787,7 +4803,7 @@ public sealed class MainViewModel : ObservableObject
 
             SetMascotState(MascotStates.Error, errorReason: $"通道「{tag}」的会话代理已失联，请检查目标会话是否还在。");
 
-            if (RdpSettings.NotifyOnAllDone)
+            if (RdpSettings.NotifyOnChannelDone)
             {
                 NotificationService.ShowSummary($"雪乃酱：通道「{tag}」代理失联", $"最后状态：{summary}");
             }
@@ -4926,17 +4942,20 @@ public sealed class MainViewModel : ObservableObject
                 10, 60);
         }
 
-        if (RdpSettings.NotifyOnAllDone)
+        if (RdpSettings.NotifyOnChannelDone)
         {
-            var posted = NotificationService.ShowSummary($"雪乃酱：通道「{tag}」任务结束", summary);
+            var title = $"雪乃酱：通道「{tag}」任务结束";
 
             // 本地多用户场景下主控端会话大概率处于锁定状态（mstsc 接管了控制台），
-            // 锁定会话不弹 Toast 横幅，通知只会静默进操作中心。
-            // 只要无法确认横幅已展示（发送失败或窗口非激活），就落一份暂存，
-            // 等窗口重新激活时由 MainWindow 补发。
-            if (!posted || !MainWindow.IsWindowActive)
+            // 锁定会话不弹 Toast 横幅，通知只会静默进操作中心 → 落暂存等回前台补发。
+            // 窗口激活却发不出去 = 通知注册坏了（桌面横幅不会出现），这时只能退到应用内提示。
+            if (!MainWindow.IsWindowActive)
             {
-                PendingNotificationStore.Save($"雪乃酱：通道「{tag}」任务结束", summary);
+                PendingNotificationStore.Save(title, summary);
+            }
+            else if (!NotificationService.ShowSummary(title, summary))
+            {
+                WarnNotificationOnce();
             }
         }
 
@@ -5053,10 +5072,13 @@ public sealed class MainViewModel : ObservableObject
             if (RdpSettings.NotifyOnAllDone)
             {
                 var body = RunSummary.ComposeHeadline(parts);
-                var posted = NotificationService.ShowSummary(RunSummary.Title, body);
-                if (!posted || !MainWindow.IsWindowActive)
+                if (!MainWindow.IsWindowActive)
                 {
                     PendingNotificationStore.Save(RunSummary.Title, body);
+                }
+                else if (!NotificationService.ShowSummary(RunSummary.Title, body))
+                {
+                    WarnNotificationOnce();
                 }
             }
         }
@@ -5089,9 +5111,32 @@ public sealed class MainViewModel : ObservableObject
             return;
         }
 
-        NotificationService.ShowSummary(pending.Value.Title, pending.Value.Body);
+        var posted = NotificationService.ShowSummary(pending.Value.Title, pending.Value.Body);
         ShowTemporaryMascotMessage("补发一条刚才错过的完成通知～", 8, 60);
-        AppendLog("窗口重新激活，已补发锁屏期间错过的完成通知。");
+        AppendLog(posted
+            ? "窗口重新激活，已补发锁屏期间错过的完成通知。"
+            : "窗口重新激活，锁屏期间错过的完成通知未能投递到系统通知（注册不可用），已用应用内气泡提示。");
+        if (!posted)
+        {
+            WarnNotificationOnce();
+        }
+    }
+
+    /// <summary>系统通知注册不可用这件事只提示一次，免得每条任务完成都往日志里灌一行。</summary>
+    private bool _notificationWarned;
+
+    private void WarnNotificationOnce()
+    {
+        if (_notificationWarned)
+        {
+            return;
+        }
+
+        _notificationWarned = true;
+        var reason = NotificationService.LastError;
+        AppendLog(reason.Length > 0
+            ? $"⚠ 系统通知不可用，完成通知只会显示为应用内气泡（原因：{reason}）。"
+            : "⚠ 系统通知不可用（未注册成功），完成通知只会显示为应用内气泡。");
     }
 
     /// <summary>本地执行时每完成一个任务也发通知（由设置开关控制）。</summary>

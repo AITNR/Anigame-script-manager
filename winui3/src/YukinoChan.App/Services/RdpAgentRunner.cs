@@ -196,7 +196,9 @@ public sealed class RdpAgentRunner
 
         runner.TaskCompleted += (_, info) =>
         {
-            // 每个任务完成都回传一条事件，并在本会话弹一次系统通知
+            // 每个任务完成都回传一条事件。
+            // 这里**故意不发系统通知**：Toast 只在发出它的那个用户会话里显示，
+            // 目标会话里弹一条主控端用户根本看不到（纯噪音），通知统一由主控端发。
             Update(status =>
             {
                 status.Events.Add(RdpBridge.MakeEvent(
@@ -210,15 +212,6 @@ public sealed class RdpAgentRunner
                     info.IsAbnormal));
                 return status;
             });
-
-            if (_command.NotifyOnTaskDone)
-            {
-                if (!NotificationService.ShowTaskDone(
-                        info.Name, info.Index, info.Total, info.ElapsedSeconds, info.IsAbnormal))
-                {
-                    Log($"任务「{info.Name}」的系统通知投递失败，已降级为仅记录日志（{NotificationService.LastError}）。");
-                }
-            }
         };
 
         runner.ShutdownPrompt += (_, delay) =>
@@ -259,11 +252,7 @@ public sealed class RdpAgentRunner
             // 只能靠这条 Finished 事件的 abnormal 标记来区分"正常结束"与"有异常结束"。
             Append(RdpEventKinds.Finished, summary, abnormal: hadError);
 
-            if (_command.NotifyOnAllDone)
-            {
-                NotificationService.ShowSummary("雪乃酱：远程任务结束", summary);
-            }
-
+            // 同上：收尾通知也只由主控端发，目标会话里不弹。
             FinishSession(hadError ? "done" : "done", summary);
         }
         finally

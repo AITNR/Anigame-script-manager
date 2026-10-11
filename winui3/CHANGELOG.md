@@ -7,6 +7,24 @@ Python / PySide6 版（v1.0 RC1，legacy）的变更记录见仓库根的 [CHANG
 
 ---
 
+## 未发布
+
+### Changed
+
+- **通知改为只从主控端发。** 系统 Toast 只能在发出它的那个用户会话里显示，
+  目标会话里弹的通知主控端用户根本看不到。所以代理侧（`RdpAgentRunner`）
+  **已删除全部发通知的代码**；主控端下发的 `RdpCommand.NotifyOnTaskDone` /
+  `NotifyOnAllDone` 现在**固定发 `false`**，只为让仍部署在目标账户里的**旧版代理**闭嘴。
+
+### Added
+
+- 新增 `rdp.notify_on_channel_done`：**每条会话通道整条跑完（含失联）时在主控端弹一条该通道的收尾通知**
+  （`雪乃酱：通道「x」任务结束`）。以前这一条挂在 `notify_on_all_done` 下，现在两者独立。
+- `rdp.notify_on_task_done`、`notify_on_channel_done`、`notify_on_all_done` 三个开关全部在
+  「通道管理」页「执行与通知」卡片里，文案已标明“仅本机主控端”。
+- 每任务完成的通知现在也走“主控端会话锁定时落暂存、回前台补发”；
+  标题 / 正文由 `NotificationService.TaskDoneTitle` / `TaskDoneBody` 统一构造，避免补发与直接弹的文案不一致。
+
 ## v2.0 — 多会话通道（2026-09-27）
 
 远程会话从「单通道 + 系统 `mstsc` 窗口」重构为**多条会话通道并行执行 + 原生内嵌画面**。
