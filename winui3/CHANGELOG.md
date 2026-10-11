@@ -16,6 +16,18 @@ Python / PySide6 版（v1.0 RC1，legacy）的变更记录见仓库根的 [CHANG
   **已删除全部发通知的代码**；主控端下发的 `RdpCommand.NotifyOnTaskDone` /
   `NotifyOnAllDone` 现在**固定发 `false`**，只为让仍部署在目标账户里的**旧版代理**闭嘴。
 
+### Fixed
+
+- **完成通知从来没弹出来过 —— 根因是通知 API 在提权进程里静默失效。** 原实现用 Windows App SDK 的
+  `AppNotificationManager.Default.Register()`。本机实测（2026-10-11）：非提权进程一切正常；但本程序
+  `app.manifest` 声明 `requireAdministrator`，**提权进程里 Register/Show 都不抛异常，注册表键 /
+  通知库 handler / 通知记录却一个都不产生** —— 通知从未投递；而"不抛异常"让原有的 catch 降级路径
+  永远走不到，于是失败完全无声。现已改用**经典 Toast API**
+  （`Windows.UI.Notifications.ToastNotificationManager`），提权与非提权实测都能正常投递；
+  并在 HKCU 注册本程序的 AUMID 与显示名（Toast 头部显示"雪乃酱"）。同时补上状态自述：
+  启动时把"通知已就绪 / 不可用 + 原因 + HResult"写进运行日志与 crash.log；`Show()` 的返回值也改为
+  如实反映是否真的投出去了（旧实现排队后先返回 true，会把失败当成功）。
+
 ### Added
 
 - 新增 `rdp.notify_on_channel_done`：**每条会话通道整条跑完（含失联）时在主控端弹一条该通道的收尾通知**

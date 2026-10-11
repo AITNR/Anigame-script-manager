@@ -39,6 +39,15 @@ public partial class App : Application
         MainWindow.Activate();
         NotificationService.Initialize(MainWindow.DispatcherQueue);
         ViewModel.Initialize();
+
+        // 通知注册一直是静默降级的，出问题时"没收到通知"和"发不出去"分不清。
+        // 这里把状态直接写进运行日志（失败时附带原因与 HResult）。
+        ViewModel.AppendLog(NotificationService.DescribeStatus());
+        if (NotificationService.DisabledDetail.Length > 0)
+        {
+            Services.CrashLog.WriteNote(
+                "系统通知注册失败：" + Environment.NewLine + NotificationService.DisabledDetail);
+        }
     }
 
     /// <summary>

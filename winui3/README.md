@@ -230,7 +230,7 @@ winui3/
    │  ├─ RdpCredentialStore.cs     # 凭据管理器（键 = 主机|账户）
    │  ├─ LowLevelKeyboardHook.cs   # 全屏时 WH_KEYBOARD_LL 键盘接管
    │  ├─ PendingNotificationStore.cs # 锁屏期间落暂存，回前台补发（仅主控端）
-   │  ├─ NotificationService.cs    # 主控端 Windows 系统通知（Toast）；代理侧不发
+   │  ├─ NotificationService.cs    # 主控端系统通知（经典 Toast API）；代理侧不发
    │  ├─ ConfigManager.cs          # config.json 读写 + 旧键迁移 + 损坏备份
    │  ├─ FileLogger.cs             # 按启动批次分文件日志 + SESSION 标记
    │  ├─ RuntimeStatsManager.cs    # 耗时统计（json / csv / summary）
@@ -588,6 +588,9 @@ prompt for credentials:i:0  # 凭据走凭据管理器，不弹输入框
   旧版代理闭嘴）。主控端轮到事件后自己弹：① 每个任务完成（`rdp.notify_on_task_done`）、
   ② 每条通道整条跑完 / 失联（`rdp.notify_on_channel_done`）、③ 整轮汇总（`rdp.notify_on_all_done`）。
   三个开关都在「通道管理」页的「执行与通知」卡片里；锁屏期间的通知会落暂存，回前台补发。
+  实现走的是**经典 Toast API**（`Windows.UI.Notifications`），不是 Windows App SDK 的
+  `AppNotificationManager` —— 后者在本程序这种**提权**进程里会**静默失效**（不抛异常，但通知
+  一个都不投递），详见 `Services/NotificationService.cs` 的类注释。
 - **代理里的自动关机会直接执行。** 代理没有交互界面，如果开启了自动关机，会按配置排定倒计时关机（切过去可以 `shutdown /a` 取消）。
 - **目标账户要能写日志。** 日志与统计仍写到程序目录，若目标账户对该目录没有写权限，任务照常执行但日志会缺失。
 - **远程目标无法在本机枚举会话。** WTS API 只能查本机会话，所以连远程主机时不会等"会话就绪"，直接以对方回传的 `status.json` 为准。同样地，「断开 / 注销」只对本机目标生效，远程目标请用任务结束后的收尾方式。

@@ -90,12 +90,15 @@ public static class Program
     private const uint MB_ICONWARNING = 0x00000030;
 
     /// <summary>
-    /// 任务栏 / 任务栏分组用的 AppUserModelID。
+    /// 任务栏 / 任务栏分组 / 通知归属用的 AppUserModelID。
     ///
     /// 必须是**稳定**的一串：改掉它，用户固定过的快捷方式、任务栏分组、跳转列表都会失联重排。
     /// 命名按惯例用反向域名式，别跟 Company/Product 随手改。
+    ///
+    /// 取值直接引用 <see cref="Services.NotificationService.Aumid"/> —— 通知身份与任务栏身份
+    /// 必须完全一致（Toast 与任务栏分组都按它归属），常量定义只留一处。
     /// </summary>
-    private const string AppUserModelId = "com.aitnr.yukinochan.app";
+    private const string AppUserModelId = Services.NotificationService.Aumid;
 
     /// <summary>
     /// 给本进程打上显式 AppUserModelID。

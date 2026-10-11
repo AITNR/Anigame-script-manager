@@ -24,7 +24,7 @@ namespace YukinoChan.Services;
 /// 三个账户就是三份白付的钱。
 ///
 /// 所以这里用 <see cref="DispatcherQueueController"/> 在当前线程建一个消息泵：
-/// 同样能维持进程、能派发系统通知，但不碰 XAML 运行时、不加载主题资源。
+/// 只靠它维持进程存活，不碰 XAML 运行时、不加载主题资源。
 /// 语义与原来的隐藏窗口完全一致：进程不主动退出，只有桥目录彻底不可用才退出。
 /// </summary>
 public static class AgentHost
@@ -63,11 +63,12 @@ public static class AgentHost
         // 本机多账户场景则按"自己登录的是哪个账户"自动派生（与主控端算出的目录一致）。
         RdpBridge.ConfigureAgent(RdpAgentRunner.ExtractBridgePath(args));
 
+        // 消息泵只用来维持进程存活（见下面的 PumpMessages）。
+        //
+        // 这里**不再初始化 NotificationService**：完成通知已改成"只由主控端发"，
+        // 代理侧一颗通知都不发；而代理跑在目标账户里，真去注册也只会在别人的
+        // 用户配置里塞一条本程序的通知身份，纯属污染。
         var controller = TryCreateDispatcher();
-        if (controller is not null)
-        {
-            NotificationService.Initialize(controller.DispatcherQueue);
-        }
 
         // 代理循环跑在工作线程：它全程 await（Task.Delay / 文件 IO / 进程管理），
         // 从不碰 UI 线程，也就不需要消息泵与它同线程。
@@ -75,7 +76,7 @@ public static class AgentHost
 
         if (controller is null)
         {
-            // 拿不到消息泵（通知降级为仅记录日志）时，主线程同步等循环结束。
+            // 拿不到消息泵时，主线程同步等循环结束。
             // 循环是 while(true)，正常不会返回；返回了说明桥目录废了。
             WaitLoop(loop);
             return 0;
@@ -242,9 +243,7 @@ public static class AgentHost
     /// 用 <see cref="DispatcherQueueController"/> 而不是 XAML 窗口：前者只要
     /// CoreMessaging 的线程消息队列，不碰 XAML 运行时，也不加载任何主题资源。
     ///
-    /// 拿不到就返回 null —— 通知属于"锦上添花"，不能因此让代理起不来。
-    /// 降级后 <see cref="NotificationService"/> 不会被 Initialize，
-    /// 其 <c>Show</c> 会直接返回 false，调用方照旧降级为仅记录日志。
+    /// 拿不到就返回 null —— 消息泵只为让进程别退出，不能因此让代理起不来。
     /// </summary>
     private static DispatcherQueueController? TryCreateDispatcher()
     {
