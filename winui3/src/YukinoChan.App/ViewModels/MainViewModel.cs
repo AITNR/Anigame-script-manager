@@ -3216,6 +3216,9 @@ public sealed class MainViewModel : ObservableObject
     /// <summary>连接方式下拉框数据源。</summary>
     public IReadOnlyList<KeyValuePair<string, string>> ClientModeItems => ClientModes.Items;
 
+    /// <summary>内嵌画面渲染后端选项（绑到通道管理页的下拉框）。</summary>
+    public IReadOnlyList<KeyValuePair<string, string>> RenderBackendItems => RenderBackends.Items;
+
     /// <summary>当前是否为内嵌连接模式（client_mode = embedded）。</summary>
     public bool IsEmbeddedMode => ClientModes.Normalize(RdpSettings.ClientMode) == ClientModes.Embedded;
 
@@ -3388,6 +3391,20 @@ public sealed class MainViewModel : ObservableObject
     /// <summary>
     /// 黑屏看门狗：连接后每 6 秒采样一帧亮度。全黑（&lt;20）→ 宽 +2 自动重连（最多 3 次）；
     /// 有内容 → 复位。会话重连服务器不重绘时的唯一自愈手段（M5 实测）。
+    ///
+    /// 🔑 <b>采样在后台线程做，判定在 UI 线程做</b>（2026-10-12 改）。
+    ///
+    /// 原来整段 Tick 都跑在 UI 线程上，其中 <c>TryCopyFrame</c> 是<b>阻塞式原生调用</b>：
+    /// <c>ycn_rdp_copy_frame</c> 在原生 <c>g_lock</c> 里对 1920×1080×4 ≈ 8.3MB 做整帧 memcpy，
+    /// 而 RDP 线程的 <c>ycn_end_paint</c> 持同一把锁写新帧 —— UI 线程会在这把锁上等，
+    /// 表现为 CPU 零增长的静默假死（用户侧就是「突然卡死，什么都没留下」）。
+    ///
+    /// 拆成两段后：
+    ///   · 抓帧 + 亮度采样 → <c>Task.Run</c>（工作线程，等锁不再冻界面）；
+    ///   · 停表 / 重连 / 写日志 → 回 UI 线程（要碰 XAML 与 <c>AppendLog</c> 队列）。
+    ///
+    /// 注意 <c>TryCopyFrame</c> 返回的 <c>pixels</c> 是 client 内部的<b>复用缓冲</b>，
+    /// 所以亮度采样必须在同一个 <c>Task.Run</c> 里同步做完，不能把数组带出去再用。
     /// </summary>
     private void StartEmbedWatchdog(EmbedConnection conn)
     {
@@ -3398,6 +3415,7 @@ public sealed class MainViewModel : ObservableObject
         timer.Tick += (_, _) =>
         {
             ticks++;
+
             var client = conn.Client;
             if (client is null)
             {
@@ -3405,53 +3423,89 @@ public sealed class MainViewModel : ObservableObject
                 conn.Watchdog = null;
                 return;
             }
+
             if (client.State != RdpClientState.Connected)
             {
                 return; // 仍在连接中，下一拍再看
             }
-            if (!client.TryCopyFrame(out var w, out var h, out var st, out var px))
+
+            // 抓帧与亮度采样放到工作线程：它是阻塞式原生调用（锁内 8MB memcpy），
+            // 在 UI 线程上等这把锁就是整窗假死。
+            _ = Task.Run(() =>
             {
-                if (ticks <= 10)
+                // client 可能在这一拍里被换掉 / 断开：拿不到帧就当作「还没有帧」
+                if (client.State != RdpClientState.Connected)
                 {
-                    return; // 还没有任何帧：下一拍再看（最多等 60 秒）
+                    return (Copied: false, Width: 0u, Height: 0u, Brightness: 0, Ticks: ticks);
                 }
-                AppendSurfaceLog(conn.Key, "60 秒未收到任何画面帧；请断开后重连，或改用 mstsc 连接方式。");
-                timer.Stop();
-                conn.Watchdog = null;
-                return;
-            }
 
-            long sum = 0;
-            var samples = 0;
-            // px 是可复用的抓帧缓冲，长度可能大于本帧字节数 —— 按 stride*height 界定有效区间
-            var validBytes = checked((int)(st * h));
-            for (var i = 0; i + 2 < validBytes; i += 4096 * 4)
-            {
-                sum += px[i] + px[i + 1] + px[i + 2];
-                samples += 3;
-            }
-            var brightness = samples > 0 ? sum / samples : 0;
-            if (brightness > 20)
-            {
-                // 画面有内容：自愈完成
-                timer.Stop();
-                conn.Watchdog = null;
-                conn.RetryCount = 0;
-                AppendSurfaceLog(conn.Key, $"画面正常（{w}×{h}）。点击画面可获得焦点并直接操作。");
-                return;
-            }
+                if (!client.TryCopyFrame(out var w, out var h, out var st, out var px))
+                {
+                    return (Copied: false, Width: 0u, Height: 0u, Brightness: 0, Ticks: ticks);
+                }
 
-            if (conn.RetryCount >= 3)
-            {
-                AppendSurfaceLog(conn.Key, "多次重试仍黑屏；请点「断开画面」后重新连接，或在连接方式里改回 mstsc。");
-                timer.Stop();
-                conn.Watchdog = null;
-                return;
-            }
+                long sum = 0;
+                var samples = 0;
+                // px 是可复用的抓帧缓冲，长度可能大于本帧字节数 —— 按 stride*height 界定有效区间
+                var validBytes = checked((int)(st * h));
+                for (var i = 0; i + 2 < validBytes; i += 4096 * 4)
+                {
+                    sum += px[i] + px[i + 1] + px[i + 2];
+                    samples += 3;
+                }
 
-            conn.RetryCount++;
-            AppendSurfaceLog(conn.Key, $"检测到静止黑屏（亮度 {brightness}），自动重连第 {conn.RetryCount}/3 次…");
-            ReconnectEmbedded(conn);
+                var brightness = samples > 0 ? sum / samples : 0;
+                return (Copied: true, Width: w, Height: h, Brightness: brightness, Ticks: ticks);
+            }).ContinueWith(t =>
+            {
+                // 采样本身炸了（极端情况）：不当成黑屏，等下一拍
+                if (t.IsFaulted)
+                {
+                    AppendSurfaceLog(conn.Key, "画面采样失败：" + Flatten(t.Exception?.GetBaseException().Message ?? "未知错误"));
+                    timer.Stop();
+                    conn.Watchdog = null;
+                    return;
+                }
+
+                if (!t.Result.Copied)
+                {
+                    if (t.Result.Ticks <= 10)
+                    {
+                        return; // 还没有任何帧：下一拍再看（最多等 60 秒）
+                    }
+
+                    AppendSurfaceLog(conn.Key, "60 秒未收到任何画面帧；请断开后重连，或改用 mstsc 连接方式。");
+                    timer.Stop();
+                    conn.Watchdog = null;
+                    return;
+                }
+
+                var w = t.Result.Width;
+                var h = t.Result.Height;
+                var brightness = t.Result.Brightness;
+
+                if (brightness > 20)
+                {
+                    // 画面有内容：自愈完成
+                    timer.Stop();
+                    conn.Watchdog = null;
+                    conn.RetryCount = 0;
+                    AppendSurfaceLog(conn.Key, string.Format("画面正常（{0}×{1}）。点击画面可获得焦点并直接操作。", w, h));
+                    return;
+                }
+
+                if (conn.RetryCount >= 3)
+                {
+                    AppendSurfaceLog(conn.Key, "多次重试仍黑屏；请点「断开画面」后重新连接，或在连接方式里改回 mstsc。");
+                    timer.Stop();
+                    conn.Watchdog = null;
+                    return;
+                }
+
+                conn.RetryCount++;
+                AppendSurfaceLog(conn.Key, string.Format("检测到静止黑屏（亮度 {0}），自动重连第 {1}/3 次…", brightness, conn.RetryCount));
+                ReconnectEmbedded(conn);
+            }, TaskScheduler.FromCurrentSynchronizationContext());
         };
         timer.Start();
         conn.Watchdog = timer;
@@ -3530,6 +3584,10 @@ public sealed class MainViewModel : ObservableObject
 
     /// <summary>
     /// 释放某条通道的内嵌连接实例（ycn_rdp_disconnect：目标会话保留）。幂等，可在任意线程调用。
+    ///
+    /// 🔑 原生断开是<b>异步</b>做的（2026-10-12 改）：<c>ycn_rdp_disconnect</c> 会 join
+    /// 原生 RDP 线程，最坏情况在 UI 线程上阻塞 5 秒。这里先在本方法内完成解绑与状态复位
+    /// （立刻生效、界面马上松开），再把 <c>Dispose</c> 丢到工作线程去等。
     /// 注意：不重置黑屏重试计数——自动重连链路依赖它跨连接保持。
     /// 另外：字典条目刻意保留（重试计数与「已弹出窗口」标记要跨连接存活）。
     /// </summary>
@@ -3560,14 +3618,21 @@ public sealed class MainViewModel : ObservableObject
             client.Disconnected -= conn.OnDisconnected;
         }
 
-        try
+        // ycn_rdp_disconnect 内部会 join 原生 RDP 线程（WaitForSingleObject 5 秒超时），
+        // 在 UI 线程上等就是最长 5 秒的界面冻结 —— 点「断开」时用户会以为又卡死了。
+        // 所以这里只做解绑，把真正的原生断开丢到工作线程；UI 侧立刻返回。
+        // ⚠️ 不能改 client 内部的字段：解绑之后它只被这一个后台任务引用。
+        _ = Task.Run(() =>
         {
-            client.Dispose();
-        }
-        catch
-        {
-            // 释放失败不阻断 UI（原生侧自有兜底）
-        }
+            try
+            {
+                client.Dispose();
+            }
+            catch
+            {
+                // 释放失败不阻断 UI（原生侧自有兜底）
+            }
+        });
 
         conn.Watchdog?.Stop();
         conn.Watchdog = null;

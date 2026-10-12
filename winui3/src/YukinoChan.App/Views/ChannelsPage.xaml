@@ -287,6 +287,13 @@
                     <CheckBox Content="内嵌模式下在本机播放远端声音"
                               IsChecked="{x:Bind VM.RdpSettings.AudioEnabled, Mode=TwoWay}" />
 
+                    <ComboBox Header="内嵌画面渲染后端"
+                              ItemsSource="{x:Bind VM.RenderBackendItems}"
+                              DisplayMemberPath="Value"
+                              SelectedValuePath="Key"
+                              SelectedValue="{x:Bind VM.RdpSettings.RenderBackend, Mode=TwoWay}"
+                              HorizontalAlignment="Stretch"
+                              ToolTipService.ToolTip="D3D 在某些显卡 / 虚拟显示驱动组合下可能把整个窗口卡死（进程还活着但点不动）。碰到就切到软渲染，不用等新版本。改完下次连接生效。" />
                     <CheckBox Content="GFX 全帧管线（实验性：撕裂根治，需重连生效）"
                               IsChecked="{x:Bind VM.RdpSettings.GfxEnabled, Mode=TwoWay}"
                               ToolTipService.ToolTip="走 RDP 图形管道协商 progressive 全帧，远端快速变化时不再撕裂；默认关闭" />

@@ -87,6 +87,12 @@ namespace YukinoChan.Views
         {
             DetachClient();
 
+            // 渲染后端选择必须在任何判断之前同步进来（DisableD3D 本来只看命令行，
+            // 现在覆盖 render_backend 配置项）。
+            YukinoChan.Services.RdpD3DRenderer.PushRenderBackend(
+                RenderBackends.Normalize(App.ViewModel.RdpSettings.RenderBackend)
+                == RenderBackends.Software);
+
             _dispatcher = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
             _client = new RdpEmbeddedClient();
             HookClient(_client);
@@ -108,6 +114,11 @@ namespace YukinoChan.Views
         public void AttachClient(RdpEmbeddedClient client)
         {
             DetachClient();
+
+            // 同 Connect：入口处同步一次渲染后端选择。
+            YukinoChan.Services.RdpD3DRenderer.PushRenderBackend(
+                RenderBackends.Normalize(App.ViewModel.RdpSettings.RenderBackend)
+                == RenderBackends.Software);
             _client = client;
             HookClient(_client);
 
@@ -369,7 +380,7 @@ namespace YukinoChan.Views
             // 惰性初始化 D3D（用事件参数里的尺寸，无需 memcpy）；失败后本实例固定走软渲染。
             // 注意：panel 尺寸直接用帧尺寸 —— VM 路径下 Connected 事件可能在挂钩前
             // 已错过（_remoteWidth 为 0），不能依赖它（M5 黑屏根因）
-            if (_renderer is null && !_initQueued && !_d3dFailed && !YukinoChan.Services.RdpD3DRenderer.DisableD3D)
+            if (_renderer is null && !_initQueued && !_d3dFailed && !YukinoChan.Services.RdpD3DRenderer.ShouldUseSoftware)
             {
                 _initQueued = true;
                 var initW = e.Width;
@@ -436,7 +447,7 @@ namespace YukinoChan.Views
                 return; // D3D 路线：呈现交给节拍器（OnPresentTick）
             }
 
-            if (!_d3dFailed && !YukinoChan.Services.RdpD3DRenderer.DisableD3D)
+            if (!_d3dFailed && !YukinoChan.Services.RdpD3DRenderer.ShouldUseSoftware)
             {
                 return; // 初始化排队中：下一拍就有了
             }

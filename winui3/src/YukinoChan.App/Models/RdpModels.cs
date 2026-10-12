@@ -32,6 +32,40 @@ public static class ClientModes
     }
 }
 
+/// <summary>
+/// 内嵌画面的渲染后端（计划书 §5.2 / §6 M4 的两种实现）：
+/// auto = 默认 D3D11 SwapChainPanel，初始化失败自动回退 SoftwareBitmap；
+/// software = 强制 SoftwareBitmap，完全不碰 D3D / 交换链 / GPU。
+///
+/// 为什么值得暴露给用户：D3D 路线在本机显卡 / 虚拟显示驱动组合异常时可能整窗假死
+/// （D3D 调用与 GPU/合成器互锁，进程活着但消息泵停摆）。此时用户自己能切到软渲染
+/// 就能立刻恢复可用，不必等新版本 —— 这也是 2026-10-12 那次卡死排查后补的逃生门。
+/// </summary>
+public static class RenderBackends
+{
+    public const string Auto = "auto";
+    public const string Software = "software";
+
+    public static readonly IReadOnlyList<KeyValuePair<string, string>> Items =
+        new List<KeyValuePair<string, string>>
+        {
+            new(Auto, "D3D11 硬件加速（默认，失败自动回退软渲染）"),
+            new(Software, "软渲染 SoftwareBitmap（不用 D3D/GPU，最稳但更吃 CPU）"),
+        };
+
+    public static string Normalize(string? value)
+    {
+        var text = (value ?? string.Empty).Trim().ToLowerInvariant();
+        return text == Software ? Software : Auto;
+    }
+
+    public static string Label(string? value) => Normalize(value) switch
+    {
+        Software => "软渲染",
+        _ => "D3D11",
+    };
+}
+
 /// <summary>RDP 会话在任务全部结束后的处理方式。</summary>
 public static class SessionFinishModes
 {    public const string Keep = "keep";
@@ -469,6 +503,7 @@ public sealed class RdpConfig : ObservableObject, ICloneable
     private string _clientMode = ClientModes.Mstsc;
     private bool _audioEnabled = true;
     private bool _gfxEnabled;
+    private string _renderBackend = RenderBackends.Auto;
     private int _desktopWidth;
     private int _desktopHeight;
     private List<RdpChannel> _channels = new();
@@ -608,6 +643,20 @@ public sealed class RdpConfig : ObservableObject, ICloneable
         set => SetProperty(ref _gfxEnabled, value);
     }
 
+    /// <summary>
+    /// 内嵌画面渲染后端：auto = D3D11（失败自动回退软渲染）；software = 强制软渲染。
+    ///
+    /// 存在的原因：D3D 路线在某些显卡 / 虚拟显示驱动组合下会把 UI 线程与 GPU 互锁，
+    /// 表现为整窗假死。给用户一个不用等新版本就能自救的开关。
+    /// 命令行 <c>--embed-nod3d</c> 仍然有效，且优先级更高（等价于 software）。
+    /// </summary>
+    [JsonPropertyName("render_backend")]
+    public string RenderBackend
+    {
+        get => _renderBackend;
+        set => SetProperty(ref _renderBackend, RenderBackends.Normalize(value));
+    }
+
     /// <summary>远程桌面宽度，0 表示自适应（跟随画面区域）。</summary>
     [JsonPropertyName("desktop_width")]
     public int DesktopWidth
@@ -651,6 +700,7 @@ public sealed class RdpConfig : ObservableObject, ICloneable
         TargetUser = (TargetUser ?? string.Empty).Trim();
         SessionFinish = SessionFinishModes.Normalize(SessionFinish);
         ClientMode = ClientModes.Normalize(ClientMode);
+        RenderBackend = RenderBackends.Normalize(RenderBackend);
         ConnectTimeoutSeconds = Math.Clamp(ConnectTimeoutSeconds, 15, 600);
         DesktopWidth = RdpResolutions.Normalize(DesktopWidth, RdpResolutions.MinWidth, RdpResolutions.MaxWidth);
         DesktopHeight = RdpResolutions.Normalize(DesktopHeight, RdpResolutions.MinHeight, RdpResolutions.MaxHeight);

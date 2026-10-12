@@ -36,9 +36,33 @@ namespace YukinoChan.Services
 
     internal sealed class RdpD3DRenderer : IDisposable
     {
-        /// <summary>--embed-nod3d 时强制 SoftwareBitmap 路线（诊断开关）。</summary>
+        /// <summary>
+        /// 命令行 <c>--embed-nod3d</c> 强制 SoftwareBitmap 路线（诊断开关，优先级最高）。
+        /// </summary>
         public static bool DisableD3D { get; } = Array.Exists(
             Environment.GetCommandLineArgs(), a => a == "--embed-nod3d");
+
+        /// <summary>
+        /// 配置项的渲染后端选择（render_backend）。
+        ///
+        /// 与 <see cref="DisableD3D"/> 的关系：
+        ///   · 命令行开关优先（早于配置项存在，且用于无人值守验收）；
+        ///   · 否则看配置：<c>software</c> = 不建 D3D 设备，直接走软渲染。
+        ///
+        /// 为什么不是一个属性：此处不能引用 YukinoChan.Models.RdpConfig（Services → Models 的依赖方向可以，
+        /// 但这个类是静态工具类，拿不到当前实例）。因此由 RdpView 在创建渲染器前
+        /// 把配置值推进来（见 <c>PushRenderBackend</c>）。
+        /// </summary>
+        internal static bool ForceSoftware { get; private set; }
+
+        /// <summary>把配置的渲染后端选择同步进来（RdpView 挂画面前调一次）。</summary>
+        internal static void PushRenderBackend(bool useSoftware)
+        {
+            ForceSoftware = useSoftware;
+        }
+
+        /// <summary>本次连接到底该不该用 D3D。</summary>
+        public static bool ShouldUseSoftware => DisableD3D || ForceSoftware;
 
         /// <summary>🔒 序列化本实例的全部状态变更（Initialize / ResizeRemote / Present / Dispose）。
         ///

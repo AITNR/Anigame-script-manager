@@ -40,6 +40,15 @@ public partial class App : Application
         NotificationService.Initialize(MainWindow.DispatcherQueue);
         ViewModel.Initialize();
 
+        // UI 线程无响应看门狗：必须在窗口建好（拿得到 HWND）之后装。
+        //
+        // 为什么单独一个后台线程，而不是又一个 DispatcherQueueTimer：本应用原有的
+        // 心跳轮询 / 黑屏看门狗 / 1Hz 刷新 / 呈现节拍器全部跑在 UI 线程上，
+        // UI 线程一卡它们会一起静默失效 —— 卡死于是表现为「没有任何日志、不会自愈」。
+        // 看门狗用自己的线程 + SendMessageTimeout(SMTO_ABORTIFHUNG) 探测，
+        // 与目标的消息泵无关，目标卡死时它一定超时。详见 UiHangWatchdog 的类注释。
+        Services.UiHangWatchdog.Install(Helpers.WindowHelper.GetHwnd(MainWindow));
+
         // 通知注册一直是静默降级的，出问题时"没收到通知"和"发不出去"分不清。
         // 这里把状态直接写进运行日志（失败时附带原因与 HResult）。
         ViewModel.AppendLog(NotificationService.DescribeStatus());
