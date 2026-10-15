@@ -44,7 +44,20 @@ public static class UiHangWatchdog
     private static extern int NtQuerySystemInformation(
         int systemInformationClass, IntPtr buffer, int bufferLength, out int returnLength);
 
-    /// <summary>窗口是否已被 Windows 判定为「未响应」。</summary>
+    /// <summary>
+    /// 窗口句柄是否还指向一个真实存在的窗口。
+    /// 🔑 这是「应用是否正在关」的<b>唯一可靠判据</b>（2026-10-15 实测）：
+    /// 窗口活着但 UI 线程卡死时它返回 true；窗口销毁后返回 false。
+    /// 对比 <c>GetLastError</c> —— 后者在 SMTO 失败时可能是 1460 / 0 / 1400，毫无规律。
+    /// </summary>
+    [DllImport("user32.dll")]
+    private static extern bool IsWindow(IntPtr hWnd);
+
+    /// <summary>
+    /// 窗口是否已被 Windows 判定为「未响应」。
+    /// ⚠️ <b>不用于卡死判据</b>：实测 UI 线程硬卡在 WrLpcReply 时它返回 false
+    /// （那不是 DWM 能判定的 hung），会把真卡死放过去。只作诊断输出里的参考。
+    /// </summary>
     [DllImport("user32.dll")]
     private static extern bool IsHungAppWindow(IntPtr hWnd);
 
@@ -52,7 +65,6 @@ public static class UiHangWatchdog
     /// <summary>目标无响应时立即返回，而不是排队等它 —— 少了它，探测本身会被卡死拖住。</summary>
     private const uint SmtoAbortIfHung = 0x0002;
     private const uint SmtoNormal = 0x0000;
-    private const int ErrorTimeout = 1460;
 
     /// <summary>SystemProcessInformation。</summary>
     private const int SystemProcessInformation = 5;
@@ -206,16 +218,27 @@ public static class UiHangWatchdog
 
     /// <summary>
     /// 发一条 WM_NULL 看 UI 线程理不理。
-    /// 返回 true = 正常；false = 超时（UI 线程不响应）。
+    /// 返回 true = 正常；false = 无响应（卡死）。
     ///
-    /// ⚠️ 判据必须是<b>返回值</b>，不能只看 <c>GetLastError</c>（2026-10-12 实测踩过）：
-    /// 同一个卡死窗口，第一次探测 <c>err=1460 (ERROR_TIMEOUT)</c>，
-    /// 之后几次 <c>rc=0</c> 但 <c>err=0</c> —— GetLastError 只在**本次调用真的失败时**才被写，
-    /// 而进程里其它线程的成功 Win32 调用会把它清掉。只看 err 会把后续卡死全判成"活着"。
+    /// 🔑 <b>判据只有两个：rc + IsWindow</b>（2026-10-15 第三次修，有三场景实测支撑）。
     ///
-    /// 因此：
-    ///   · rc != 0 → 一定成功；
-    ///   · rc == 0 → 失败，再用 err 区分「超时」（卡死）与「窗口没了」（应用正在关，不报）。
+    /// 前两次都因为把不可靠的信号当判据而漏报：
+    ///   ① 只看 <c>GetLastError</c>：同一卡死窗口，第一次 err=1460，之后 err=0
+    ///      （被其它线程的成功调用清掉）→ 后续全判成「活着」。
+    ///   ② 加 <c>IsHungAppWindow</c> 兜底：UI 线程硬卡在 WrLpcReply 时它返回 false
+    ///      （那不是 DWM 能判定的 hung），兜底也放过。
+    ///   ③ 用 <c>err == ERROR_INVALID_WINDOW_HANDLE</c> 排除关闭：实测卡死过程中
+    ///      err 也会变成 1400，又把真卡死放过一次。
+    ///
+    /// 三场景实测（WinForms，STA 线程自旋占住）：
+    /// <code>
+    ///   场景                     rc   err        IsWindow
+    ///   A 窗口活着、UI 卡死       0    1460 或 0  True
+    ///   B 窗口已销毁             0    1400       False
+    ///   C 健康                   1    0          True
+    /// </code>
+    /// 结论：<c>rc</c> 区分「响应了没」，<c>IsWindow</c> 区分「窗口还在没」。
+    /// err 与 IsHungAppWindow 只作诊断参考，不作判据。
     /// </summary>
     private static bool Probe()
     {
@@ -224,20 +247,14 @@ public static class UiHangWatchdog
             _hwnd, WmNull, IntPtr.Zero, IntPtr.Zero,
             SmtoAbortIfHung | SmtoNormal, ProbeTimeoutMs, out result);
 
+        // 响应了 = 活着
         if (rc != 0)
         {
             return true;
         }
 
-        var err = Marshal.GetLastWin32Error();
-        if (err == ErrorTimeout)
-        {
-            return false;
-        }
-
-        // err 被别的线程清掉时兜底：直接问窗口是不是 hung。
-        // 窗口已销毁（ERROR_INVALID_WINDOW_HANDLE）时说明应用正在关，不该报卡死。
-        return !IsHungAppWindow(_hwnd);
+        // 没响应：窗口还在就是卡死；窗口没了说明应用正在关，不报
+        return !IsWindow(_hwnd);
     }
 
     private static void HandleAlive()
@@ -272,11 +289,22 @@ public static class UiHangWatchdog
             _hangStartedAt = now;
             _lastReportAt = now;
 
+            // 附带两个「不可靠但有用」的参考信号：GetLastError 与 IsHungAppWindow。
+            // 它们不作判据（见 Probe 注释里的三次漏报历史），但写进日志能省掉下次反查。
+            var lastErr = 0;
+            try { lastErr = Marshal.GetLastWin32Error(); } catch { }
+            var hungFlag = false;
+            try { hungFlag = IsHungAppWindow(_hwnd); } catch { }
+
             SafeNote(
                 "UI 线程无响应（卡死）：探测连续 " + failures + " 次超时"
                 + "（每次 " + ProbeTimeoutMs + "ms）。"
                 + " 这是<b>假死</b>，不是崩溃：进程仍活着但消息泵停摆，"
                 + "轮询 / 看门狗 / 呈现节拍器全在 UI 线程上，因此会一起静默失效。"
+                + " [参考] GetLastError=" + lastErr
+                + "（1460=ERROR_TIMEOUT；0 表示被其它线程的成功调用清掉，不可作判据）"
+                + "，IsHungAppWindow=" + (hungFlag ? "true" : "false")
+                + "（卡在 WrLpcReply 时也是 false，不可作判据）。"
                 + " 下面是本进程全部线程状态快照（取这一刻，用于定位卡在哪个等待）。");
 
             SafeNote(DumpThreads());

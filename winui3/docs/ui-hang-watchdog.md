@@ -376,3 +376,106 @@ while (DateTime.UtcNow < until) { Thread.SpinWait(1000); Thread.Sleep(1); }
 | 崩溃日志 | `C:\Program Files\YukinoChan\logs\crash.log`（干净，无本次记录） |
 | RdpIdd.dll 崩溃 | 14:10:47 / 14:11:04，`RdpIdd.dll` 2.35.0 |
 | 安装版本 | `2.0.0-dev.35+c9fc87a8312bf2aa2c7affdebc64eba62e4b2381`（含 `0c8fc6f`） |
+---
+
+## 10. 第二次故障（2026-10-15）：又是假死，但看门狗漏报了
+
+### 10.1 现场
+
+| 项 | 值 |
+| --- | --- |
+| 冻结实例 PID | **104756**（08:47:28 启动，Session 1） |
+| UI 线程 tid | 122604 |
+| UI 线程等待原因 | **`WrLpcReply`** |
+| 117 个线程 | UI 1 个 `WrLpcReply`，**其余 116 个全部 `Suspended`** |
+| UI 线程 ctxSw | `71423 → 71423`（10 秒零增长），CPU 零增长 |
+| `SendMessageTimeout(5000ms)` | 超时 5013ms |
+| 渲染后端 | **software**（日志确认 `SoftwareBitmap（主动选择的软渲染）`） |
+| 结局 | 假死约 1 分钟后**崩溃**：`Microsoft.UI.Xaml.dll` 3.1.8 / `0xC0000005` @ `0x28c9f0` |
+
+`WrLpcReply` + 116 线程全 Suspended + CPU 零增长 —— **与 `0c8fc6f` 修的「D3D 驱动内部
+互锁 → 整窗假死」是同一签名**。但本次走的是**软渲染**，说明根因**不在渲染后端**。
+
+### 10.2 看门狗为什么没报（第三次判据 bug）
+
+现场实测：`rc=0`（失败）但 **`err=0`**，且 **`IsHungAppWindow=False`**。
+而当时的判据是：
+
+```csharp
+if (rc != 0) return true;
+if (err == ErrorTimeout) return false;   // err=0，不成立
+return !IsHungAppWindow(_hwnd);          // false → 返回 true（判定「活着」）
+```
+
+→ 看门狗沉默。
+
+### 10.3 三场景实测，确立唯一可靠判据
+
+用 WinForms + STA 线程自旋占住，实测三种场景：
+
+| 场景 | `rc` | `err` | `IsWindow` |
+| --- | --- | --- | --- |
+| A 窗口活着、UI 卡死 | **0** | 1460 **或** 0 | **True** |
+| B 窗口已销毁 | 0 | 1400 | **False** |
+| C 健康 | **1** | 0 | True |
+
+**结论**：
+
+- `rc` 区分「响应了没」—— 可靠；
+- `IsWindow` 区分「窗口还在没」—— 可靠；
+- `err` **完全不可靠**：同一卡死过程中会出现 1460 / 0 / **1400** 三种值，毫无规律；
+- `IsHungAppWindow` **不可靠**：UI 线程卡在 `WrLpcReply` 时它返回 false。
+
+### 10.4 最终判据
+
+```csharp
+if (rc != 0) return true;        // 响应了 = 活着
+return !IsWindow(_hwnd);         // 没响应：窗口还在 = 卡死；窗口没了 = 正在关，不报
+```
+
+### 10.5 端到端复验（本次已做）
+
+| 场景 | 结果 |
+| --- | --- |
+| UI 阻塞 25 秒 | ✅ ~10 秒检出（2 次探测），写卡死事件 + 14 个线程状态表 |
+| 阻塞后恢复 | ✅ 补写「已恢复（本次持续 0分15秒）」 |
+| UI 仅阻塞 3 秒 | ✅ 零输出，不误报 |
+
+harness 做法：独立工程 `<Compile Include="...UiHangWatchdog.cs" />` 直接链接仓库源文件，
+桩一个 `CrashLog.WriteNote`；UI 线程用 `Thread.SpinWait` + `Thread.Sleep(1)` 自旋占住
+（**`Thread.Sleep` 造不出真卡死**，见 §4.5）。
+
+### 10.6 本次未能取得的关键证据
+
+**活体 dump 没抓到。** 冻结进程在 08:52 前已被手动结束；WER 报告目录
+（`AppCrash_YukinoChan.exe_f7a03f53...`）拒绝访问，本机**未配置 `WER\LocalDumps`**，
+`C:\Windows\Minidump` 无当天记录。
+
+→ 所以「到底哪个 LPC 调用」仍未定位。
+
+### 10.7 下一步
+
+1. **配置 WER LocalDumps**（一次性，之后每次崩溃都自动落盘，不再依赖人工抓）：
+   ```powershell
+   # 管理员
+   New-Item -Path 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps' -Force | Out-Null
+   New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps' `
+     -Name DumpFolder -Value 'D:\dumps' -PropertyType ExpandString -Force | Out-Null
+   New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps' `
+     -Name DumpType -Value 2 -PropertyType DWord -Force | Out-Null   # 2 = full dump
+   New-Item -ItemType Directory -Path 'D:\dumps' -Force | Out-Null
+   ```
+2. 复现后用 `dotnet-dump analyze` 看 UI 线程栈（提权 shell）。
+3. 若确认仍是 D3D/合成器互锁，再做 §7 的 3.1（拆分 `InitializeLocked`）与 3.3（初始化超时）。
+
+### 10.8 与第一次故障的关系
+
+两次都是「UI 线程同步等待 → 消息泵停摆」，但：
+
+- 10-12：D3D 路线，**先假死后崩溃**（`coreclr.dll` / `0xC0000005` @ `0xe8cce`）；
+- 10-15：**软渲染**路线，同样先假死后崩溃（`Microsoft.UI.Xaml.dll` / `0xC0000005` @ `0x28c9f0`）。
+
+**渲染后端不是根因**，存在共性的上层原因。日志两次都停在「等会话代理上线」阶段附近，
+下一步应重点查那条链路（会话建立 / 等代理 / RDP 轮询）上有没有 UI 线程上的同步等待。
+
+---
