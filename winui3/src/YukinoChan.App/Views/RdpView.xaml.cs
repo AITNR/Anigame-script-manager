@@ -93,6 +93,8 @@ namespace YukinoChan.Views
                 RenderBackends.Normalize(App.ViewModel.RdpSettings.RenderBackend)
                 == RenderBackends.Software);
 
+            PrepareRenderSurface();
+
             _dispatcher = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
             _client = new RdpEmbeddedClient();
             HookClient(_client);
@@ -119,6 +121,8 @@ namespace YukinoChan.Views
             YukinoChan.Services.RdpD3DRenderer.PushRenderBackend(
                 RenderBackends.Normalize(App.ViewModel.RdpSettings.RenderBackend)
                 == RenderBackends.Software);
+            PrepareRenderSurface();
+
             _client = client;
             HookClient(_client);
 
@@ -126,6 +130,45 @@ namespace YukinoChan.Views
             StartPresentTimer();
             ShowOverlay("全屏会话", progress: false, hide: true);
             UpdatePanelLayout();
+        }
+
+        /// <summary>
+        /// 按当前渲染后端选择准备画面。
+        ///
+        /// 🔑 <b>这个方法必须在连接前调</b>（2026-10-15 修）。
+        ///
+        /// 之前的疏漏：软渲染只被当成“回退方案”—— <c>_bitmapSource</c> 只在
+        /// <c>OnFrameArrived</c> 的 D3D 初始化分支里创建（初始化失败 / Present 失败两处）。
+        /// 用户主动选 <c>render_backend=software</c> 时，这两条分支都不走，
+        /// <c>_bitmapSource</c> 永远是 null，而 <c>OnPresentTick</c> 的软渲染分支要求
+        /// <c>_bitmapSource is not null</c> —— 结果就是「帧一直在来（日志 40+ 次/秒）但呈现 0 帧、黑屏」。
+        ///
+        /// 现在把它提前到入口：选了软渲染就立即把 SoftwareBitmapSource 挂好，
+        /// 不再依赖 D3D 先失败。
+        /// </summary>
+        private void PrepareRenderSurface()
+        {
+            if (YukinoChan.Services.RdpD3DRenderer.ShouldUseSoftware)
+            {
+                // 软渲染：直接把 Image 挂上 SoftwareBitmapSource（不用等 D3D 先失败）
+                if (_bitmapSource is null)
+                {
+                    _bitmapSource = new SoftwareBitmapSource();
+                    PartFrame.Source = _bitmapSource;
+                }
+
+                PartFrame.Visibility = Visibility.Visible;
+                PartPanel.Visibility = Visibility.Collapsed;
+                PartViewbox.Visibility = Visibility.Collapsed;
+
+                LogRenderPathOnce("SoftwareBitmap（主动选择的软渲染）");
+                return;
+            }
+
+            // D3D 路线：画面由 OnFrameArrived 惰性初始化（要用第一帧的真实尺寸），
+            // 这里只确保 Image 不会把交换链面板遮住。
+            PartFrame.Source = null;
+            PartFrame.Visibility = Visibility.Collapsed;
         }
 
         /// <summary>只解除事件绑定与画面，不断开会话（交还另一处 RdpView 时用）。</summary>
