@@ -85,18 +85,30 @@ public static class Program
     /// <summary>主控端进程名（不含扩展名）。</summary>
     private const string TargetProcessName = "YukinoChan";
 
-    /// <summary>主控端日志目录名。</summary>
-    private const string LogDirName = "logs";
+    /// <summary>本看门狗的数据目录（与 agent 平级）。
+    ///
+    /// 🔑 <b>不能写到 exe 同级的 logs\</b>（2026-10-16 实测踩过）：
+    /// 安装目录 <c>C:\Program Files\YukinoChan</c> 只给 Administrators 写权限，
+    /// 而本看门狗 manifest 是 asInvoker（标准用户）—— 写进去会静默失败，
+    /// 日志一行都留不下。（主控端能写是因为它自己就是管理员进程。）
+    /// ProgramData 已验证标准用户可写，且 agent 的日志也在这里。
+    /// </summary>
+    private static readonly string DataDir = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "YukinoChan", "watchdog");
 
     /// <summary>本看门狗自己的日志文件名。</summary>
     private const string WatchdogLogName = "watchdog.log";
 
-    /// <summary>崩溃转储输出目录名（被监视进程 exe 同级）。</summary>
+    /// <summary>崩溃转储输出目录名（在 DataDir 下）。</summary>
     private const string DumpDirName = "crashdumps";
 
     private static readonly object Gate = new();
 
     private static StreamWriter? _log;
+
+    /// <summary>当前日志文件路径；与 _log 配套，用于检测目标变化时重开。</summary>
+    private static string? _logPath;
 
     /// <summary>当前被监视的 PID（日志与 dump 目录要按它定位）。</summary>
     private static int? _currentPid;
@@ -131,6 +143,7 @@ public static class Program
             {
                 _log?.Dispose();
                 _log = null;
+                _logPath = null;
             }
         }
     }
@@ -478,86 +491,18 @@ public static class Program
 
     // ---------------- 路径解析 ----------------
 
-    /// <summary>
-    /// 被监视进程的 exe 所在目录。
-    ///
-    /// 🔑 必须按 <b>PID</b> 取，不能 <c>GetProcessesByName</c> 取第一个（2026-10-16 实测踩过）：
-    /// 机器上同时有主控端、以及每个目标账户一个的 <c>--rdp-agent</c>，它们进程名都一样，
-    /// 按名字取会命中 agent（PID 往往更小），于是 dump 写进了
-    /// <c>C:\ProgramData\YukinoChan\agent\crashdumps</c> 而不是主控端安装目录。
-    /// </summary>
-    private static string? ResolveTargetDir(int? pid)
+    private static string ResolveDumpDir(int? pid)
     {
-        if (pid is int target)
-        {
-            var dir = DirOf(target);
-            if (dir is not null)
-            {
-                return dir;
-            }
-        }
-
-        // 没有指定 PID 时，退回来找「有可见主窗口」的那个 —— 那才是主控端
-        try
-        {
-            foreach (var process in Process.GetProcessesByName(TargetProcessName))
-            {
-                if (process.Id == Environment.ProcessId)
-                {
-                    continue;
-                }
-
-                var dir = DirOf(process.Id);
-                if (dir is not null)
-                {
-                    return dir;
-                }
-            }
-        }
-        catch
-        {
-        }
-
-        return null;
-    }
-
-    private static string? DirOf(int pid)
-    {
-        try
-        {
-            using var process = Process.GetProcessById(pid);
-            var path = process.MainModule?.FileName;
-            var dir = string.IsNullOrEmpty(path) ? null : Path.GetDirectoryName(path);
-            return string.IsNullOrEmpty(dir) ? null : dir;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static string? ResolveDumpDir(int? pid)
-    {
-        var targetDir = ResolveTargetDir(pid);
-        return targetDir is null ? null : Path.Combine(targetDir, DumpDirName);
+        // 参数保留为了调用侧语义清晰（“这是哪个目标的转储”），
+        // 但目录不再跟随目标变化 —— ProgramData 是唯一可靠可写位。
+        _ = pid;
+        return Path.Combine(DataDir, DumpDirName);
     }
 
     private static string ResolveLogPath(int? pid)
     {
-        var targetDir = ResolveTargetDir(pid);
-        var dir = targetDir is null
-            ? AppContext.BaseDirectory
-            : Path.Combine(targetDir, LogDirName);
-
-        try
-        {
-            Directory.CreateDirectory(dir);
-            return Path.Combine(dir, WatchdogLogName);
-        }
-        catch
-        {
-            return Path.Combine(AppContext.BaseDirectory, WatchdogLogName);
-        }
+        _ = pid;
+        return Path.Combine(DataDir, WatchdogLogName);
     }
 
     // ---------------- 日志 ----------------
@@ -571,11 +516,25 @@ public static class Program
         {
             try
             {
-                _log ??= new StreamWriter(new FileStream(
-                    ResolveLogPath(_currentPid), FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
+                // 🔑 每次都重新解析目标目录，并在目标变化时重开文件流（测试必看）。
+                //
+                // 之前用「首次调用时建一次」(_log ??= ...)，而首行日志发生在进入探测循环**之前**，
+                // 那时 _currentPid 还是 null —— ResolveTargetDir(null) 会退化成「找第一个叫 YukinoChan 的进程」，
+                // 命中 agent（PID 往往更小），于是整份日志写进了
+                // C:\ProgramData\YukinoChan\agent\logs\watchdog.log（2026-10-16 实测踩过）。
+                // 而且文件流一旦打开就固定了路径，之后所有日志都跟着错。
+                var path = ResolveLogPath(_currentPid);
+                if (_log is null || !string.Equals(_logPath, path, StringComparison.OrdinalIgnoreCase))
                 {
-                    AutoFlush = true,
-                };
+                    _log?.Dispose();
+                    _logPath = path;
+                    Directory.CreateDirectory(DataDir);
+                    _log = new StreamWriter(new FileStream(
+                        path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
+                    {
+                        AutoFlush = true,
+                    };
+                }
 
                 _log.WriteLine(line);
             }
