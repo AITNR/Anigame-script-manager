@@ -162,6 +162,14 @@ def _verify(app_dir: Path, *, require_dotnet_runtime: bool) -> None:
     need("libcrypto-3-x64.dll", "OpenSSL libcrypto（FreeRDP 依赖）")
     need("assets/mascot", "看板娘素材（也是程序根目录的定位标记）")
 
+    # 外置 UI 看门狗（可选但强烈建议带上）：独立进程，主控端整窗假死时它不受影响，
+    # 负责记录现场 + 抓 dump。进程内看门狗会被同一个冻结拖住，这就是要它的理由。
+    # 不设为硬性缺失：CI 未构建它时不该让整个打包失败。
+    wd = app_dir / "YukinoChan.Watchdog.exe"
+    if not wd.exists():
+        print("提示：未包含 YukinoChan.Watchdog.exe（外置 UI 看门狗）。", file=sys.stderr)
+        print("      主控端假死时将没有外部证据可查。", file=sys.stderr)
+
     xbf = list(app_dir.glob("Views/*.xbf"))
     if not xbf:
         problems.append("Views/*.xbf（页面 XAML 编译产物）")

@@ -281,6 +281,12 @@ jobs:
           dotnet build winui3/src/YukinoChan.App/YukinoChan.App.csproj `
             -c Release -p:Platform=x64 -p:Version=${{ steps.ver.outputs.version }} -p:OutDir=$outDir
 
+          # 外置 UI 看门狗：独立进程，抓主控端假死现场。
+          # 为什么单独一个工程：主控端 manifest 是 requireAdministrator（编译期静态、
+          # 没法按参数豁免），共用同一个 exe 会让看门狗每次启动都弹 UAC。
+          dotnet build winui3/src/YukinoChan.Watchdog/YukinoChan.Watchdog.csproj `
+            -c Release -p:Platform=x64 -p:Version=${{ steps.ver.outputs.version }} -p:OutDir=$outDir
+
       - name: 发布（自包含，带 .NET 运行时）
         if: inputs.self_contained
         shell: pwsh

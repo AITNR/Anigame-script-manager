@@ -569,3 +569,105 @@ Program.Main
    尚未在实际内嵌软渲染长跑中确认假死消失。
 
 ---
+
+---
+
+## 12. 外置看门狗（2026-10-16）：进程内监视不可靠，改成独立进程
+
+### 12.1 为什么必须外置
+
+§10.5 的 harness 验证曾让进程内看门狗「看起来能用」，但 §11 的真实故障证明了它的局限：
+
+> 真实冻结是 **68 个线程一起卡住**，连 `ThreadPriority.BelowNormal` 的后台看门狗线程
+> 都得不到调度 —— 看门狗自己也跑不起来，于是什么都没记下。
+
+harness 只覆盖了「UI 卡但进程健康」，真实场景是整进程冻结。**这是两类不同的情况**，
+前者能过不代表后者能过。三次漏报（10-12 / 10-15 / 10-16）都是这个原因。
+
+### 12.2 新工程
+
+`winui3/src/YukinoChan.Watchdog/` —— 独立进程，自带 `asInvoker` manifest。
+
+**为什么必须是独立工程，而不是主程序的 `--watchdog` 参数入口**：
+主程序 `app.manifest` 是 `requireAdministrator`（编译期静态、没法按参数豁免），
+共用同一个 exe 会让看门狗每次启动都弹 UAC。agent 当年是靠 `mt.exe` 就地改写
+副本 manifest 才绕开的，成本高且只此一例。
+
+组成：
+
+| 文件 | 作用 |
+| --- | --- |
+| `HangProbe.cs` | 探测 + 线程快照（`NtQuerySystemInformation`） |
+| `Program.cs` | 常驻循环、日志、抓 dump、目标查找 |
+| `YukinoChan.Watchdog.csproj` | 自包含 + `win-x64` |
+| `app.manifest` | `asInvoker` |
+
+用法：
+
+```powershell
+YukinoChan.Watchdog.exe                # 常驻监视
+YukinoChan.Watchdog.exe --once         # 自检：探测一次并打印
+YukinoChan.Watchdog.exe --pid 12345    # 只监视指定 PID（调试）
+```
+
+参数：探测间隔 3s、单次超时 3s、连续 2 次判定、假死 90s 后抓 dump、dump 冷却 10 分钟。
+
+### 12.3 探测判据
+
+与进程内版最终一致（§10.4）：`rc != 0` 即活着；否则看 `IsWindow` ——
+窗口还在就是假死，窗口没了说明应用正在关。
+**不看 `GetLastError`（会出现 1460/0/1400，无规律）、不看 `IsHungAppWindow`（WrLpcReply 时返回 false）。**
+
+### 12.4 抓 dump：不用 createdump，用 MiniDumpWriteDump
+
+第一版用 `createdump.exe`（.NET 运行时自带），实测失败：
+
+```
+[createdump] The pid argument is no longer supported
+```
+
+新版 .NET 的 createdump **只能抓自己**，传 pid 直接被拒。改用 Win32 `MiniDumpWriteDump`，
+能抓任意进程。代价是 dump 里没有托管堆，但**线程栈、模块、句把都在** ——
+足以判断「UI 线程卡在哪个调用」，那正是本看门狗要的证据。
+若还需托管堆（如看对象分配），用提权的 `dotnet-dump collect` 补抓（它走诊断管道，需要权限）。
+
+### 12.5 又一个实测才发现的坑：目录定位不能按进程名
+
+`ResolveTargetDir()` 最初用 `Process.GetProcessesByName("YukinoChan")` 取第一个，
+结果 dump 写进了 `C:\ProgramData\YukinoChan\agent\crashdumps` ——
+机器上同时有主控端和每个目标账户一个的 `--rdp-agent`，进程名都一样，
+而 agent 的 PID 往往更小。已改为**必须按被监视的 PID** 取目录。
+
+### 12.6 端到端验证（本次已做）
+
+用一个进程名同样叫 `YukinoChan` 的假死目标（真窗口 + STA 线程自旋占住）：
+
+| 用例 | 结果 |
+| --- | --- |
+| `--once` 探测健康主控端 | ✅ `Alive`，exit=0 |
+| `--once --pid <假死>` | ✅ `Hung` + 11 个线程快照，exit=1 |
+| 常驻模式 | ✅ 6 秒检出 → 写事件 + 线程表 → 60 秒补报 → 恢复有记录 |
+| 抓 dump | ✅ 154MB 落在被监视进程的 `crashdumps/` |
+
+常驻模式实测日志：
+
+```
+11:42:25  外置 UI 看门狗启动（pid=114808，间隔 3s，超时 3000ms，连续 2 次判定，假死 90s 后抓 dump）
+11:42:31  UI 线程无响应（假死）：连续 2 次探测失败，pid=77200。…
+11:42:32    进程 11 个线程：tid=126772 Waiting DelayExecution ctxSw=1092 …
+11:42:45    已抓 dump（线程栈级）：…crashdumps\hang-20261016-114244-77200.dmp（147 MB）
+11:43:21  UI 线程无响应已恢复（本次持续 0分49秒，pid=77200）
+```
+
+### 12.7 已知限制
+
+1. **主控端是管理员进程，看门狗默认 asInvoker，`OpenProcess` 可能被拒**（err=5）。
+   此时 dump 抓不到，但日志与线程快照仍会写（那才是主要价值）。
+   要 dump 就把看门狗也跑成管理员，或手动用提权 `dotnet-dump collect` 补抓。
+   日志里会写明是哪一种。
+2. **未做开机自启/常驻部署**：当前只构建出 exe，需要你决定怎么跑
+   （计划任务 / 开机启动项 / 手动）。
+3. **未在真实主控端上验证**：本次用的是假死目标。真机上主控端是提权进程，
+   `OpenProcess` 的行为与 dump 能否落地都还没实测。
+
+---
