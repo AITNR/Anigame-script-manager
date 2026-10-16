@@ -44,6 +44,13 @@ public sealed class MainViewModel : ObservableObject
     /// <summary>内嵌画面诊断行的标签。带它的行默认不进「运行日志」页（见 <see cref="ShouldShowLogLine"/>）。</summary>
     private const string EmbedLogTag = "[embed]";
 
+    /// <summary>
+    /// 同步等 UI 线程干完一件事的上限（<see cref="RunOnUiThreadSync"/>）。
+    /// 取值理由：那里排的都是「改个状态 + 刷个界面」的短活，正常几十微秒到几毫秒；
+    /// 给 5 秒是留足余量 —— 真等满 5 秒基本可以确定 UI 线程卡住了，而不是慢。
+    /// </summary>
+    private static readonly TimeSpan UiThreadSyncTimeout = TimeSpan.FromSeconds(5);
+
     private readonly ConfigManager _configManager;
     private readonly FileLogger _logger;
     private readonly RuntimeStatsManager _statsManager;
@@ -1994,6 +2001,14 @@ public sealed class MainViewModel : ObservableObject
     ///
     /// ⚠️ 绝不能在 UI 线程上同步等一个还没排到队里的任务（自己等自己 = 死锁），
     /// 所以本方法只在**非 UI 线程**时才会阻塞；已在 UI 线程就直接执行。
+    ///
+    /// ⚠️ 等待<b>必须有超时</b>：本方法只防住了「UI 线程等自己」这种死锁，
+    /// 防不住「UI 线程因为别的原因卡住」——后者正是 <c>UiHangWatchdog</c> 要抓的假死。
+    /// UI 线程一旦卡住，排进队列的 action 永远得不到执行，无限期的 <c>Wait()</c> 会让调用线程
+    /// 跟着一起挂住，而且<b>不留任何日志</b>：进程活着、crash.log 干净、看门狗只报 UI 线程卡死，
+    /// 查不出还有一批后台线程被同一场卡死拖住。
+    /// 超时后如实记一条日志再返回 —— 调用方是看板娘贴图这类「错过了无所谓」的操作，
+    /// 丢一次远比挂死一个后台线程划算。
     /// </summary>
     private void RunOnUiThreadSync(Action action)
     {
@@ -2026,7 +2041,15 @@ public sealed class MainViewModel : ObservableObject
             throw new InvalidOperationException("UI 线程队列已关闭，无法继续更新界面状态。");
         }
 
-        done.Wait();
+        if (!done.Wait(UiThreadSyncTimeout))
+        {
+            // UI 线程没在超时内把活干完（多半是它卡住了）。这里绝不再 throw：
+            // 调用方（如看板娘贴图）拿这个结果只是刷个界面，抛异常反而会打断业务流程。
+            // 记一条日志，让「后台线程被 UI 卡死拖住」这件事在日志里留痕、可查。
+            AppendLog("[UI 线程] 同步等待界面操作超时（" + UiThreadSyncTimeout.TotalSeconds
+                + "s 未完成）—— UI 线程可能已卡死，本次界面更新已放弃。");
+            return;
+        }
 
         if (failure is not null)
         {
