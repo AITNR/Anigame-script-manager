@@ -35,6 +35,10 @@ public static class Program
 
     private delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
 
+    /// <summary>脱离控制台。常驻模式下调用，避免开机自启时弹出黑窗。</summary>
+    [DllImport("kernel32.dll")]
+    private static extern bool FreeConsole();
+
     // ---------------- P/Invoke：抓崩溃转储 ----------------
 
     /// <summary>MiniDumpWithFullMemory：线程栈 + 模块 + 句把都在，dotnet-dump 能分析栈。</summary>
@@ -103,6 +107,13 @@ public static class Program
     /// <summary>崩溃转储输出目录名（在 DataDir 下）。</summary>
     private const string DumpDirName = "crashdumps";
 
+    /// <summary>
+    /// 日志文件大小上限（5 MB）。超过就截断保留末尾部分。
+    /// 看门狗是常驻进程（开机至关机），不加上限的话会一直长；
+    /// 而且真正有用的总是最近那几次卡死记录。
+    /// </summary>
+    private const long MaxLogBytes = 5 * 1024 * 1024;
+
     private static readonly object Gate = new();
 
     private static StreamWriter? _log;
@@ -119,6 +130,9 @@ public static class Program
     private static DateTime _lastReportAt;
     private static DateTime _lastDumpAt = DateTime.MinValue;
     private static bool _dumpTaken;
+
+    /// <summary>常驻模式是否已脱离控制台（只做一次）。</summary>
+    private static bool _consoleDetached;
 
     public static int Main(string[] args)
     {
@@ -179,6 +193,16 @@ public static class Program
 
     private static int RunLoop(int? forcedPid)
     {
+        // 🔑 脱离控制台（2026-10-16 实测踩过）：本工程 OutputType=Exe，
+        // 进程一启动就会附加一个控制台窗口（实测到 ConsoleWindowClass 类的顶层窗口）。
+        // 看门狗是开机自启、常驻后台的，不该弹黑窗扰人。
+        // 不改成 WinExe 是为了保留 --once / --pid 的控制台输出（人工自检需要）。
+        if (!_consoleDetached)
+        {
+            try { FreeConsole(); } catch { }
+            _consoleDetached = true;
+        }
+
         Log("外置 UI 看门狗启动（pid=" + Environment.ProcessId
             + "，间隔 " + ProbeInterval.TotalSeconds + "s，超时 " + ProbeTimeoutMs + "ms"
             + "，连续 " + FailuresBeforeReport + " 次判定，假死 " + DumpAfter.TotalSeconds
@@ -516,19 +540,17 @@ public static class Program
         {
             try
             {
-                // 🔑 每次都重新解析目标目录，并在目标变化时重开文件流（测试必看）。
-                //
-                // 之前用「首次调用时建一次」(_log ??= ...)，而首行日志发生在进入探测循环**之前**，
-                // 那时 _currentPid 还是 null —— ResolveTargetDir(null) 会退化成「找第一个叫 YukinoChan 的进程」，
-                // 命中 agent（PID 往往更小），于是整份日志写进了
-                // C:\ProgramData\YukinoChan\agent\logs\watchdog.log（2026-10-16 实测踩过）。
-                // 而且文件流一旦打开就固定了路径，之后所有日志都跟着错。
+                Directory.CreateDirectory(DataDir);
                 var path = ResolveLogPath(_currentPid);
+
+                // 超过上限就截断保留末尾：看门狗是开机至关机的常驻进程，
+                // 不编辑会一直长；有用的只有最近那几次卡死记录。
+                TruncateIfTooLarge(path);
+
                 if (_log is null || !string.Equals(_logPath, path, StringComparison.OrdinalIgnoreCase))
                 {
                     _log?.Dispose();
                     _logPath = path;
-                    Directory.CreateDirectory(DataDir);
                     _log = new StreamWriter(new FileStream(
                         path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
                     {
@@ -543,7 +565,49 @@ public static class Program
                 // 日志写不进不影响探测
             }
 
-            Console.WriteLine(line);
+            // 常驻模式已 FreeConsole，这里写不出去（也不会报错）；
+            // --once / --pid 还有控制台，保留输出供人工自检。
+            if (!_consoleDetached)
+            {
+                try
+                {
+                    Console.WriteLine(line);
+                }
+                catch
+                {
+                    // 无控制台时忽略
+                }
+            }
+        }
+    }
+
+    /// <summary>日志超过上限时截断，保留末尾。</summary>
+    private static void TruncateIfTooLarge(string path)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists || info.Length <= MaxLogBytes)
+            {
+                return;
+            }
+
+            // 当前句柄可能还开着：先关再截断，由调用方重开
+            _log?.Dispose();
+            _log = null;
+            _logPath = null;
+
+            var keep = MaxLogBytes / 2;
+            var bytes = File.ReadAllBytes(path);
+            var tail = bytes[(bytes.Length - (int)keep)..];
+            File.WriteAllText(path,
+                "[日志超过 " + (MaxLogBytes / 1024 / 1024) + " MB，已截断保留末尾]" + Environment.NewLine,
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            File.AppendAllText(path, Encoding.UTF8.GetString(tail));
+        }
+        catch
+        {
+            // 截断失败不影响主流程（下次再试）
         }
     }
 
