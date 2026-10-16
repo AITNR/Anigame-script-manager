@@ -825,6 +825,10 @@ static BOOL ycn_selftest_setvol(rdpsndDevicePlugin* device, UINT32 value)
  *   bit3(8) = 静音时 Play 依然被调用（节奏不丢，rdpsnd 回执正常）
  *   bit4(16) = 取消静音后恢复原始数据
  */
+/* 前置声明：自检（本函数后面的负向断言）要直接调 probe 这个纯函数验证防线，
+ * 而 probe 的定义在更下方（它用到 YCN_RDPSND_OFFSET_* 等定义）。 */
+static rdpsndDevicePlugin* ycn_probe_rdpsnd_device(void* plugin);
+
 YCN_API int ycn_rdp_selftest_mute(void)
 {
 	int result = 0;
@@ -947,6 +951,65 @@ YCN_API int ycn_rdp_selftest_mute(void)
 	if (InterlockedCompareExchange(&g_selftest_data_seen, 0, 0) == 1)
 		result |= 16;
 
+	/* ④ 判据防线断言（2026-10-16 堆损坏根因，双向都要验）：
+	 *   0x20 = 伪插件被**拒绝**（两种形态：字段非法 / SetVolume 不在 FreeRDP 模块内）
+	 *   0x40 = 真设备形态被**接受**（防判据过严 → 静音静默失效，那是更坏的失败）
+	 *
+	 * 直接调 probe 这个纯函数：不动槽位、不写任何 FreeRDP 结构，绝对安全。
+	 *
+	 * ⚠️ 两个易错点（写这段时都踩过，别再犯）：
+	 *   1) 判据 `ycn_plugin_fields_sane` 检查的是 **plugin**（偏移 184..420），
+	 *      不是 device —— 把垃圾写进 device 等于什么都没测。
+	 *   2) MSVC 下 `&某个导入函数` 拿到的是**本模块里的跳转桩**，不是目标模块地址；
+	 *      要真实模块内地址必须走 GetProcAddress(GetModuleHandleW(...))。 */
+	{
+		static uint8_t fkDev[512];
+		static uint8_t fkPlugin[512];
+		BOOL rejBadFields = FALSE, rejForeignMod = FALSE, accRealDev = FALSE;
+		HMODULE hFree = GetModuleHandleW(L"freerdp-client3.dll");
+		HMODULE hKern = GetModuleHandleW(L"kernel32.dll");
+		void* pFree = hFree ? (void*)GetProcAddress(hFree, "freerdp_rdpsnd_get_context") : NULL;
+		void* pKern = hKern ? (void*)GetProcAddress(hKern, "GetTickCount64") : NULL;
+
+		/* (a) 字段非法：plugin 的 BOOL 字段放实测垃圾值 → 必须拒 */
+		if (pFree)
+		{
+			memset(fkDev, 0, sizeof(fkDev));
+			memset(fkPlugin, 0, sizeof(fkPlugin));
+			((rdpsndDevicePlugin*)fkDev)->SetVolume = (pcSetVolume)(uintptr_t)pFree;
+			*(rdpsndDevicePlugin**)(fkPlugin + YCN_RDPSND_OFFSET_DEVICE) = (rdpsndDevicePlugin*)fkDev;
+			*(int*)(fkPlugin + YCN_RDPSND_OFFSET_DYNAMIC) = 3670068;     /* 实测 slot2 的垃圾 */
+			*(int*)(fkPlugin + YCN_RDPSND_OFFSET_ATTACHED) = 2949219;
+			*(int*)(fkPlugin + YCN_RDPSND_OFFSET_ISOPEN) = -849258240;
+			rejBadFields = (ycn_probe_rdpsnd_device(fkPlugin) == NULL);
+		}
+
+		/* (b) 字段合法、但 SetVolume 落在 FreeRDP 之外的模块（kernel32）→ 必须拒 */
+		if (pKern)
+		{
+			memset(fkDev, 0, sizeof(fkDev));
+			memset(fkPlugin, 0, sizeof(fkPlugin));   /* 字段全 0 = 合法取值 */
+			((rdpsndDevicePlugin*)fkDev)->SetVolume = (pcSetVolume)(uintptr_t)pKern;
+			*(rdpsndDevicePlugin**)(fkPlugin + YCN_RDPSND_OFFSET_DEVICE) = (rdpsndDevicePlugin*)fkDev;
+			rejForeignMod = (ycn_probe_rdpsnd_device(fkPlugin) == NULL);
+		}
+
+		/* (c) 真设备形态（字段合法 + SetVolume 真在 FreeRDP 模块内）→ 必须接受 */
+		if (pFree)
+		{
+			memset(fkDev, 0, sizeof(fkDev));
+			memset(fkPlugin, 0, sizeof(fkPlugin));
+			((rdpsndDevicePlugin*)fkDev)->SetVolume = (pcSetVolume)(uintptr_t)pFree;
+			*(rdpsndDevicePlugin**)(fkPlugin + YCN_RDPSND_OFFSET_DEVICE) = (rdpsndDevicePlugin*)fkDev;
+			accRealDev = (ycn_probe_rdpsnd_device(fkPlugin) != NULL);
+		}
+
+		if (rejBadFields && rejForeignMod)
+			result |= 32; /* 0x20 */
+		if (accRealDev)
+			result |= 64; /* 0x40 */
+	}
+
 	/* 还原槽位（真机运行时这槽本来可能是空的） */
 	EnterCriticalSection(&g_lock);
 	s->rdpsnd_plugin[slot] = saved_plugin;
@@ -964,15 +1027,103 @@ YCN_API int ycn_rdp_selftest_mute(void)
 }
 
 
+/* ---- FreeRDP 模块白名单（2026-10-16 堆损坏根治的关键） ----
+ *
+ * rdpsnd 设备插件的实现在 FreeRDP 自己的模块里，所以**真设备**的方法指针
+ * （SetVolume / Play / PlayEx）必然落在 freerdp3 / freerdp-client3 / winpr3 之中。
+ * 这是把"真设备"与"碰巧可读的一块内存"区分开的唯一可靠判据。
+ *
+ * 🔴 为什么必须有它（本机 dump + 588MB 诊断实证）：
+ *   旧判据只做了一件事 —— 排除"SetVolume 落在本模块内（那是我们自己的钩子）"。
+ *   等价于「只要不是我的钩子，就算真设备」。于是 DVC 插件列表里**非 rdpsnd 的对象**
+ *   被误判成音频设备：实测 slot2 的字段全是垃圾
+ *   （dync=3670068 open=-849258240 nfmt=55 play=0000000400000000）。
+ *   紧接着 ycn_rdpsnd_hook_slot 往这块内存**写**了 SetVolume/Play/PlayEx 三个函数指针
+ *   —— 写进别人的结构体 = 破坏堆。下游症状全部对得上：
+ *     · ntdll.dll 0xC0000374（STATUS_HEAP_CORRUPTION）
+ *     · coreclr.dll 0xC0000005 ×5 / CoreMessagingXP 0xC000027B ×3
+ *     · 托管栈顶 ToolTipService.SetToolTip 的 AV（堆已被污染）
+ *   ⚠️ 注意 SUH 挡不住这个：SEH 只能抓"踩到不可访问页"，
+ *      而"写进一块合法但不属于我们的内存"不会抛异常，只会静默毁堆。
+ *
+ * 无状态实现（不缓存句柄）：probe 会被 UI 线程（ycn_rdp_set_muted）与 RDP 线程
+ * （ycn_rdpsnd_hook）同时调用，GetModuleHandleW 只是查 loader 表，无需加锁。
+ */
+static BOOL ycn_is_freerdp_ptr(const void* p)
+{
+	HMODULE m = NULL;
+
+	if (!p)
+		return FALSE;
+	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+	                        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+	                        (LPCWSTR)(uintptr_t)p, &m) ||
+	    !m)
+		return FALSE;
+	return m == GetModuleHandleW(L"freerdp3.dll") ||
+	       m == GetModuleHandleW(L"freerdp-client3.dll") ||
+	       m == GetModuleHandleW(L"winpr3.dll");
+}
+
+/* 候选 plugin 的字段合法性检查（模块判据之外的第二道闸，**不依赖模块名**）。
+ *
+ * 依据来自 2026-10-16 的现场实证（588MB 诊断里三类槽位对照）：
+ *   真静态 rdpsnd : att=1 onopen=0 isopen=0 applyv=0 nfmt=0    → 全部合法
+ *   真 DVC rdpsnd : dync=1 att=1 open=0 onopen=1 isopen=0 nfmt=0 → 全部合法
+ *   伪插件 slot2  : dync=3670068 att=2949219 open=-849258240 nfmt=55 → 明显非法
+ * rdpsndPlugin 里这几个字段声明都是 BOOL/UINT16，正常取值只有 0/1（nfmt 是小的格式数）。
+ * 垃圾内存几乎不可能同时满足，因此这条判据能把伪插件筛掉，
+ * 且**与 FreeRDP 版本无关**（不像硬编码偏移那样换版本就失效）。
+ *
+ * 全部读操作进 SEH：plugin 可能是野指针。读不动 = 判为不合法。 */
+static BOOL ycn_plugin_fields_sane(const void* plugin)
+{
+	BOOL ok = FALSE;
+	const uint8_t* p = (const uint8_t*)plugin;
+	int att = -1, dyn = -1, isopen = -1, applyv = -1, onopen = -1;
+	unsigned nfmt = 0xFFFFu;
+
+	if (!p)
+		return FALSE;
+	__try
+	{
+		dyn = *(const BOOL*)(p + YCN_RDPSND_OFFSET_DYNAMIC);
+		att = *(const BOOL*)(p + YCN_RDPSND_OFFSET_ATTACHED);
+		isopen = *(const BOOL*)(p + YCN_RDPSND_OFFSET_ISOPEN);
+		applyv = *(const BOOL*)(p + YCN_RDPSND_OFFSET_APPLYVOLUME);
+		onopen = *(const BOOL*)(p + YCN_RDPSND_OFFSET_ONOPENCALLED);
+		nfmt = *(const UINT16*)(p + YCN_RDPSND_OFFSET_NUM_CLIENT_FMT);
+		ok = TRUE;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		return FALSE;
+	}
+	if (!ok)
+		return FALSE;
+	(void)nfmt; /* nfmt 不参与判定：真设备协商后可能非 0（见下），而垃圾值 55 也照样能 <=64，
+	             * 拿它当阈值两头不讨好。真正起作用的是下面 5 个 BOOL 字段。 */
+	/* 这 5 个字段在 rdpsndPlugin 里声明都是 BOOL，取值只可能是 0/1
+	 * —— 对真设备**不会误伤**（这是关键：宁可少挡，不可把真静音挡没了）；
+	 * 而一块被误认成插件的垃圾内存，5 个字段同时落进 {0,1} 的概率极低。 */
+	return (dyn == 0 || dyn == 1) && (att == 0 || att == 1) &&
+	       (isopen == 0 || isopen == 1) && (applyv == 0 || applyv == 1) &&
+	       (onopen == 0 || onopen == 1);
+}
+
 /* 判断某指针是否"像"一个 rdpsndPlugin：取它的 device 字段，看 device 的 SetVolume
- * 是否为落在**本模块之外**的有效函数指针。用于在 openData 里认出所有 rdpsnd 插件
- * （静态那份、DVC 另建的那份，注册名都可能是 "rdpsnd"，只能靠形态认）。 */
+ * 是否落在 **FreeRDP 自己的模块**里（见上面 ycn_is_freerdp_ptr）。用于在 openData /
+ * DVC 列表里认出所有 rdpsnd 插件（注册名都可能是 "rdpsnd"，只能靠形态认）。
+ *
+ * ⚠️ 判据必须取「正」而不能取「反」：只排除"是本模块的钩子"就等于放行任意可读垃圾，
+ *    这正是 2026-10-16 堆损坏的成因（详见 ycn_is_freerdp_ptr 注释）。 */
 static rdpsndDevicePlugin* ycn_probe_rdpsnd_device(void* plugin)
 {
 	rdpsndDevicePlugin* dev = NULL;
 	HMODULE mod = NULL;
 	BOOL selfHooked = FALSE;
 	BOOL hasSetVolume = FALSE;
+	void* setvol = NULL;   /* SEH 内读出的 dev->SetVolume（出护栏后一律用这个缓存值） */
 
 	if (!plugin)
 		return NULL;
@@ -992,7 +1143,8 @@ static rdpsndDevicePlugin* ycn_probe_rdpsnd_device(void* plugin)
 		if (dev && dev->SetVolume)
 		{
 			hasSetVolume = TRUE;
-			/* SetVolume 落在本模块内 = 布局不对/是我们自己的钩子，跳过 */
+			setvol = (void*)dev->SetVolume;   /* 只在这里解引用一次 */
+			/* SetVolume 落在本模块内 = 它已经是我们自己的钩子，别重复认领 */
 			if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
 			                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 			                       (LPCWSTR)(uintptr_t)dev->SetVolume, &mod) &&
@@ -1006,6 +1158,25 @@ static rdpsndDevicePlugin* ycn_probe_rdpsnd_device(void* plugin)
 	}
 	if (!dev || !hasSetVolume || selfHooked)
 		return NULL;
+
+	/* 🔴 判据必须取「正」，且**两道都要过**。旧版只做了「不是我们的钩子就放行」，
+	 * 等于把任意可读垃圾收成设备 —— dump 实证：DVC 列表里非 rdpsnd 的对象被收成
+	 * slot2（字段全是垃圾），随后 hook_slot 往它写函数指针 → 破坏堆 →
+	 * ntdll 0xC0000374 与一串 coreclr 0xC0000005。详见上面两个 helper 的注释。
+	 *
+	 * 两道闸的分工：
+	 *   ① ycn_plugin_fields_sane —— 按结构体字段取值判"像不像"rdpsndPlugin
+	 *     （不依赖模块名，换 FreeRDP 版本也不失效）；
+	 *   ② ycn_is_freerdp_ptr   —— SetVolume 必须落在 FreeRDP 模块内。
+	 * 两道都在 __try 之外：它们只读 dev 的标量字段/查 loader 表，不碰 dev 的方法表。
+	 * 任一不过 = 这轮认不出它，返回 NULL（槽位保持原样，不影响真设备）。 */
+	if (!ycn_plugin_fields_sane(plugin))
+		return NULL;
+	/* ⚠️ 必须用 SEH 内缓存下来的 setvol，**不能**在这里再写一次 dev->SetVolume ——
+	 * 那等于把第 2 层解引用又漏到护栏外面（本文件 1109 行注释正是这个警告）。 */
+	if (!ycn_is_freerdp_ptr(setvol))
+		return NULL;
+
 	return dev;
 }
 
@@ -1256,6 +1427,20 @@ static int ycn_rdpsnd_hook_slot(YcnSession* s, int slot)
 	 * 否则重扫时 orig 被清就误判成未挂钩 → 反复重装。 */
 	if (alreadyHooked)
 		return 1;
+
+	/* 🔴 写之前最后一道闸：本槽的 device 必须"看着是真的"才允许写。
+	 *
+	 * 为什么光靠 probe 不够：device 取自**跨拍槽位缓存** s->rdpsnd_device[slot]，
+	 * 而 probe 返回 NULL 时（这拍认不出来）这一行不会更新缓存，于是
+	 * 仍可能拿着**上一拍留下的伪设备/已失效对象**往下写函数指针 —— 照样毁堆。
+	 * 判据与 probe 同源：当前 device->SetVolume 必须落在 FreeRDP 模块内。
+	 * 不是就不写、返回 0（下拍 probe 若再认出真设备会补上）。
+	 *
+	 * ⚠️ 这里刻意用 selfHookSource（上面 SEH 内已读出的缓存值），
+	 *    不再解引用 device —— 重复解引用等于把护栏又捅个洞。 */
+	if (!ycn_plugin_fields_sane(s->rdpsnd_plugin[slot]) ||
+	    !ycn_is_freerdp_ptr(selfHookSource))
+		return 0;
 
 	if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
 	                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
