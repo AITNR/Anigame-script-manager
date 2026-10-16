@@ -479,3 +479,93 @@ harness 做法：独立工程 `<Compile Include="...UiHangWatchdog.cs" />` 直�
 下一步应重点查那条链路（会话建立 / 等代理 / RDP 轮询）上有没有 UI 线程上的同步等待。
 
 ---
+
+---
+
+## 11. 第三次故障（2026-10-16）：dump 抓到真凶 —— 软渲染每帧 new SoftwareBitmap
+
+### 11.1 现场
+
+| 项 | 值 |
+| --- | --- |
+| 冻结实例 PID | **93904**（10:26:48 启动） |
+| UI 线程 tid | 120156 |
+| 渲染后端 | **software**（软渲染） |
+| 画面 | **先正常 70 秒**（10:27:03–10:28:08，呈现 18–26 帧/秒），随后彻底静默 |
+| 76 个线程 | 68 个 `Waiting/UserRequest`（含 UI 线程，全静止）+ 5 个 `WrQueue`（在动） |
+| `Responding` | False |
+
+### 11.2 抓到 dump（本次最大进展）
+
+用提权 `Start-Process -Verb RunAs` 跑 `dotnet-dump collect`，得到 1.46GB 全量 dump
+（`D:\dumps\hang-1016.dmp`）。此前三次都因为进程被提前结束 / WER 目录拒绝访问 /
+未配 LocalDumps 而一无所获。
+
+### 11.3 根因：UI 线程堵死在 `GC.AddMemoryPressure`
+
+`clrstack` 顶层帧：
+
+```
+Program.Main
+ -> Microsoft.UI.Xaml.Application.Start
+  -> DispatcherQueueTimer.Tick              (16ms 呈现节拍器)
+   -> RdpView.RenderFrameAsync
+    -> SoftwareBitmap.CreateCopyFromBuffer   (RdpView.xaml.cs @ 656)
+     -> SoftwareBitmap..ctor
+      -> System.GC._AddMemoryPressure        <-- 卡死在这里
+```
+
+内存证据（`eeheap -gc` + `dumpheap`）：
+
+- **LOH 16.7MB，只含 2 个 `System.Byte[]`，各 8,294,424 字节**
+  —— 正是两路内嵌通道各自的 `_frameBuffer`（1920×1080×4）；
+- GC 总堆仅 19.3MB，**LOH 占 86%**。
+
+### 11.4 机理
+
+1. `RenderFrameAsync` 每帧 `SoftwareBitmap.CreateCopyFromBuffer(...)`，**每秒新建约 24 个 8.3MB WinRT 对象**；
+2. .NET 的 WinRT 投影在 `SoftwareBitmap` 构造时调 `GC.AddMemoryPressure(8.3MB)`
+   （这块内存不受 GC 直接管理，只能靠压力通知催它回收）；
+3. 于是每秒约 **200MB** 内存压力涌进 GC，累积到阈值后 `AddMemoryPressure` 内部强制完整 GC；
+4. GC 又要处理 LOH 上的帧缓冲与大量 WinRT 包装对象；
+5. **UI 线程堵在 `AddMemoryPressure` 里出不来** → 消息泵停摆 → 68 个线程一起冻结。
+
+这也解释了此前所有想不通的现象：
+
+- 为什么画面**先正常 70 秒**再卡（压力累积到临界点）；
+- 为什么**软渲染和 D3D 都卡**（共性在呈现路径，不在具体后端）；
+- 为什么**看门狗没报**（它不是不想报 —— 低优先级后台线程被同一个冻结拖住，跑不起来）；
+- 为什么**无崩溃日志**（没抛异常，是纯阻塞）。
+
+### 11.5 修复：复用 SoftwareBitmap，不要每帧 new
+
+`RdpView.RenderFrameAsync` 改为：bitmap 尺寸不变就复用同一实例，每帧只
+`CopyFromBuffer` 原地更新内容；仅尺寸变化（远端改分辨率）才重建。
+内存压力从「每帧 8.3MB」降到「每连接一次 8.3MB」。
+
+同时在 `DetachClient` / `Disconnect` 两处补上 `_softBitmap.Dispose()`
+（它持 8.3MB 非 GC 内存，不复用就泄漏）。
+
+### 11.6 修复有效性（已量化验证）
+
+独立 harness 复现两种写法，各跑 10 秒 / 60Hz：
+
+| 写法 | 帧数 | gen0 | gen1 | gen2 |
+| --- | --- | --- | --- | --- |
+| 旧（每帧 new） | 319 | **79** | **79** | **79** |
+| 新（复用 bitmap） | 314 | **0** | **0** | **0** |
+
+旧写法每帧都触发一次**完整 GC**（gen0+gen1+gen2 同步 +1），10 秒 79 次 ≈ 每秒 8 次；
+新写法零 GC。这就是 UI 线程堵死的直接原因。
+
+### 11.7 仍未解决
+
+1. **看门狗在真实冻结下仍然不会报**（§10.5 的 harness 只覆盖了「UI 卡但进程健康」，
+   真实场景是 68 个线程一起卡，低优先级后台看门狗线程得不到调度）。
+   → 要可靠告警必须把看门狗**移到进程外**（独立 exe）。尚未实现。
+2. D3D 路线那次（10-15）崩在 `coreclr.dll` / `Microsoft.UI.Xaml.dll`，
+   根因未定位；但本次说明呈现路径有共性问题，D3D 那条也可能与内存/对象生命周期相关。
+3. **真机验证未做**：修复只通过了「GC 次数对比」的间接验证，
+   尚未在实际内嵌软渲染长跑中确认假死消失。
+
+---

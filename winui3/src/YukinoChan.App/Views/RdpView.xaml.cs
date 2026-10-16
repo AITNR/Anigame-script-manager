@@ -19,6 +19,16 @@ namespace YukinoChan.Views
     {
         private RdpEmbeddedClient? _client;
         private SoftwareBitmapSource? _bitmapSource;
+        /// <summary>
+        /// 软渲染复用的 SoftwareBitmap（尺寸不变就原地更新内容）。
+        /// 🔑 2026-10-16 修：原来是每帧 <c>CreateCopyFromBuffer</c> new 一个 8.3MB 对象，
+        /// 每秒 ~200MB 内存压力全涌进 <c>GC.AddMemoryPressure</c>，UI 线程最终堵死在该调用里
+        /// （dump 实证：栈顶 <c>System.GC._AddMemoryPressure</c>，LOH 16.7MB = 2×8.3MB 帧缓冲）。
+        /// 现在整条连接只建一次，内存压力从「每帧 8.3MB」降到「每连接一次」。
+        /// </summary>
+        private SoftwareBitmap? _softBitmap;
+        private int _softBitmapWidth;
+        private int _softBitmapHeight;
         private Microsoft.UI.Dispatching.DispatcherQueue? _dispatcher;
         private RdpD3DRenderer? _renderer;
         private bool _d3dFailed;               // D3D 初始化失败后本实例不再重试（回退软渲染）
@@ -192,6 +202,11 @@ namespace YukinoChan.Views
             System.Threading.Interlocked.Exchange(ref _frameArrivals, 0);
             System.Threading.Interlocked.Exchange(ref _maxArrivalGapMs, 0);
             _bitmapSource = null;
+            // 软渲染 bitmap 也要释放：它持着 8.3MB 非 GC 内存，不复用就泄漏
+            _softBitmap?.Dispose();
+            _softBitmap = null;
+            _softBitmapWidth = 0;
+            _softBitmapHeight = 0;
             _presentTimer?.Stop();
             _presentTimer = null;
             _lastFrameArrivedTick = 0;
@@ -229,6 +244,11 @@ namespace YukinoChan.Views
             System.Threading.Interlocked.Exchange(ref _frameArrivals, 0);
             System.Threading.Interlocked.Exchange(ref _maxArrivalGapMs, 0);
             _bitmapSource = null;
+            // 软渲染 bitmap 也要释放：它持着 8.3MB 非 GC 内存，不复用就泄漏
+            _softBitmap?.Dispose();
+            _softBitmap = null;
+            _softBitmapWidth = 0;
+            _softBitmapHeight = 0;
             _presentTimer?.Stop();
             _presentTimer = null;
             _lastFrameArrivedTick = 0;
@@ -630,6 +650,21 @@ namespace YukinoChan.Views
                 $"呈现 ≈{presented * 1000.0 / elapsed:F1} 帧/秒");
         }
 
+        /// <summary>
+        /// 软渲染呈现一帧。
+        ///
+        /// 🔑 <b>复用 SoftwareBitmap，不要每帧 new</b>（2026-10-16 修，dump 实证的假死根因）。
+        ///
+        /// 原来的写法每帧 <c>SoftwareBitmap.CreateCopyFromBuffer(...)</c>，即每秒新建约 24 个
+        /// 8.3MB 的 WinRT 对象。.NET 的 WinRT 投影在 <c>SoftwareBitmap</c> 构造时会调
+        /// <c>GC.AddMemoryPressure(8.3MB)</c>（这块内存不受 GC 直接管理，得靠压力通知催它回收）。
+        /// 于是每秒约 200MB 的压力涌进 GC，累积到阈值后 <c>AddMemoryPressure</c> 内部强制完整 GC，
+        /// 而 GC 又要处理 LOH 上的帧缓冲与大量 WinRT 包装 —— UI 线程最终堵死在该调用里，
+        /// 整窗假死、无任何日志（进程内看门狗也一起被拖住，所以它也没记录）。
+        ///
+        /// 现在：bitmap 尺寸不变就复用同一个实例，每帧只 <c>CopyFromBuffer</c> 原地更新内容，
+        /// 内存压力从「每帧 8.3MB」降到「每连接一次 8.3MB」。尺寸变化（远端改分辨率）才重建。
+        /// </summary>
         private async System.Threading.Tasks.Task RenderFrameAsync(int session)
         {
             if (_softRendering)
@@ -650,16 +685,32 @@ namespace YukinoChan.Views
                     return;
                 }
 
+                if (_bitmapSource is null)
+                {
+                    return;
+                }
+
                 // pixels 是复用缓冲，长度可能大于本帧实际字节数 —— 必须按 stride*height 切
                 var byteCount = checked((int)(stride * h));
-                var buffer = System.Runtime.InteropServices.WindowsRuntime.WindowsRuntimeBufferExtensions.AsBuffer(pixels, 0, byteCount);
-                using var bitmap = SoftwareBitmap.CreateCopyFromBuffer(
-                    buffer, BitmapPixelFormat.Bgra8, (int)w, (int)h, BitmapAlphaMode.Ignore);
-                if (_bitmapSource is not null)
+
+                // 尺寸变化（远端改分辨率）才重建；否则原地更新，避免每帧触发 AddMemoryPressure
+                if (_softBitmap is null || _softBitmapWidth != (int)w || _softBitmapHeight != (int)h)
                 {
-                    await _bitmapSource.SetBitmapAsync(bitmap);
-                    FramesRendered++;
+                    _softBitmap?.Dispose();
+                    _softBitmap = SoftwareBitmap.CreateCopyFromBuffer(
+                        System.Runtime.InteropServices.WindowsRuntime.WindowsRuntimeBufferExtensions.AsBuffer(pixels, 0, byteCount),
+                        BitmapPixelFormat.Bgra8, (int)w, (int)h, BitmapAlphaMode.Ignore);
+                    _softBitmapWidth = (int)w;
+                    _softBitmapHeight = (int)h;
                 }
+                else
+                {
+                    _softBitmap.CopyFromBuffer(
+                        System.Runtime.InteropServices.WindowsRuntime.WindowsRuntimeBufferExtensions.AsBuffer(pixels, 0, byteCount));
+                }
+
+                await _bitmapSource.SetBitmapAsync(_softBitmap);
+                FramesRendered++;
             }
             catch
             {
