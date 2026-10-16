@@ -339,22 +339,61 @@ static UINT ycn_gfx_surface_command(RdpgfxClientContext* ctx, const RDPGFX_SURFA
 	return CHANNEL_RC_OK;
 }
 
-/* ---- 诊断：GFX 各阶段「面包屑」----
- * 崩溃点定位：钩住 ResetGraphics / StartFrame / EndFrame，进入与退出各落一行盘，
+/* ---- 诊断面包屑：**内存环形缓冲**，稳态零 I/O ----
+ *
+ * 🔴 纪律（2026-10-16 实测换来的，改前必读）：
+ *   诊断信息在**稳态路径上一律不落盘**——只往这里的内存环形缓冲塞一行；
+ *   只有"进程马上要死、证据会一起没"的时刻才允许写文件。
+ *
+ * 为什么定这条：原来的面包屑直接 fopen/fprintf/fclose 往 %TEMP%\ycn_gfx_debug.txt
+ * 追加，而热路径频率是「每帧级」不是 500ms 一拍 —— event_loop 的
+ * WaitForMultipleObjects(...,500) 在帧流活跃时每次事件唤醒都会返回，
+ * 于是 ycn_rdpsnd_hook 跟着每帧跑一次，快照条件 tick%120 每几秒就命中。
+ * 两层后果：
+ *   ① 主控端 %TEMP%\ycn_gfx_debug.txt 长到 **588 MB / 544 万行**（94% 是 mute-snap#）；
+ *   ② UI 线程点「静音」/建连走 ycn_rdp_set_muted，要抢**同一把 g_lock**，
+ *      写盘那一刻它就等在那里 —— 界面直接卡死（watchdog.log 里的「假死」正是此事）。
+ * 归纳成一句：**锁内绝不 I/O，热路径绝不 I/O**。常规诊断走 WLog（FreeRDP 日志），
+ * 只有 ycn_note_av（SEH 吞下 AV）才调 ycn_dump_breadcrumbs 落盘。
+ *
+ * 崩溃前最后几行就是元凶所在的那一步 —— 这个诊断价值由环形缓冲完整保留。 */
+#define YCN_BC_SLOTS 64
+#define YCN_BC_LEN   256
+static char g_bc[YCN_BC_SLOTS][YCN_BC_LEN];
+static volatile LONG g_bc_seq = 0;
+
+/* 记一行面包屑：只 memcpy + 原子递增，不分配、不 I/O、不抢锁（可在 g_lock 内调）。 */
+static void ycn_bc(const char* tag)
+{
+	LONG seq;
+	if (!tag)
+		return;
+	seq = InterlockedIncrement(&g_bc_seq) - 1;
+	strncpy_s(g_bc[seq % YCN_BC_SLOTS], YCN_BC_LEN, tag, _TRUNCATE);
+}
+
+/* 崩溃路径专用：记一行 + 把环形缓冲整体落盘（定义在下面）。 */
+static void ycn_note_av(const char* tag);
+
+/* ---- 诊断：GFX 各阶段「面包屑」（只经 ycn_bc 记内存，不落盘）----
+ * 崩溃点定位：钩住 ResetGraphics / StartFrame / EndFrame，
  * 崩溃前最后一行就是元凶所在的那一步。 */
 static pcRdpgfxResetGraphics g_orig_reset_graphics = NULL;
 static pcRdpgfxStartFrame g_orig_start_frame = NULL;
 static pcRdpgfxEndFrame g_orig_end_frame = NULL;
 
-static void ycn_debug_dump_tag(const char* tag)
+
+/* 把环形缓冲里最后 ≤YCN_BC_SLOTS 行面包屑**一次性**落盘。
+ * 只在崩溃路径 / 进程退出时调用 —— 稳态下本函数零调用，所以稳态 I/O 为零。 */
+static void ycn_dump_breadcrumbs(void)
 {
 	char path[MAX_PATH] = WINPR_C_ARRAY_INIT;
 	FILE* f = NULL;
+	LONG seq, i, start;
 	const char* override = getenv("YCN_DEBUG_TAG");
 
 	if (override && override[0])
 	{
-		/* 环境变量指定独立路径：多实例/残留进程混写时用来隔离诊断输出 */
 		strncpy_s(path, sizeof(path), override, _TRUNCATE);
 	}
 	else
@@ -366,8 +405,19 @@ static void ycn_debug_dump_tag(const char* tag)
 	}
 	if (fopen_s(&f, path, "a") != 0 || !f)
 		return;
-	fprintf(f, "[tag] %s\n", tag);
+
+	seq = InterlockedCompareExchange(&g_bc_seq, 0, 0);
+	start = (seq > YCN_BC_SLOTS) ? (seq - YCN_BC_SLOTS) : 0;
+	for (i = start; i < seq; i++)
+		fprintf(f, "[tag] %s\n", g_bc[i % YCN_BC_SLOTS]);
 	fclose(f);
+}
+
+/* SEH 吞下 AV 的那一刻：记一行 + 立刻把面包屑落盘（这是唯一允许的写盘时机）。 */
+static void ycn_note_av(const char* tag)
+{
+	ycn_bc(tag);
+	ycn_dump_breadcrumbs();
 }
 
 static UINT ycn_gfx_reset_graphics(RdpgfxClientContext* ctx, const RDPGFX_RESET_GRAPHICS_PDU* pdu)
@@ -387,7 +437,7 @@ static UINT ycn_gfx_reset_graphics(RdpgfxClientContext* ctx, const RDPGFX_RESET_
 		              ? EXCEPTION_EXECUTE_HANDLER
 		              : EXCEPTION_CONTINUE_SEARCH)
 		{
-			ycn_debug_dump_tag("ResetGraphics-AV(0xC0000005) swallowed");
+			ycn_note_av("ResetGraphics-AV(0xC0000005) swallowed");
 			rc = CHANNEL_RC_OK; /* 假装成功，别让上层直接断链 */
 		}
 	}
@@ -407,7 +457,7 @@ static UINT ycn_gfx_start_frame(RdpgfxClientContext* ctx, const RDPGFX_START_FRA
 		              ? EXCEPTION_EXECUTE_HANDLER
 		              : EXCEPTION_CONTINUE_SEARCH)
 		{
-			ycn_debug_dump_tag("StartFrame-AV swallowed");
+			ycn_note_av("StartFrame-AV swallowed");
 			rc = CHANNEL_RC_OK;
 		}
 	}
@@ -427,7 +477,7 @@ static UINT ycn_gfx_end_frame(RdpgfxClientContext* ctx, const RDPGFX_END_FRAME_P
 		              ? EXCEPTION_EXECUTE_HANDLER
 		              : EXCEPTION_CONTINUE_SEARCH)
 		{
-			ycn_debug_dump_tag("EndFrame-AV swallowed");
+			ycn_note_av("EndFrame-AV swallowed");
 			rc = CHANNEL_RC_OK;
 		}
 	}
@@ -989,7 +1039,7 @@ static int ycn_add_slot(YcnSession* s, void* plugin, const char* tag_name)
 		char dbg[256];
 		_snprintf_s(dbg, sizeof(dbg), _TRUNCATE, "mute: collect slot%d src='%s' plugin=%p dev=%p", k,
 		            tag_name ? tag_name : "?", plugin, s->rdpsnd_device[k]);
-		ycn_debug_dump_tag(dbg);
+		ycn_bc(dbg); /* 锁内只写内存，不落盘 */
 	}
 	return 1;
 }
@@ -1095,7 +1145,7 @@ static int ycn_collect_rdpsnd_plugins(YcnSession* s, int verbose)
 	{
 		char dbg[256];
 		_snprintf_s(dbg, sizeof(dbg), _TRUNCATE, "mute-dvc: drdynvc_ctx=%p", (void*)drdynvc_ctx);
-		ycn_debug_dump_tag(dbg);
+		ycn_bc(dbg); /* 锁内只写内存，不落盘 */
 	}
 	if (drdynvc_ctx)
 	{
@@ -1105,14 +1155,14 @@ static int ycn_collect_rdpsnd_plugins(YcnSession* s, int verbose)
 			char dbg[256];
 			_snprintf_s(dbg, sizeof(dbg), _TRUNCATE, "mute-dvc: ctx=%p dvcplugin=%p",
 			            (void*)drdynvc_ctx, (void*)dvcplugin);
-			ycn_debug_dump_tag(dbg);
+			ycn_bc(dbg); /* 锁内只写内存，不落盘 */
 		}
 		dvcman = dvcplugin ? *(uint8_t**)(dvcplugin + YCN_DRDYNVC_PLUGIN_OFF_CHMGR) : NULL;
 		if (verbose)
 		{
 			char dbg[256];
 			_snprintf_s(dbg, sizeof(dbg), _TRUNCATE, "mute-dvc: dvcman=%p", (void*)dvcman);
-			ycn_debug_dump_tag(dbg);
+			ycn_bc(dbg); /* 锁内只写内存，不落盘 */
 		}
 		if (dvcman)
 		{
@@ -1122,7 +1172,7 @@ static int ycn_collect_rdpsnd_plugins(YcnSession* s, int verbose)
 				char dbg[256];
 				_snprintf_s(dbg, sizeof(dbg), _TRUNCATE, "mute-dvc: plugins=%p count=%zu",
 				            (void*)plugins, plugins ? ArrayList_Count(plugins) : 0);
-				ycn_debug_dump_tag(dbg);
+				ycn_bc(dbg); /* 锁内只写内存，不落盘 */
 			}
 			if (plugins)
 			{
@@ -1137,7 +1187,7 @@ static int ycn_collect_rdpsnd_plugins(YcnSession* s, int verbose)
 						char dbg[256];
 						_snprintf_s(dbg, sizeof(dbg), _TRUNCATE, "mute-dvc: item%zu p=%p dev=%p", j, p,
 						            (void*)dv);
-						ycn_debug_dump_tag(dbg);
+						ycn_bc(dbg); /* 锁内只写内存，不落盘 */
 					}
 					if (dv)
 						(void)ycn_add_slot(s, p, "dvc");
@@ -1151,7 +1201,7 @@ static int ycn_collect_rdpsnd_plugins(YcnSession* s, int verbose)
 		/* DVC 链路上有不可读内存：这次没扫到，但已收的槽位仍然有效。
 		 * 记一笔便于日后核对偏移是否还对得上 FreeRDP 当前版本。 */
 		if (verbose)
-			ycn_debug_dump_tag("mute-dvc: 扫描时踩到不可读内存（偏移可能已不匹配），本轮跳过 DVC 路径");
+			ycn_bc("mute-dvc: 扫描时踩到不可读内存（偏移可能已不匹配），本轮跳过 DVC 路径");
 	}
 	return s->rdpsnd_slot_count;
 }
@@ -1293,7 +1343,7 @@ static int ycn_rdpsnd_hook_slot(YcnSession* s, int slot)
 		_snprintf_s(dbg, sizeof(dbg), _TRUNCATE,
 		            "mute: slot%d HOOKED dev=%p play=%p playEx=%p", slot, (void*)device,
 		            (void*)s->rdpsnd_orig_play[slot], (void*)s->rdpsnd_orig_play_ex[slot]);
-		ycn_debug_dump_tag(dbg);
+		ycn_bc(dbg); /* 锁内只写内存，不落盘 */
 	}
 	WLog_INFO(TAG, "audio mute: slot%d hooked (device=%p)", slot, (void*)device);
 	return 1;
@@ -1372,7 +1422,7 @@ static int ycn_rdpsnd_hook(YcnSession* s)
 		 * 🔑 **加护栏要按"解引用动作"逐条清点，不是按"我这次改的是哪个函数"**。
 		 * 同一个语义族（按硬编码偏移读 FreeRDP 私有结构）在文件里有 4 处，
 		 * 只改 2 处就等于没改 —— 而且剩下的 2 处还给人"这里已经防过了"的错觉。 */
-		if (tick <= 5 || (tick % 120) == 0)
+		if (tick <= 2 || (tick % 1200) == 0)
 		{
 			uint8_t* p = (uint8_t*)s->rdpsnd_plugin[k];
 			char dbg[320];
@@ -1409,7 +1459,8 @@ static int ycn_rdpsnd_hook(YcnSession* s)
 					_snprintf_s(dbg, sizeof(dbg), _TRUNCATE,
 					            "mute-snap#%ld slot%d <plugin 已不可读，跳过快照> dev=%p rc=%d",
 					            tick, k, s->rdpsnd_device[k], rc);
-				ycn_debug_dump_tag(dbg);
+				/* 锁内绝不写盘：只塞内存环形缓冲（见文件上方“锁内绝不 I/O”纪律） */
+				ycn_bc(dbg); /* 锁内只写内存，不落盘 */
 			}
 		}
 	}
@@ -2474,7 +2525,7 @@ YCN_API int ycn_rdp_set_muted(int session, int muted)
 		            (long)InterlockedCompareExchange(&s->mute_play_hits, 0, 0),
 		            (long)InterlockedCompareExchange(&s->mute_setvol_hits, 0, 0));
 		LeaveCriticalSection(&g_lock);
-		ycn_debug_dump_tag(buf);
+		ycn_bc(buf); /* UI 线程路径：不落盘 */
 	}
 	return YCN_OK;
 }
