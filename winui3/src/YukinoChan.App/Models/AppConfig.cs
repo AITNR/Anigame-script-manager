@@ -28,6 +28,7 @@ public sealed class AppConfig : ObservableObject
     private bool _autoStartTasks;
     private bool _windowsStartup;
     private bool _enableTimeoutScreenshot = true;
+    private string _updateChannel = UpdateChannels.Stable;
 
     public AppConfig()
     {
@@ -83,6 +84,18 @@ public sealed class AppConfig : ObservableObject
         set => SetProperty(ref _enableTimeoutScreenshot, value);
     }
 
+    /// <summary>
+    /// 「检查更新」看哪条发布通道：<c>stable</c> = 正式版，<c>beta</c> = 测试版。
+    /// 只决定检查更新时比对哪一份发布，不改变程序本身的任何行为。
+    /// 取值见 <see cref="UpdateChannels"/>，未知值在 <see cref="Sanitize"/> 里回落到正式版。
+    /// </summary>
+    [JsonPropertyName("update_channel")]
+    public string UpdateChannel
+    {
+        get => _updateChannel;
+        set => SetProperty(ref _updateChannel, value);
+    }
+
     [JsonPropertyName("tasks")]
     public List<TaskConfig> Tasks { get; set; } = new();
 
@@ -128,6 +141,7 @@ public sealed class AppConfig : ObservableObject
 
         Theme = allowed || LegacyThemes.Contains(theme) ? theme : "system";
         ShutdownDelaySeconds = Math.Max(0, ShutdownDelaySeconds);
+        UpdateChannel = UpdateChannels.Normalize(UpdateChannel);
 
         Tasks ??= new List<TaskConfig>();
         Tasks.Sort((a, b) => a.Order.CompareTo(b.Order));
@@ -195,6 +209,7 @@ public sealed class AppConfig : ObservableObject
         AutoStartTasks = AutoStartTasks,
         WindowsStartup = WindowsStartup,
         EnableTimeoutScreenshot = EnableTimeoutScreenshot,
+        UpdateChannel = UpdateChannel,
         Rdp = (RdpConfig)Rdp.Clone(),
         Window = (WindowConfig)Window.Clone(),
     };

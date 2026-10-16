@@ -25,6 +25,10 @@
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <PlatformTarget>x64</PlatformTarget>
+    <!-- 版本号：CI 用 -p:Version=<版本> 传全局属性，全局属性优先级最高，
+         项目文件里再赋值也不会生效 —— 所以下面这行只管本机 dotnet build 的情形，
+         给「设置 → 关于」一个能认出来的版本号（-dev.local 后缀会被识别为自编译版）。 -->
+    <Version Condition="'$(Version)' == '' Or '$(Version)' == '1.0.0'">2.0.0-dev.local</Version>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CA1416;CS1591;NU1701</NoWarn>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>

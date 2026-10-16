@@ -123,6 +123,30 @@ CI 的每次构建都会建一个自己的预发布 tag，资产不会被下一�
 
 归档只增不减，自包含包一份几十 MB —— 攒多了用 `cleanup-builds.yml` 瘦身：默认**只演习**（把待删清单打进 job summary），确认没问题再勾「真的删除」重跑；保留规则是「最近 N 份 **或** 最近 N 天内」满足其一即留，且只认预发布、只处理 `build-` / `pr-` 前缀，`test-build` 与正式版 `vX.Y.Z` 都不会被碰。
 
+### 版本号与「检查更新」
+
+版本号**不写死在源码里**，来源是程序集信息版本：
+
+| 场景 | 版本号 | 谁给的 |
+|---|---|---|
+| CI 测试版 | `2.0.0-dev.<构建号>` | `build.yml` 的版本兜底 |
+| CI 正式版 | 手填的 `X.Y.Z` | `release.yml` 的 `version` 输入 |
+| 本机 `dotnet build` | `2.0.0-dev.local` | `YukinoChan.App.csproj` 里的 `Version` 兜底 |
+
+⚠️ CI 用 `-p:Version=` 传的是 **MSBuild 全局属性**，优先级高于项目文件里的赋值 ——
+所以 csproj 里那行 `<Version Condition=…>` 不会覆盖发布版本的号，只管本机编译这一种情形。
+
+「设置 → 关于」显示这个版本号，并提供**检查更新**：
+
+| 更新渠道 | 查的是 | 对应发布 |
+|---|---|---|
+| 正式版（`stable`，默认） | `GET /releases/latest` | `release.yml` 手动发的 `vX.Y.Z` |
+| 测试版（`beta`） | `GET /releases?per_page=50` 里版本号最大的一份 | CI 滚动预发布 `test-build`（资产名里解析版本号，因为 tag 里没有） |
+
+渠道选择存进 `config.json` 的 `update_channel`。检查逻辑在 `Services/UpdateService.cs`，只**读**发布信息：
+不下载、不安装、不改文件；有新版时用浏览器打开下载页。一份正式版都没发过时 `/releases/latest` 返回 404，
+程序把它当成「还没发过正式版」而不是错误。GitHub 匿名接口每小时 60 次上限，被限流会如实报出来。
+
 ### 每次构建出两份：安装版 / 绿色版
 
 | 产物 | 用法 |
@@ -658,6 +682,7 @@ prompt for credentials:i:0  # 凭据走凭据管理器，不弹输入框
 | 日志目录 | `logs/` | 同上，按日期分文件 |
 | 统计目录 | `runtime_stats/` | 脚本耗时历史，按账户分家 |
 | 看板娘素材 | `assets/mascot/` | 缺失时看板娘区域留空，程序仍能跑 |
+| 更新渠道 | `config.json` 的 `update_channel` | `stable` = 正式版（默认）；`beta` = 测试版。见「设置 → 关于」 |
 
 Python + PySide6 版原先共用这几份数据；它已于 2026-09-28 从仓库移除，仅保留在 Git 历史里。
 

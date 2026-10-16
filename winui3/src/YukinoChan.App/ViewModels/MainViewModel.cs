@@ -114,6 +114,9 @@ public sealed class MainViewModel : ObservableObject
 
     public IReadOnlyList<KeyValuePair<string, string>> ThemeItems => AppConfig.ThemeItems;
 
+    /// <summary>「设置 → 关于」里更新渠道下拉框的选项（正式版 / 测试版）。</summary>
+    public IReadOnlyList<KeyValuePair<string, string>> UpdateChannelItems => UpdateChannels.Items;
+
     public IReadOnlyList<string> GuideBubbleTexts { get; } = new List<string>
     {
         "还没有配置任务哦～",

@@ -104,7 +104,58 @@
                         <HyperlinkButton Content="GitHub" NavigateUri="https://github.com/AITNR/Anigame-script-manager" />
                         <Button Content="☕ 赞赏支持" Click="OnSponsor" />
                     </StackPanel>
-                    <TextBlock x:Name="VersionText" FontSize="12" Opacity="0.55" />
+
+                    <!-- 版本号 + 检查更新。版本号从程序集信息版本里取（CI 传 -p:Version=），
+                         不是写死的字面量 —— 见 SettingsPage.xaml.cs 的 RefreshVersionText -->
+                    <TextBlock x:Name="VersionText"
+                               FontSize="12" Opacity="0.75" TextWrapping="Wrap"
+                               IsTextSelectionEnabled="True" />
+                    <TextBlock x:Name="VersionDetailText"
+                               FontSize="12" Opacity="0.55" TextWrapping="Wrap" />
+
+                    <Grid ColumnSpacing="8" RowSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <ComboBox x:Name="UpdateChannelBox" Grid.Column="0"
+                                  Header="更新渠道" MinWidth="132"
+                                  ItemsSource="{x:Bind VM.UpdateChannelItems, Mode=OneWay}"
+                                  DisplayMemberPath="Value" SelectedValuePath="Key"
+                                  SelectionChanged="OnUpdateChannelChanged">
+                            <ToolTipService.ToolTip>
+                                <ToolTip Content="正式版 = 手动发布的 vX.Y.Z；测试版 = 每次提交自动构建的滚动版。" />
+                            </ToolTipService.ToolTip>
+                        </ComboBox>
+
+                        <Button x:Name="CheckUpdateButton" Grid.Column="1"
+                                Content="检查更新" Click="OnCheckUpdate"
+                                VerticalAlignment="Bottom" />
+
+                        <ProgressRing x:Name="UpdateProgress" Grid.Column="2"
+                                      IsActive="False" Visibility="Collapsed"
+                                      Width="20" Height="20" VerticalAlignment="Bottom"
+                                      Margin="0,0,0,6" />
+                    </Grid>
+
+                    <!-- 检查结果 / 提示：默认收起，界面上不占位置 -->
+                    <InfoBar x:Name="UpdateResultBar"
+                             IsOpen="False"
+                             IsClosable="False">
+                        <InfoBar.Content>
+                            <TextBlock x:Name="UpdateResultText" TextWrapping="Wrap" />
+                        </InfoBar.Content>
+                        <InfoBar.ActionButton>
+                            <Button x:Name="UpdateDownloadButton"
+                                    Content="前往下载" Click="OnOpenUpdatePage"
+                                    Visibility="Collapsed" />
+                        </InfoBar.ActionButton>
+                    </InfoBar>
+
+                    <TextBlock Text="检查更新只会去 GitHub 读一次发布信息（不下载、不改任何文件）；要装新版请点「前往下载」手动下载。更新渠道会记进 config.json。"
+                               TextWrapping="Wrap" FontSize="12" Opacity="0.6" />
                 </StackPanel>
             </Border>
         </StackPanel>

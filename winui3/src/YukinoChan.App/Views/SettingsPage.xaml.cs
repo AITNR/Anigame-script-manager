@@ -17,6 +17,9 @@ public sealed partial class SettingsPage : Page
     private bool _syncing;
     private CancellationTokenSource? _themeHintCts;
 
+    /// <summary>上一次「检查更新」的结果，用来决定「前往下载」按钮指哪儿。</summary>
+    private GitHubRelease? _latestRelease;
+
     public SettingsPage()
     {
         InitializeComponent();
@@ -44,13 +47,14 @@ public sealed partial class SettingsPage : Page
             }
 
             ThemeBox.SelectedIndex = found;
+            UpdateChannelBox.SelectedIndex = IndexOfUpdateChannel(VM.Config.UpdateChannel);
         }
         finally
         {
             _syncing = false;
         }
 
-        VersionText.Text = $"开发基线：v2.0 WinUI 3 · .NET {Environment.Version}";
+        RefreshVersionText();
     }
 
     public MainViewModel VM => App.ViewModel;
@@ -160,6 +164,200 @@ public sealed partial class SettingsPage : Page
     private void OnOpenLogFolder(object sender, RoutedEventArgs e) => VM.OpenDirectory(AppPaths.LogDir);
 
     private void OnOpenStatsFolder(object sender, RoutedEventArgs e) => VM.OpenDirectory(AppPaths.StatsDir);
+
+    // ---------------- 关于：版本号 + 检查更新 ----------------
+
+    /// <summary>
+    /// 把「关于」卡片里的版本号刷成当前程序集版本。
+    ///
+    /// 版本号来自程序集信息版本（CI 用 <c>-p:Version=</c> 写进去，本机编译则是 csproj 的兜底值），
+    /// 不是写死的字面量 —— 以前这里硬编码「开发基线：v2.0」，发布版也照抄，等于没版本号。
+    /// 提交哈希只在本机自编译（<c>-dev.local</c>）时显示：正式发布里有版本号就够了。
+    /// </summary>
+    private void RefreshVersionText()
+    {
+        VersionText.Text = $"版本 {UpdateService.CurrentVersion}";
+
+        var detail = $"运行环境：.NET {Environment.Version} · WinUI 3";
+        if (UpdateService.IsLocalBuild && UpdateService.CurrentCommit.Length > 0)
+        {
+            detail += $" · 提交 {UpdateService.CurrentCommit}";
+        }
+
+        VersionDetailText.Text = detail;
+    }
+
+    /// <summary>
+    /// 在更新渠道下拉项里找当前配置对应的下标（找不到就回到第一项 —— 正式版）。
+    /// 与主题下拉同一套路：<c>SelectedIndex</c> 不依赖 <c>SelectedValue</c> 的绑定解析，最稳。
+    /// </summary>
+    private static int IndexOfUpdateChannel(string? channel)
+    {
+        var normalized = UpdateChannels.Normalize(channel);
+        for (var i = 0; i < UpdateChannels.Items.Count; i++)
+        {
+            if (UpdateChannels.Items[i].Key == normalized)
+            {
+                return i;
+            }
+        }
+
+        return 0;
+    }
+
+    /// <summary>切更新渠道：落盘 + 收起上一次的结果（那份结果是按旧渠道查的，留着会误导）。</summary>
+    private void OnUpdateChannelChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_syncing || UpdateChannelBox.SelectedItem is not KeyValuePair<string, string> item)
+        {
+            return;
+        }
+
+        var channel = item.Key;
+
+        if (VM.Config.UpdateChannel == channel)
+        {
+            return;
+        }
+
+        VM.Config.UpdateChannel = channel;
+        VM.SaveConfig();
+
+        HideUpdateResult();
+        VM.AppendLog($"检查更新渠道已切换为「{UpdateChannels.Label(channel)}」。");
+    }
+
+    /// <summary>
+    /// 查一次更新。查询是网络 IO，所以丢到线程池；结果用 <see cref="RunOnUi"/> 搬回 UI 线程再画 ——
+    /// 控件只能在 UI 线程上碰，而 await 之后的续体落在哪个线程**不能靠假设**
+    /// （工程里已经栽过一次：Windows App SDK 的选择器 await 之后就不在 UI 线程了）。
+    /// <see cref="UpdateService.CheckAsync"/> 自己不抛异常（网络/限流都变成一条结果），catch 只是兜底。
+    /// </summary>
+    private async void OnCheckUpdate(object sender, RoutedEventArgs e)
+    {
+        var channel = UpdateChannels.Normalize(VM.Config.UpdateChannel);
+
+        // 先在本线程（UI 线程）拿到派发器：await 之后就未必还在这条线程上了
+        var queue = DispatcherQueue;
+
+        SetUpdateBusy(true);
+        HideUpdateResult();
+
+        try
+        {
+            var result = await Task.Run(() => UpdateService.CheckAsync(channel));
+            RunOnUi(queue, () =>
+            {
+                SetUpdateBusy(false);
+                ShowUpdateResult(result);
+            });
+        }
+        catch (Exception ex)
+        {
+            // 兜底：真出了意外也要把按钮恢复可点（这是用户唯一的重试入口），并如实报出来
+            var detail = $"{ex.GetType().Name}: {ex.Message}";
+            RunOnUi(queue, () =>
+            {
+                SetUpdateBusy(false);
+                _latestRelease = null;
+                UpdateResultText.Text = $"检查更新时出错：{detail}";
+                UpdateResultBar.Title = "检查更新失败";
+                UpdateResultBar.Severity = InfoBarSeverity.Error;
+                UpdateResultBar.IsOpen = true;
+            });
+            VM.AppendLog($"[更新检查] 异常：{detail}");
+        }
+    }
+
+    /// <summary>检查进行中：按钮禁用 + 转圈，避免重复点。</summary>
+    private void SetUpdateBusy(bool busy)
+    {
+        CheckUpdateButton.IsEnabled = !busy;
+        UpdateProgress.IsActive = busy;
+        UpdateProgress.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// 已经在 UI 线程就直接执行，否则投递过去。
+    /// 为什么不用「await 之后自然回到 UI 线程」：那个假设在 WinUI 3 里不成立
+    /// （见 <see cref="OnCheckUpdate"/> 的注释）。
+    /// </summary>
+    private static void RunOnUi(Microsoft.UI.Dispatching.DispatcherQueue? queue, Action action)
+    {
+        if (queue is null || queue.HasThreadAccess)
+        {
+            action();
+            return;
+        }
+
+        queue.TryEnqueue(() => action());
+    }
+
+    /// <summary>把检查结果画进 InfoBar，并把「前往下载」指向这一份发布。</summary>
+    private void ShowUpdateResult(UpdateCheckResult result)
+    {
+        _latestRelease = result.Latest;
+        VM.AppendLog(result.LogLine);
+
+        UpdateResultText.Text = result.Message;
+        UpdateResultBar.Severity = result.Status switch
+        {
+            UpdateCheckStatus.UpdateAvailable => InfoBarSeverity.Success,
+            UpdateCheckStatus.UpToDate => InfoBarSeverity.Success,
+            UpdateCheckStatus.Failed => InfoBarSeverity.Error,
+            UpdateCheckStatus.LocalNewer => InfoBarSeverity.Informational,
+            _ => InfoBarSeverity.Informational,
+        };
+        UpdateResultBar.Title = result.Status switch
+        {
+            UpdateCheckStatus.UpdateAvailable => "有新版本",
+            UpdateCheckStatus.UpToDate => "已是最新",
+            UpdateCheckStatus.LocalBuild => "本机自编译版",
+            UpdateCheckStatus.LocalNewer => "本地版本更新",
+            UpdateCheckStatus.NoRelease => "该渠道暂无发布",
+            _ => "检查更新失败",
+        };
+
+        // 「前往下载」只在这份发布真有下载页时才露出来
+        UpdateDownloadButton.Visibility = result.Latest is { } latest && latest.PageUrl.Length > 0
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
+        UpdateResultBar.IsOpen = true;
+    }
+
+    private void HideUpdateResult()
+    {
+        _latestRelease = null;
+        UpdateResultBar.IsOpen = false;
+        UpdateDownloadButton.Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// 打开这一份发布的页面。
+    ///
+    /// ⚠️ 只开浏览器，**不下载、不安装、不替换任何文件** —— 程序安装在 Program Files、
+    /// 且带 requireAdministrator，"自动更新"要么得写提权代码路径，要么会覆盖正在运行的本体。
+    /// 那是另一件事，不在这一步里做。
+    /// </summary>
+    private void OnOpenUpdatePage(object sender, RoutedEventArgs e)
+    {
+        if (_latestRelease is not { } release)
+        {
+            return;
+        }
+
+        // 优先给安装版直链；没有就给发布页（里面两个资产都在）
+        var target = release.SetupUrl ?? release.PageUrl;
+        if (UpdateService.OpenUrl(target))
+        {
+            VM.AppendLog($"已在浏览器打开下载页：{target}");
+            return;
+        }
+
+        VM.AppendLog($"打开下载页失败，请手动访问：{target}");
+        _ = DialogHelper.ShowMessageAsync("打不开浏览器", $"请手动访问：{Environment.NewLine}{target}");
+    }
 
     private async void OnSponsor(object sender, RoutedEventArgs e)
     {

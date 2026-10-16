@@ -116,3 +116,31 @@ public static class MonitorKinds
     public const string Window = "window";
     public const string Cmdline = "cmdline";
 }
+
+/// <summary>
+/// 检查更新时看的发布通道。
+///
+/// 与仓库的发布流程一一对应（见 .github/workflows/）：
+/// <list type="bullet">
+/// <item><see cref="Stable"/>（正式版）—— <c>release.yml</c> 手动发布的 <c>vX.Y.Z</c>；
+/// 接口取 <c>/releases/latest</c>，也就是「最新的非预发布版」。</item>
+/// <item><see cref="Beta"/>（测试版）—— <c>ci.yml</c> 每次 main 提交自动发的滚动预发布；
+/// 接口取发布列表里版本号最大的那一份（含预发布），所以正式版发出来之后也能立刻拿到。</item>
+/// </list>
+/// 值会写进 config.json，改名字等于改配置格式，别随手改。
+/// </summary>
+public static class UpdateChannels
+{
+    public const string Stable = "stable";
+    public const string Beta = "beta";
+
+    public static readonly IReadOnlyList<KeyValuePair<string, string>> Items = new List<KeyValuePair<string, string>>
+    {
+        new(Stable, "正式版"),
+        new(Beta, "测试版"),
+    };
+
+    public static string Normalize(string? value) => value == Beta ? Beta : Stable;
+
+    public static string Label(string? value) => value == Beta ? "测试版" : "正式版";
+}
