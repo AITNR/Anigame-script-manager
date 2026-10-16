@@ -28,6 +28,7 @@ public sealed class AppConfig : ObservableObject
     private bool _autoStartTasks;
     private bool _windowsStartup;
     private bool _enableTimeoutScreenshot = true;
+    private bool _developerMode;
     private string _updateChannel = UpdateChannels.Stable;
 
     public AppConfig()
@@ -82,6 +83,20 @@ public sealed class AppConfig : ObservableObject
     {
         get => _enableTimeoutScreenshot;
         set => SetProperty(ref _enableTimeoutScreenshot, value);
+    }
+
+    /// <summary>
+    /// 开发者模式：决定「运行日志」页要不要显示带 <c>[embed]</c> 标签的内嵌画面诊断行
+    /// （D3D 初始化 / 渲染路径 / GFX 管线状态 / 帧到达节奏……）。
+    ///
+    /// 只影响**页面显示**：关着的时候这些行照样写进 logs 目录里的日志文件，
+    /// 排障该翻的证据一条不少 —— 它们只是平时每 5 秒一条，会把任务调度那几条信息淹掉。
+    /// </summary>
+    [JsonPropertyName("developer_mode")]
+    public bool DeveloperMode
+    {
+        get => _developerMode;
+        set => SetProperty(ref _developerMode, value);
     }
 
     /// <summary>
@@ -209,6 +224,7 @@ public sealed class AppConfig : ObservableObject
         AutoStartTasks = AutoStartTasks,
         WindowsStartup = WindowsStartup,
         EnableTimeoutScreenshot = EnableTimeoutScreenshot,
+        DeveloperMode = DeveloperMode,
         UpdateChannel = UpdateChannel,
         Rdp = (RdpConfig)Rdp.Clone(),
         Window = (WindowConfig)Window.Clone(),

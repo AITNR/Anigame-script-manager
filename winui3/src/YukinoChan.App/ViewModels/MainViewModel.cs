@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -40,6 +41,9 @@ public sealed class MainViewModel : ObservableObject
 {
     private const int MaxLogLines = 4000;
 
+    /// <summary>内嵌画面诊断行的标签。带它的行默认不进「运行日志」页（见 <see cref="ShouldShowLogLine"/>）。</summary>
+    private const string EmbedLogTag = "[embed]";
+
     private readonly ConfigManager _configManager;
     private readonly FileLogger _logger;
     private readonly RuntimeStatsManager _statsManager;
@@ -76,6 +80,10 @@ public sealed class MainViewModel : ObservableObject
         _statsManager = new RuntimeStatsManager(AppPaths.StatsDir);
 
         Config = _configManager.Load();
+
+        // 开发者模式一改就要重排日志页（不然开关看着像没生效）
+        Config.PropertyChanged += OnConfigPropertyChanged;
+
         Tasks = new ObservableCollection<TaskConfig>(Config.Tasks);
 
         LogLines = new ObservableCollection<string>();
@@ -180,7 +188,32 @@ public sealed class MainViewModel : ObservableObject
 
     public ObservableCollection<string> LogLines { get; }
 
+    /// <summary>
+    /// 本次会话产生过的全部日志行（不按开发者模式过滤，上限同样是 <see cref="MaxLogLines"/>）。
+    ///
+    /// 留着它是为了让「开发者模式」开关一拨动就能**立刻**重排日志页：只按新开关决定
+    /// 往后收不收 <c>[embed]</c> 行的话，用户拨开开关后要等下一行诊断（最长 5 秒，
+    /// 还得正好挂着画面）才看出变化，会以为开关坏了。
+    /// </summary>
+    private readonly List<string> _logBacklog = new();
+
     public ObservableCollection<StatRow> StatRows { get; }
+
+    /// <summary>
+    /// 本次会话里是不是**真的**藏起过 <c>[embed]</c> 诊断行。
+    /// 只在 false → true 那一刻发一次变更通知，不用每条日志都刷一遍绑定。
+    /// </summary>
+    private bool _hasHiddenEmbedLine;
+
+    /// <summary>
+    /// 「运行日志」页上那句提示：开发者模式关着、并且确实藏了 <c>[embed]</c> 诊断行时才显示，
+    /// 说明它们去哪儿了、要打开哪个开关。
+    ///
+    /// 加"确实藏过"这个条件是刻意的：从没挂过内嵌画面（也就没写过诊断行）时，
+    /// 页面上凭空多一行提示只是噪声。
+    /// </summary>
+    public Visibility EmbedLogHintVisibility =>
+        !Config.DeveloperMode && _hasHiddenEmbedLine ? Visibility.Visible : Visibility.Collapsed;
 
     /// <summary>统计页的空状态提示（有数据就收起来）。表格全空时界面一片空白，容易被当成模块坏了。</summary>
     public Visibility StatsEmptyVisibility =>
@@ -505,6 +538,7 @@ public sealed class MainViewModel : ObservableObject
             export.AutoExitAfterDone = Config.AutoExitAfterDone;
             export.AutoStartTasks = Config.AutoStartTasks;
             export.EnableTimeoutScreenshot = Config.EnableTimeoutScreenshot;
+            export.DeveloperMode = Config.DeveloperMode;
             export.Window = Config.Window;
         }
         else
@@ -1396,6 +1430,24 @@ public sealed class MainViewModel : ObservableObject
             return;
         }
 
+        _logBacklog.Add(line);
+        while (_logBacklog.Count > MaxLogLines)
+        {
+            _logBacklog.RemoveAt(0);
+        }
+
+        if (!ShouldShowLogLine(line))
+        {
+            // 第一次藏东西时才通知界面 —— 见 _hasHiddenEmbedLine 的注释
+            if (!_hasHiddenEmbedLine)
+            {
+                _hasHiddenEmbedLine = true;
+                OnPropertyChanged(nameof(EmbedLogHintVisibility));
+            }
+
+            return;
+        }
+
         LogLines.Add(line);
         while (LogLines.Count > MaxLogLines)
         {
@@ -1403,9 +1455,89 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// 这一行该不该出现在「运行日志」页面上。
+    ///
+    /// 内嵌画面的诊断行（形如 <c>[embed] D3D 渲染器初始化成功…</c>）默认不显示：
+    /// 挂着画面时它每 5 秒写一行帧到达节奏 / GFX 状态，几路画面同时跑就能把
+    /// 「任务跑到哪一步、哪条通道出事了」这类要看的信息顶出屏幕。
+    /// 要看得去「设置 → 开发者」打开开发者模式。
+    ///
+    /// ⚠️ 只挡显示，**不挡落盘**：<see cref="FileLogger"/> 那边的日志文件始终是完整的
+    /// （AppendLog 是"先写文件、再决定要不要上页面"），排障时照旧能照着时间翻。
+    /// </summary>
+    private bool ShouldShowLogLine(string line) =>
+        Config.DeveloperMode || !line.Contains(EmbedLogTag, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 开发者模式拨动后重排日志页：打开时把攒着的 <c>[embed]</c> 行补回来，
+    /// 关闭时把已经显示在页面上的那些收掉。
+    ///
+    /// 只改数据与 <see cref="_hasHiddenEmbedLine"/>，属性变更通知交给调用方发
+    /// （<see cref="EmbedLogHintVisibility"/> 同时取决于这个字段和配置开关，
+    /// 分开发容易漏掉一边）。
+    /// </summary>
+    private void RefreshLogFilter()
+    {
+        if (!_dispatcher.HasThreadAccess)
+        {
+            Post(RefreshLogFilter);
+            return;
+        }
+
+        LogLines.Clear();
+        var hidden = false;
+        foreach (var line in _logBacklog)
+        {
+            // LogLines 与 _logBacklog 各自受 MaxLogLines 约束，筛完的行数只会更少
+            if (ShouldShowLogLine(line))
+            {
+                LogLines.Add(line);
+            }
+            else
+            {
+                hidden = true;
+            }
+        }
+
+        _hasHiddenEmbedLine = hidden;
+    }
+
+    /// <summary>
+    /// 配置里会直接影响界面的开关（当前只有开发者模式）改完要立刻重排日志页。
+    /// 设置页那边 <c>x:Bind</c> 改的就是这同一个 <see cref="Config"/> 实例，钩在这里最省事
+    /// （也顺带覆盖了以后任何一处程序化改动）。
+    /// </summary>
+    private void OnConfigPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(AppConfig.DeveloperMode))
+        {
+            return;
+        }
+
+        // 属性变更通知本身只能在 UI 线程发。界面上改这个开关本来就在 UI 线程，
+        // 这里只是兜住将来从别处（比如配置加载）程序化赋值的可能。
+        if (!_dispatcher.HasThreadAccess)
+        {
+            var args = e;
+            Post(() => OnConfigPropertyChanged(sender, args));
+            return;
+        }
+
+        RefreshLogFilter();
+        OnPropertyChanged(nameof(EmbedLogHintVisibility));
+    }
+
     public void ClearLogs()
     {
+        _logBacklog.Clear();
         LogLines.Clear();
+
+        if (_hasHiddenEmbedLine)
+        {
+            _hasHiddenEmbedLine = false;
+            OnPropertyChanged(nameof(EmbedLogHintVisibility));
+        }
     }
 
     // ---------------- 统计 ----------------

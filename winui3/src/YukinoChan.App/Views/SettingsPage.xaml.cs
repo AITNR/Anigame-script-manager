@@ -153,6 +153,48 @@ public sealed partial class SettingsPage : Page
         };
     }
 
+    /// <summary>
+    /// 开发者模式：改完立刻生效（主控端 <c>Config.PropertyChanged</c> 那边重排日志页）
+    /// 并立刻落盘 —— 它跟主题、更新渠道一样是"拨了就能看见"的开关，等用户想起来
+    /// 再点「保存配置」的话，重启后悄悄回到关闭状态会很难理解。
+    ///
+    /// 两道 guard 各管一种情形：
+    /// · <see cref="_syncing"/> —— 本页自己做的程序性赋值（构造期间的控件初始化）；
+    /// · "值没变" —— <c>x:Bind</c> 把配置里的值写进 <c>IsOn</c> 时控件也会抛 <c>Toggled</c>
+    ///   （构造期 <see cref="_syncing"/> 还没置位，挡不住这一类），那会儿两个值相等，
+    ///   直接返回即可，不然会白写一次盘、白追一条日志。
+    /// </summary>
+    private void OnDeveloperModeToggled(object sender, RoutedEventArgs e)
+    {
+        if (_syncing)
+        {
+            return;
+        }
+
+        // 用 sender 而不是字段 DeveloperModeSwitch：Toggled 有可能在
+        // InitializeComponent 期间（x:Bind 初次求值写 IsOn 时）就触发，
+        // 那会儿字段是否已赋值不该成为一条隐含前提。
+        if (sender is not ToggleSwitch toggle)
+        {
+            return;
+        }
+
+        var on = toggle.IsOn;
+        if (VM.Config.DeveloperMode == on)
+        {
+            return;
+        }
+
+        VM.Config.DeveloperMode = on;
+        VM.SaveConfig();
+
+        // ⚠️ 这两句**不能**写成 "[embed]" 那个字面标签：过滤是按行里有没有该标签做的，
+        // 关掉的那一刻写进来的这句话会被自己过滤掉 —— 用户就看不到任何反馈了。
+        VM.AppendLog(on
+            ? "已打开开发者模式：运行日志页开始显示带 embed 标签的内嵌画面诊断日志。"
+            : "已关闭开发者模式：运行日志页不再显示带 embed 标签的内嵌画面诊断日志（日志文件里仍完整保留）。");
+    }
+
     private void OnSave(object sender, RoutedEventArgs e) => VM.SaveConfig();
 
     private async void OnExport(object sender, RoutedEventArgs e) => await VM.ExportConfigAsync();

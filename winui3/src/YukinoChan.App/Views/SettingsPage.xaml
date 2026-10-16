@@ -65,6 +65,26 @@
                 </StackPanel>
             </Border>
 
+            <!-- 开发者 -->
+            <Border Padding="16" Style="{StaticResource YukinoCardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="开发者" FontWeight="SemiBold" />
+
+                    <!-- ⚠️ OneWay + Toggled 里落盘，**不能**写成 TwoWay：
+                         TwoWay 下 x:Bind 会自己把值写回 Config，"用户拨动"和"绑定回写"
+                         哪个先到没有保证，处理函数里那句"值没变就当程序性赋值"就会被
+                         概率性地跳过 —— 表现是偶尔不落盘 / 重复提示。
+                         OneWay 时 Config 只由 OnDeveloperModeToggled 写，顺序确定。 -->
+                    <ToggleSwitch x:Name="DeveloperModeSwitch"
+                                  Header="开发者模式"
+                                  IsOn="{x:Bind VM.Config.DeveloperMode, Mode=OneWay}"
+                                  Toggled="OnDeveloperModeToggled" />
+
+                    <TextBlock TextWrapping="Wrap" FontSize="12" Opacity="0.6"
+                               Text="打开后「运行日志」页才显示带 [embed] 标签的内嵌画面诊断日志（D3D 初始化、渲染路径、GFX 管线状态、帧到达节奏等）。关着时这些行不在页面上显示，但日志文件里始终完整保留，排障时可以照旧去日志目录里翻。" />
+                </StackPanel>
+            </Border>
+
             <!-- 配置 -->
             <Border Padding="16" Style="{StaticResource YukinoCardStyle}">
                 <StackPanel Spacing="12">
