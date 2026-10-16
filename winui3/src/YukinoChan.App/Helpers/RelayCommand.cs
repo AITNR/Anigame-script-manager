@@ -2,6 +2,7 @@
 using System;
 using System.Threading.Tasks;
 using System.Windows.Input;
+using YukinoChan.Services;
 
 namespace YukinoChan.Helpers;
 
@@ -63,6 +64,14 @@ public sealed class AsyncRelayCommand : ICommand
         try
         {
             await _execute(parameter);
+        }
+        catch (Exception ex)
+        {
+            // 🔑 async void 里的异常没有 Task 可以承载，会直接冒到 UI 同步上下文，
+            //    表现为"进程无日志地消失"——崩在哪条命令全靠猜。
+            //    这里是全项目所有异步命令的统一出口，异常必须就地接住并落盘：
+            //    让用户看到一次操作没成功，远好过整个程序静默退出。
+            CrashLog.WriteManaged("异步命令执行失败", ex);
         }
         finally
         {
