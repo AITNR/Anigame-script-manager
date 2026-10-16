@@ -1,0 +1,51 @@
+{
+  "theme": "system",
+  "shutdown_after_done": false,
+  "shutdown_delay_seconds": 60,
+  "auto_exit_after_done": false,
+  "auto_start_tasks": false,
+  "windows_startup": false,
+  "enable_timeout_screenshot": true,
+  "tasks": [],
+  "rdp": {
+    "enabled": true,
+    "target_host": "",
+    "bridge_path": "",
+    "target_user": "",
+    "credential_saved": false,
+    "password": "",
+    "session_finish": "keep",
+    "notify_on_task_done": true,
+    "notify_on_all_done": true,
+    "notify_local_task_done": false,
+    "connect_timeout_seconds": 120,
+    "embed_remote_desktop": false,
+    "client_mode": "embedded",
+    "audio_enabled": true,
+    "gfx_enabled": true,
+    "desktop_width": 1920,
+    "desktop_height": 1080,
+    "channels": [
+      {
+        "id": "default",
+        "name": "示例通道",
+        "host": "",
+        "user": "",
+        "bridge_path": "",
+        "credential_saved": false,
+        "session_finish": "keep",
+        "password": "",
+        "desktop_width": 1920,
+        "desktop_height": 1080,
+        "enabled": true
+      }
+    ]
+  },
+  "window": {
+    "x": 100,
+    "y": 100,
+    "width": 1280,
+    "height": 800,
+    "maximized": false
+  }
+}

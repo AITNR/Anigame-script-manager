@@ -26,6 +26,13 @@ assets/temp/
 # Runtime stats
 runtime_stats/
 
+# 本机配置（含主机名/账户名/本机路径，绝不进版本控制）—— 模板见 config.example.json
+config.json
+*.broken.json
+
+# 原生层 CMake 构建目录（build-native/ 名字不匹配上面的 build/ 规则）
+build-native/
+
 # Local configs
 config.local.json
 auto_script_config_local.json
