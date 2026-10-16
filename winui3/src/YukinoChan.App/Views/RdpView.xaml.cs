@@ -37,6 +37,25 @@ namespace YukinoChan.Views
         private long _lastFrameArrivedTick;    // 最近一次 end_paint（原生线程写，帧节奏统计用）
         private Microsoft.UI.Dispatching.DispatcherQueueTimer? _presentTimer;  // 16ms 呈现节拍器（≈60Hz）
         private bool _softRendering;           // 软渲染路线正在拷帧（防 async 重入）
+
+        /// <summary>
+        /// 渲染世代号。每次 DetachClient / Disconnect 自增；
+        /// RenderFrameAsync 在 await 前后比对自己那一代的号，不匹配就立即放弃。
+        ///
+        /// 🔑 为什么必须有（2026-10-16 实测）：原来 OnPresentTick 用
+        /// <c>_ = RenderFrameAsync(...)</c> 即发即弃，而 <c>_softRendering</c> 只防「重入」不防「堆积」。
+        /// 页面切走 / 弹出窗口 / 每次重连都会留下一批卡在 await SetBitmapAsync 的任务，
+        /// 它们持着已废弃的 _bitmapSource / _softBitmap 无法回收。
+        /// dump 实证：健康进程仅运行 3 分钟就堆到 36 个
+        /// AsyncStateMachineBox&lt;RenderFrameAsync&gt;（而 RdpView 只有 14 个），卡死现场是 32 个。
+        /// 这些僵尸任务持续调 SetBitmapAsync → XAML 反复重绑合成表面
+        /// （卡死栈顶正是 WUCBrushManager::GetSurfaceBrush →
+        /// CompositionSurfaceBrush::SetSurface），把渲染线程挤占干净。
+        /// </summary>
+        private int _renderGeneration;
+
+        /// <summary>本实例当前在飞（已发出、尚未结束）的渲染任务数；仅供诊断。</summary>
+        private int _renderInFlight;
         private bool _renderPathLogged;        // 「当前渲染路径」只写一次日志
         private long _frameArrivals;           // 统计窗口内的帧到达次数（原生线程写）
         private long _maxArrivalGapMs;         // 统计窗口内最大帧间隔（原生线程写）
@@ -192,6 +211,8 @@ namespace YukinoChan.Views
                 _client.Disconnected -= OnClientDisconnected;
                 _client = null;
             }
+            // 推进世代号：让已在飞的 RenderFrameAsync 在下一个检查点自行退出
+            System.Threading.Interlocked.Increment(ref _renderGeneration);
             _renderer?.Dispose();
             _renderer = null;
             _initQueued = false;
@@ -234,6 +255,8 @@ namespace YukinoChan.Views
             UnhookClient(_client);
             _client.Dispose();
             _client = null;
+            // 推进世代号：让已在飞的 RenderFrameAsync 在下一个检查点自行退出
+            System.Threading.Interlocked.Increment(ref _renderGeneration);
             _renderer?.Dispose();
             _renderer = null;
             _initQueued = false;
@@ -578,7 +601,9 @@ namespace YukinoChan.Views
             {
                 // 软渲染回退路线：同一套节拍（否则回退后撕裂原样回来）
                 LogRenderPathOnce("SoftwareBitmap（软渲染回退，无 D3D）");
-                _ = RenderFrameAsync(client.Session);
+                // 带上当前世代号：若本次任务在 await 中时连接已被换掉，
+                // 它会自行退出，不再碰已废弃的 _bitmapSource / _softBitmap。
+                _ = RenderFrameAsync(client.Session, _renderGeneration);
             }
         }
 
@@ -665,13 +690,20 @@ namespace YukinoChan.Views
         /// 现在：bitmap 尺寸不变就复用同一个实例，每帧只 <c>CopyFromBuffer</c> 原地更新内容，
         /// 内存压力从「每帧 8.3MB」降到「每连接一次 8.3MB」。尺寸变化（远端改分辨率）才重建。
         /// </summary>
-        private async System.Threading.Tasks.Task RenderFrameAsync(int session)
+        private async System.Threading.Tasks.Task RenderFrameAsync(int session, int generation)
         {
+            // 世代校验：本任务发出后连接已被换掉 → 直接丢弃
+            if (generation != System.Threading.Volatile.Read(ref _renderGeneration))
+            {
+                return;
+            }
+
             if (_softRendering)
             {
                 return; // 上一帧还在拷：下一拍再来
             }
             _softRendering = true;
+            System.Threading.Interlocked.Increment(ref _renderInFlight);
             try
             {
                 var client = _client;
@@ -710,6 +742,14 @@ namespace YukinoChan.Views
                 }
 
                 await _bitmapSource.SetBitmapAsync(_softBitmap);
+
+                // await 回来后再校验：等待期间可能已断开 / 换过实例。
+                // 不校验的话，后续计数会记到已废弃的对象上（无害但误导）。
+                if (generation != System.Threading.Volatile.Read(ref _renderGeneration))
+                {
+                    return;
+                }
+
                 FramesRendered++;
             }
             catch
@@ -719,6 +759,7 @@ namespace YukinoChan.Views
             finally
             {
                 _softRendering = false;
+                System.Threading.Interlocked.Decrement(ref _renderInFlight);
             }
         }
 
