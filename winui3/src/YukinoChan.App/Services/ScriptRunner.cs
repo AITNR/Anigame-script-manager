@@ -105,6 +105,12 @@ public sealed class ScriptRunner
     private readonly List<AbnormalEvent> _abnormalEvents = new();
 
     private volatile bool _stopRequested;
+    /// <summary>
+    /// 停止信号（<c>RequestStop</c> / <c>RequestEmergencyStop</c> 置位）。
+    /// 让轮询循环能用可中断等待替代 <c>Thread.Sleep</c>：点「停止」时不必再
+    /// 等满一个轮询周期才响应，循环里的 <c>_stopRequested</c> 检查也能立刻生效。
+    /// </summary>
+    private readonly ManualResetEventSlim _stopSignal = new(false);
     private volatile bool _pauseRequested;
     private volatile bool _emergencyRequested;
 
@@ -178,6 +184,7 @@ public sealed class ScriptRunner
     public void RequestStop()
     {
         _stopRequested = true;
+        _stopSignal.Set();
         _pauseRequested = false;
         Log("收到用户停止执行请求：正在按当前任务的启动脚本进程 → 目标进程 → 游戏窗口/扩展进程顺序收尾。");
         TerminateTrackedProcesses("停止执行");
@@ -196,6 +203,7 @@ public sealed class ScriptRunner
         _stopRequested = true;
         _pauseRequested = false;
         _emergencyRequested = true;
+        _stopSignal.Set();
         Log("收到紧急停止请求：本轮立即停止，并按全部任务配置（不只当前任务）清理进程。");
         TerminateTrackedProcesses("紧急停止");
     }
@@ -436,7 +444,7 @@ public sealed class ScriptRunner
                     return RunOutcome.StopRequested;
                 }
 
-                Thread.Sleep(250);
+                WaitPoll(250);
             }
 
             Log($"并发组「{groupName}」组首任务已完成，继续后续队列。");
@@ -466,7 +474,7 @@ public sealed class ScriptRunner
                 break;
             }
 
-            Thread.Sleep(250);
+            WaitPoll(250);
         }
 
         foreach (var outcome in results.Values)
@@ -755,7 +763,7 @@ public sealed class ScriptRunner
                 return timeoutOutcome;
             }
 
-            Thread.Sleep(250);
+            WaitPoll(250);
         }
     }
 
@@ -798,7 +806,7 @@ public sealed class ScriptRunner
                 return false;
             }
 
-            Thread.Sleep(200);
+            WaitPoll(200);
         }
 
         Log($"任务「{name}」启动确认通过：进程稳定运行超过 {(int)LaunchConfirmSeconds} 秒。");
@@ -861,7 +869,7 @@ public sealed class ScriptRunner
                 }
             }
 
-            Thread.Sleep(300);
+            WaitPoll(300);
         }
 
         return false;
@@ -939,7 +947,7 @@ public sealed class ScriptRunner
                 }
             }
 
-            Thread.Sleep(350);
+            WaitPoll(350);
         }
 
         var killedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -985,7 +993,7 @@ public sealed class ScriptRunner
                     TerminateProcessKeyword(key);
                 }
 
-                Thread.Sleep(350);
+                WaitPoll(350);
             }
 
             if (includeWindowKeywords)
@@ -1604,11 +1612,31 @@ public sealed class ScriptRunner
 
     // ---------------- 辅助 ----------------
 
+    /// <summary>
+    /// 轮询用的等待：<b>等满 <paramref name="milliseconds"/>，或收到停止信号时立刻返回</b>。
+    ///
+    /// 为什么不用 <c>Thread.Sleep</c>：轮询周期是 200～350ms，点「停止」后最坏要等满
+    /// 一整个周期才走到循环顶部的 <c>_stopRequested</c> 检查。而停止路径上每一拍都很贵 ——
+    /// 进程还在跑、进度还在涨，用户看到的就是"点了停止没反应"。
+    /// 用事件等待后，停止信号一到所有轮询线程同拍醒来，CPU 开销与 Sleep 完全相同。
+    /// </summary>
+    private void WaitPoll(int milliseconds)
+    {
+        // 已经停了就别等 —— 那样只会把"停止"的响应拖后一整拍
+        if (_stopRequested)
+        {
+            return;
+        }
+
+        // 事件等待：CPU 开销与 Thread.Sleep 相同，但停止信号一到立刻返回
+        _stopSignal.Wait(milliseconds);
+    }
+
     private void WaitIfPaused()
     {
         while (_pauseRequested && !_stopRequested)
         {
-            Thread.Sleep(250);
+            WaitPoll(250);
         }
     }
 
