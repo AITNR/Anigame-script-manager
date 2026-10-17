@@ -871,7 +871,13 @@ public sealed class RdpStopRequest
     public string RequestedAt { get; set; } = DateTimeOffset.Now.ToString("o");
 }
 
-/// <summary>代理写入独立 live-log-{commandId}.ndjson 流的一行外部脚本日志。</summary>
+/// <summary>主控与代理共同使用的实时日志协议版本。</summary>
+public static class RdpLiveLogProtocol
+{
+    public const int Current = 1;
+}
+
+/// <summary>独立 NDJSON 流中的一条外部脚本日志。</summary>
 public sealed class RdpLiveLog
 {
     public string CommandId { get; set; } = string.Empty;

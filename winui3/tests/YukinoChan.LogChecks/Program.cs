@@ -18,6 +18,8 @@ if (args.Length > 0 && string.Equals(args[0], "--observe", StringComparison.Ordi
 
 var tests = new (string Name, Action Run)[]
 {
+    ("Agent payload identity ignores patched EXE timestamp", TestAgentPayloadIdentity),
+    ("Agent capability placeholder and takeover", TestAgentCapabilities),
     ("RdpBridge live-log NDJSON protocol", TestRdpBridgeLiveLogs),
     ("RdpChannelSession isolation and bounded collections", TestRdpChannelSession),
     ("ExternalLogFilter normalization and classification", TestExternalLogFilter),
@@ -442,6 +444,54 @@ static void Equal<T>(T expected, T actual, string message)
         throw new InvalidOperationException($"{message}; expected '{expected}', actual '{actual}'");
     }
 }
+
+static void TestAgentPayloadIdentity()
+{
+    using var temp = new TempDirectory();
+    var source = Path.Combine(temp.Path, "source");
+    var target = Path.Combine(temp.Path, "target");
+    Directory.CreateDirectory(source);
+    Directory.CreateDirectory(target);
+    var sourceExe = Path.Combine(source, "YukinoChan.exe");
+    var targetExe = Path.Combine(target, "YukinoChan.exe");
+    File.WriteAllText(sourceExe, "original manifest");
+    File.WriteAllText(targetExe, "asInvoker patched manifest");
+    File.SetLastWriteTimeUtc(targetExe, DateTime.UtcNow.AddDays(1));
+    foreach (var file in new[] { "YukinoChan.dll", "YukinoChan.deps.json", "YukinoChan.runtimeconfig.json", "YukinoChan.pri" })
+    {
+        File.WriteAllText(Path.Combine(source, file), "new build");
+        File.WriteAllText(Path.Combine(target, file), "new build");
+    }
+    Assert(AgentPayloadIdentity.Matches(sourceExe, targetExe), "manifest differences do not prevent reuse of identical managed payload");
+    File.WriteAllText(Path.Combine(target, "YukinoChan.dll"), "old build");
+    Assert(!AgentPayloadIdentity.Matches(sourceExe, targetExe), "newer patched EXE cannot hide same-size stale DLL");
+    File.WriteAllText(Path.Combine(target, "YukinoChan.dll"), "new build");
+    File.WriteAllText(Path.Combine(target, "YukinoChan.pri"), "old build");
+    Assert(!AgentPayloadIdentity.Matches(sourceExe, targetExe), "stale PRI prevents reuse");
+    File.Delete(Path.Combine(target, "YukinoChan.pri"));
+    Assert(!AgentPayloadIdentity.Matches(sourceExe, targetExe), "missing payload prevents reuse");
+}
+
+static void TestAgentCapabilities()
+{
+    using var temp = new TempDirectory();
+    var bridge = new RdpBridge(temp.Path);
+    var session = new RdpChannelSession(null, bridge);
+    var now = DateTimeOffset.Now;
+    session.Begin("capability", 1, now);
+    bridge.ResetStatus("capability");
+    session.Tick(bridge.TryReadStatus()!, now, 90);
+    Assert(session.LiveLogStatusText.Contains("等待代理"), "controller placeholder is not an old-agent verdict");
+    var status = bridge.TryReadStatus()!;
+    status.AgentUser = "test-agent";
+    status.LiveLogProtocol = RdpLiveLogProtocol.Current;
+    session.Tick(status, now, 90);
+    Assert(session.LiveLogStatusText.Contains("正在接收"), "new agent capability is accepted in idle state");
+    status.LiveLogProtocol = 0;
+    session.Tick(status, now, 90);
+    Assert(session.LiveLogStatusText.Contains("未声明"), "legacy agent remains distinguishable");
+}
+
 
 sealed class TempDirectory : IDisposable
 {

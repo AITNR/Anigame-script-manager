@@ -481,9 +481,13 @@ public sealed class RdpChannelSession
 
         _awaitingLogged = false;
 
-        LiveLogStatusText = status.LiveLogProtocol < 1
-            ? "当前代理不支持独立实时日志，请重新部署会话代理。"
-            : string.IsNullOrWhiteSpace(status.LiveLogError) ? "正在接收本通道日志。" : status.LiveLogError;
+        // ResetStatus writes the new CommandId before the agent has touched the placeholder.
+        // An absent capability in that controller-authored file says nothing about agent support.
+        LiveLogStatusText = string.IsNullOrWhiteSpace(status.AgentUser)
+            ? "等待代理接管与日志输出。"
+            : status.LiveLogProtocol < RdpLiveLogProtocol.Current
+                ? "正在运行的代理未声明独立实时日志支持，请核对部署副本并重启目标会话代理。"
+                : string.IsNullOrWhiteSpace(status.LiveLogError) ? "正在接收本通道日志。" : status.LiveLogError;
         // ② 归属一致 → 应用进度
         Phase = status.Phase;
         Progress = status.Progress;

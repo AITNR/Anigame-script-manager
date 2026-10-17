@@ -465,7 +465,7 @@ public sealed class RdpAgentRunner
         {
             status.CommandId = _command.Id;
             status.AgentUser = Environment.UserName;
-            status.LiveLogProtocol = 1;
+            status.LiveLogProtocol = RdpLiveLogProtocol.Current;
             status.LiveLogError = _liveLogWriteFailureReported ? "实时日志回传暂时不可用，正在重试。" : string.Empty;
             return mutator(status);
         });

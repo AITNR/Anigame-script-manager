@@ -12,6 +12,7 @@
 
   <ItemGroup>
     <Compile Include="Program.cs" />
+    <Compile Include="..\..\src\YukinoChan.App\Services\AgentPayloadIdentity.cs" Link="Production\Services\AgentPayloadIdentity.cs" />
 
     <Compile Include="..\..\src\YukinoChan.App\Helpers\ObservableObject.cs" Link="Production\Helpers\ObservableObject.cs" />
     <Compile Include="..\..\src\YukinoChan.App\Helpers\KeywordHelper.cs" Link="Production\Helpers\KeywordHelper.cs" />

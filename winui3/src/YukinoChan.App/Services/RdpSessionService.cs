@@ -788,7 +788,7 @@ public static class RdpSessionService
 
     /// <summary>
     /// 铺好代理程序副本，返回真正生效的那份主程序路径。
-    /// 副本已经不比源旧就跳过，省掉一次 140MB 的搬运。
+    /// 托管程序、依赖配置及 XAML 资源内容一致才跳过，省掉一次 140MB 的搬运。
     ///
     /// 这里要绕的坎：会话代理是**常驻进程**（登录后一直活着等指令），它把副本目录里的
     /// CoreMessagingXP.dll 之类的依赖持有着。此时 <c>File.Copy(overwrite: true)</c> 会抛
@@ -827,7 +827,6 @@ public static class RdpSessionService
             return true;
         }
 
-        var sourceTime = File.GetLastWriteTimeUtc(sourceExe);
         var tried = new List<string>();
         var notes = new List<string>();
         var failure = string.Empty;
@@ -839,8 +838,8 @@ public static class RdpSessionService
         {
             var exe = Path.Combine(slot, "YukinoChan.exe");
 
-            // ① 已有现成且不比源旧的副本 → 直接用
-            if (File.Exists(exe) && File.GetLastWriteTimeUtc(exe) >= sourceTime)
+            // ① 业务 DLL / 配置 / PRI 内容一致才复用；manifest 改写后的 EXE 时间不代表版本。
+            if (AgentPayloadIdentity.Matches(sourceExe, exe))
             {
                 chosen = slot;
                 break;

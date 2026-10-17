@@ -6,6 +6,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.UI.Dispatching;
 
+using YukinoChan.Models;
+
 namespace YukinoChan.Services;
 
 /// <summary>
@@ -210,6 +212,8 @@ public static class AgentHost
             var alive = bridge.UpdateStatus(status =>
             {
                 status.Phase = "idle";
+                status.LiveLogProtocol = RdpLiveLogProtocol.Current;
+                status.LiveLogError = string.Empty;
                 status.StatusText = "代理在线，等待指令。";
                 status.AgentUser = Environment.UserName;
                 status.CurrentTask = string.Empty;
