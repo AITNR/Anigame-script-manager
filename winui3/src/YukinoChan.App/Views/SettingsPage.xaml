@@ -127,6 +127,26 @@
 
                     <TextBlock x:Name="ExternalLogInfoText"
                                TextWrapping="Wrap" FontSize="12" Opacity="0.65" />
+
+                    <!-- 操作反馈必须留在本页。
+                         原来「查看占用」「清理超出的」只往「运行日志」页追加一行，
+                         用户站在设置页看不到任何变化，会当成按钮坏了。
+                         这段文字专门显示上一次操作的结果（含时间戳，重复点也能看出刷新了）。 -->
+                    <TextBlock x:Name="ExternalLogActionText"
+                               Visibility="Collapsed"
+                               TextWrapping="Wrap" FontSize="12"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+                    <!-- 明细列表：点「查看占用」才展开，默认收起免得占版面。
+                         行由 SettingsPage.xaml.cs 直接塞进 StackPanel，不用 DataTemplate + x:Bind。 -->
+                    <StackPanel x:Name="ExternalLogUsagePanel" Spacing="6" Visibility="Collapsed">
+                        <TextBlock x:Name="ExternalLogUsageTitle" FontSize="12" FontWeight="SemiBold" />
+                        <ScrollViewer MaxHeight="220"
+                                      VerticalScrollBarVisibility="Auto"
+                                      HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel x:Name="ExternalLogUsageLines" Spacing="2" />
+                        </ScrollViewer>
+                    </StackPanel>
                 </StackPanel>
             </Border>
 

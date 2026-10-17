@@ -251,26 +251,103 @@ public sealed partial class SettingsPage : Page
     /// <summary>手动清理超出保留份数的外部日志。</summary>
     private void OnExternalLogPrune(object sender, RoutedEventArgs e)
     {
-        var (deleted, freed) = ExternalLogStore.Prune(VM.Config.ExternalLogKeepFiles);
+        var keep = VM.Config.ExternalLogKeepFiles;
+        var (deleted, freed) = ExternalLogStore.Prune(keep);
         VM.AppendLog(deleted == 0
             ? "外部日志清理：没有超出保留份数的文件。"
             : $"外部日志清理：已删除 {deleted} 份，释放 {ExternalLogStore.FormatBytes(freed)}。");
         RefreshExternalLogSection();
+
+        // 明细面板正开着就跟着刷新，别让列表里留着已经删掉的文件
+        if (ExternalLogUsagePanel.Visibility == Visibility.Visible)
+        {
+            RefreshExternalLogUsageDetail(announce: false);
+        }
+
+        SetExternalLogAction(deleted == 0
+            ? $"清理：没有超出 {keep} 份的文件 —— {DateTime.Now:HH:mm:ss}"
+            : $"清理：已删除 {deleted} 份，释放 {ExternalLogStore.FormatBytes(freed)} —— {DateTime.Now:HH:mm:ss}");
     }
 
-    /// <summary>刷新占用概览。</summary>
+    /// <summary>
+    /// 刷新占用概览，并在本页展开占用明细。
+    ///
+    /// <para>⛔ 只往「运行日志」页追加一行是不够的 —— 用户站在设置页，
+    /// 那一行在别的页面里，视觉上就是「点了没反应」。
+    /// 所以反馈必须落在本页：明细列表 + 带时间戳的结果文字。</para>
+    /// </summary>
     private void OnExternalLogUsage(object sender, RoutedEventArgs e)
     {
+        RefreshExternalLogUsageDetail(announce: true);
+    }
+
+    /// <summary>填充并展开占用明细。<paramref name="announce"/> 为 false 时不覆盖结果文字（供清理后同步用）。</summary>
+    private void RefreshExternalLogUsageDetail(bool announce)
+    {
         var usage = ExternalLogStore.GetUsage();
+        RefreshExternalLogSection();
+
+        // 每次重建，不复用旧元素 —— 文件可能整批被删掉，复用容易把过期行留在界面上
+        ExternalLogUsageLines.Children.Clear();
+
+        if (usage.FileCount == 0)
+        {
+            ExternalLogUsageTitle.Text = "占用明细：暂无文件";
+
+            var hint = new TextBlock
+            {
+                Text = "还没有外部日志文件。任务跑起来、并且任务上配了「外部日志路径」之后，再回来看。",
+                TextWrapping = TextWrapping.Wrap,
+                FontSize = 12,
+                Opacity = 0.65,
+            };
+            ExternalLogUsageLines.Children.Add(hint);
+        }
+        else
+        {
+            ExternalLogUsageTitle.Text = $"占用明细：共 {usage.FileCount} 份，合计 {usage.TotalText}";
+
+            foreach (var file in usage.Files)
+            {
+                var line = new TextBlock
+                {
+                    Text = $"{file.ChannelTag}  ·  {file.FileName}  ·  {file.SizeText}  ·  {file.LastWriteTime:yyyy-MM-dd HH:mm}",
+                    FontSize = 12,
+                    TextWrapping = TextWrapping.NoWrap,
+                    TextTrimming = TextTrimming.CharacterEllipsis,
+                    Opacity = 0.8,
+                };
+                ExternalLogUsageLines.Children.Add(line);
+            }
+        }
+
+        ExternalLogUsagePanel.Visibility = Visibility.Visible;
+
+        if (!announce)
+        {
+            return;
+        }
+
         VM.AppendLog(usage.FileCount == 0
             ? "外部日志占用：暂无文件。"
             : $"外部日志占用：共 {usage.FileCount} 份，{usage.TotalText}。");
-        RefreshExternalLogSection();
+
+        SetExternalLogAction(usage.FileCount == 0
+            ? $"已刷新：暂无外部日志文件 —— {DateTime.Now:HH:mm:ss}"
+            : $"已刷新：共 {usage.FileCount} 份，{usage.TotalText} —— {DateTime.Now:HH:mm:ss}");
+    }
+
+    /// <summary>把一次操作的结果写到本页（设置页没有别的即时报错渠道）。</summary>
+    private void SetExternalLogAction(string text)
+    {
+        ExternalLogActionText.Text = text;
+        ExternalLogActionText.Visibility = Visibility.Visible;
     }
 
     private void OnOpenExternalLogFolder(object sender, RoutedEventArgs e)
     {
         VM.OpenDirectory(ExternalLogStore.RootDir);
+        SetExternalLogAction($"已请求打开：{ExternalLogStore.RootDir}");
     }
 
     // ---------------- 关于：版本号 + 检查更新 ----------------
