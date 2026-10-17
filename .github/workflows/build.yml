@@ -319,9 +319,49 @@ jobs:
 
       # 绿色版 ZIP 之外再出一个安装版：装到 Program Files，开始菜单 + 卸载入口都有。
       # package_release.py 已经把要装的东西铺到 dist/app 了，这里直接打包它。
-      - name: 装 Inno Setup
+
+      # ⚠️ 版本要钉死，别再用 `choco install innosetup`（装到哪个版本全看包仓库心情）：
+      #    1) 后面要改编译器模板 SetupLdr 的清单，模板布局随版本变；
+      #    2) 「DisablePrecompiledFileVerifications」是 6.7 才有的指令。
+      - name: 装 Inno Setup（钉死版本）
         shell: pwsh
-        run: choco install innosetup -y --no-progress
+        env:
+          INNO_VERSION: '6.7.3'
+        run: |
+          $ver = $env:INNO_VERSION
+          $tag = 'is-' + ($ver -replace '\.', '_')
+          $url = "https://github.com/jrsoftware/issrc/releases/download/$tag/innosetup-$ver.exe"
+          Write-Host "下载 $url"
+          Invoke-WebRequest -Uri $url -OutFile innosetup.exe -UseBasicParsing
+          Write-Host ("安装包大小 {0:N1} MB" -f ((Get-Item innosetup.exe).Length / 1MB))
+          $p = Start-Process -FilePath (Resolve-Path innosetup.exe).Path -Wait -PassThru `
+            -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/ALLUSERS'
+          if ($p.ExitCode -ne 0) { throw "Inno Setup 安装失败（exit $($p.ExitCode)）" }
+
+          $dir = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6'
+          if (-not (Test-Path (Join-Path $dir 'ISCC.exe'))) { throw "装完了却找不到 ISCC.exe：$dir" }
+          Write-Host "Inno Setup 就位：$dir"
+
+      # 让安装包在**双击的瞬间**就要求管理员，而不是「向导先出来、过一会儿再弹 UAC」。
+      # 做法：把编译器模板 SetupLdr.e32/e64 的清单改成 requireAdministrator，再让 ISCC
+      # 拿这套模板去拼安装包。改在复制出来的目录上做，Program Files 里的保持原样。
+      # ⚠️ 不要改成「编好的 setup.exe 事后打补丁」：它尾部是追加的安装数据，
+      #    mt.exe 和 UpdateResource 写回时会把那一段整段丢掉（75MB → 1MB 的残骸）。
+      - name: 让安装包强制要求管理员（改编译器模板清单）
+        shell: pwsh
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: '1'
+        run: |
+          $srcDir = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6'
+          $work = Join-Path $env:GITHUB_WORKSPACE 'inno-patched'
+          Copy-Item $srcDir $work -Recurse -Force
+
+          $stubs = @('SetupLdr.e32', 'SetupLdr.e64') | ForEach-Object { Join-Path $work $_ }
+          python winui3/tools/patch_setup_manifest.py @stubs
+          if ($LASTEXITCODE -ne 0) { throw '编译器模板清单补丁失败（见上一行输出）' }
+          "inno_dir=$work" >> $env:GITHUB_OUTPUT
+        id: inno
 
       # 装版之前再核一遍"真的是自包含"。
       # package_release.py 已经查过 runtimeconfig，这里查的是**发布步骤本身有没有跑成** ——
@@ -347,10 +387,10 @@ jobs:
           PYTHONIOENCODING: utf-8
           PYTHONUTF8: '1'
         run: |
-          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          $iscc = Join-Path '${{ steps.inno.outputs.inno_dir }}' 'ISCC.exe'
           if (-not (Test-Path $iscc)) { throw "找不到 ISCC.exe（Inno Setup 没装上？）：$iscc" }
 
-          # Inno 6.7 的 choco 包不带 Languages 目录，中文语言文件要另外取；
+          # Inno 的官方包不带 Unofficial 语言文件，中文要另外取；
           # 取不到就用默认英文向导（不给 LangFile 参数），别因此判红
           $langDir = Join-Path $env:GITHUB_WORKSPACE 'isl'
           $lang = Join-Path $langDir 'ChineseSimplified.isl'
@@ -378,6 +418,27 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "ISCC 编译失败（exit $LASTEXITCODE）" }
 
           "setup_name=YukinoChan-${{ steps.ver.outputs.version }}-setup.exe" >> $env:GITHUB_OUTPUT
+
+      # 兜底断言：前面的模板补丁要是没生效（换版本、路径不对、ISCC 用了别处的模板），
+      # 这里就当场判红 —— 免得发出去一个「双击不要求管理员」的安装包。
+      - name: 校验安装包真的要求管理员权限
+        shell: pwsh
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: '1'
+        run: |
+          $setup = Join-Path $env:GITHUB_WORKSPACE 'dist/YukinoChan-${{ steps.ver.outputs.version }}-setup.exe'
+          if (-not (Test-Path $setup)) { throw "找不到安装包：$setup" }
+
+          # 被 mt.exe / UpdateResource 毁掉的残骸只有 ~950KB（引导器本身），
+          # 正常安装包会把整个程序目录压进去，差着两个数量级 —— 顺手挡一道。
+          $mb = (Get-Item $setup).Length / 1MB
+          Write-Host ("安装包大小 {0:N1} MB" -f $mb)
+          if ($mb -lt 2) { throw "安装包只有 $mb MB，像是丢了尾部安装数据（引导器残骸）" }
+
+          python winui3/tools/patch_setup_manifest.py $setup --expect-admin
+          if ($LASTEXITCODE -ne 0) { throw '安装包清单不是 requireAdministrator —— 模板补丁没生效' }
+          Write-Host '✅ 安装包清单：requireAdministrator'
 
       - name: 上传发布包
         uses: actions/upload-artifact@v4

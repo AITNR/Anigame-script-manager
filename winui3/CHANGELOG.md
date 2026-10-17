@@ -11,12 +11,33 @@ Python / PySide6 版（v1.0 RC1，legacy）的变更记录见仓库根的 [CHANG
 
 ### Changed
 
+- **安装包自己也要求管理员权限（双击即弹 UAC）。** 之前 `setup.exe` 外层清单是 Inno 默认的
+  `asInvoker`，`PrivilegesRequired=admin` 只让它「启动之后再 runas 一次」——双击后先出安装向导、
+  过一会儿才提权，跟主程序「双击立刻弹 UAC」不一致。现在 CI 先复制一份 Inno 编译器、把模板
+  `SetupLdr.e32/e64` 的清单改成 `requireAdministrator`（`tools/patch_setup_manifest.py`），
+  再用这套模板编译；`installer.iss` 相应加上 `DisablePrecompiledFileVerifications=setupldr`
+  （Inno 6.7 起会校验模板哈希）。CI 里钉死 Inno Setup 6.7.3，编译完还会**读产物清单断言**
+  它是 `requireAdministrator`，并挡住「只剩 950KB 引导器」的残缺产物。
+  `PrivilegesRequiredOverridesAllowed` 已移除（`/LOWEST` 绕过提权那条路封掉）。
+
+  > ⚠️ 别改成「编好的 setup.exe 事后打补丁」：它是「PE + 尾部追加的安装数据」，
+  > `mt.exe` / `UpdateResource` 写回时会把追加数据整段丢掉（实测 75MB → 1,000,448 字节）。
+
+- `installer.iss` 补上 UTF-8 BOM：没有 BOM 时 ISCC 按 ANSI 读，中文（快捷方式任务描述、
+  `[Code]` 里的提示文案）会变成乱码。
+
 - **通知改为只从主控端发。** 系统 Toast 只能在发出它的那个用户会话里显示，
   目标会话里弹的通知主控端用户根本看不到。所以代理侧（`RdpAgentRunner`）
   **已删除全部发通知的代码**；主控端下发的 `RdpCommand.NotifyOnTaskDone` /
   `NotifyOnAllDone` 现在**固定发 `false`**，只为让仍部署在目标账户里的**旧版代理**闭嘴。
 
 ### Fixed
+
+- **安装完成后勾选「启动 雪乃酱」会弹「CreateProcess failed; code 740 请求的操作需要提升」，程序反而没起来。**
+  根因在 Inno：带 `postinstall` 的 `[Run]` 条目**默认用 `runasoriginaluser`**（即 UAC 提权之前那个
+  普通令牌），而主程序 `app.manifest` 是 `requireAdministrator` —— 拿普通令牌 `CreateProcess`
+  必然被拒（740 = `ERROR_ELEVATION_REQUIRED`）。安装日志里能直接看到 `Run as: Original user`
+  紧跟 `code 740`。现在该条目加上 `runascurrentuser`（继承 Setup 自己的管理员令牌），必定能起来。
 
 - **完成通知从来没弹出来过 —— 根因是通知 API 在提权进程里静默失效。** 原实现用 Windows App SDK 的
   `AppNotificationManager.Default.Register()`。本机实测（2026-10-11）：非提权进程一切正常；但本程序

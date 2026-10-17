@@ -1,16 +1,26 @@
-; ═══════════════════════════════════════════════════════════════════════════════
+﻿; ═══════════════════════════════════════════════════════════════════════════════
 ; 雪乃酱 · 安装程序（Inno Setup 6）
 ;
 ; 被 CI 调用（build.yml）：ISCC 传 MyAppVersion / SrcDir / OutDir / IconFile。
 ;   ISCC.exe winui3\tools\installer.iss /DMyAppVersion=2.1.0 /DSrcDir=<abs>\dist\app /DOutDir=<abs>\dist
 ; ⚠️ SrcDir / OutDir 请传**绝对路径** —— 相对路径会被当成「相对本脚本所在目录」解析。
 ;
-; 默认装到公共目录 {pf}\YukinoChan（Program Files）。程序启动时会自己提权重启
-; （Program.cs 的 TryRelaunchElevated），所以往安装目录写 config.json / logs 没问题。
+; 默认装到公共目录 Program Files\YukinoChan。主程序 app.manifest 是 requireAdministrator
+; （双击即由系统提权），所以往安装目录写 config.json / logs 没问题。
 ;
 ; 数据（config.json / logs / runtime_stats）不在 [Files] 里，因此：
 ;   · 升级安装 = 覆盖程序文件、保留配置；
 ;   · 卸载后配置和日志也会留在安装目录，需要清掉自己删。
+;
+; ── 为什么还要「改编译器模板」这一步（见 build.yml 的「让安装包强制要求管理员」）──
+;   Inno 的引导器（SetupLdr.e32/e64）清单里写死 asInvoker，PrivilegesRequired=admin
+;   只是让它在**自己启动之后**再 runas 提权一次 —— 于是双击后先出向导、过一会儿才弹
+;   UAC，而主程序是 requireAdministrator（双击立刻弹）。两者体验不一致，且在
+;   「双击后才发现没权限」的场景下已经晚了。
+;   所以 CI 会先把 SetupLdr 的清单改成 requireAdministrator 再编译，下面那句
+;   DisablePrecompiledFileVerifications 就是为这一步准备的（6.7 起会校验模板哈希）。
+;   ⚠️ 不要试图改**编好的** setup.exe：它是「PE + 尾部追加的安装数据」，
+;      mt.exe / UpdateResource 都会把追加数据整段丢掉，产物只剩 1MB 的残骸。
 ; ═══════════════════════════════════════════════════════════════════════════════
 
 #ifndef MyAppVersion
@@ -61,7 +71,15 @@ DisableDirPage=auto
 
 ; 装到 Program Files 就要管理员：不降权装到用户目录（那样数据与程序就分家了）
 PrivilegesRequired=admin
-PrivilegesRequiredOverridesAllowed=commandline
+; ⚠️ 不要加 PrivilegesRequiredOverridesAllowed —— 它允许 `setup.exe /LOWEST` 强行按
+;    非管理员方式装到用户目录，跟「装到 Program Files」这个前提冲突，也绕过了本文件要求的提权。
+
+; 6.7 起编译器会校验 SetupLdr.e32/e64 的哈希（.issig）；CI 为了让安装包自带
+; requireAdministrator 会先改它们的清单，所以这里必须放行。
+; 老版本（<6.7）没有这项校验，也不需要这条指令（写了反而报未知指令）。
+#if Ver >= EncodeVer(6,7,0)
+DisablePrecompiledFileVerifications=setupldr
+#endif
 
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -100,5 +118,26 @@ Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; IconFilename: "{app
 Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; IconFilename: "{app}\{#MyAppExe}"; Tasks: desktopicon
 
+; ⚠️ 必须带 runascurrentuser —— 少了它会报「CreateProcess failed; code 740 请求的操作需要提升」。
+;    Inno 对带 postinstall 的 [Run] 条目**默认用 runasoriginaluser**（提权之前那个普通令牌，
+;    即 explorer 的 medium 完整性级别）。而主程序 app.manifest 是 requireAdministrator，
+;    拿普通令牌 CreateProcess 一定被拒 → 用户点「完成」就弹错误框，程序反而没起来。
+;    （日志里能直接看到 `Run as: Original user` 紧跟 `code 740`。）
+;    runascurrentuser = 继承 Setup 自己的令牌；Setup 本身就是管理员，所以必定能启动。
 [Run]
-Filename: "{app}\{#MyAppExe}"; Description: "安装完成后启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExe}"; Description: "安装完成后启动 {#MyAppName}"; Flags: nowait postinstall runascurrentuser skipifsilent
+
+[Code]
+// 兜底：万一谁用「没打补丁的编译器模板」编出这个安装包（外层清单还是 asInvoker），
+// 至少别让它静默地以普通用户身份往 Program Files 里写 —— 那样会装一半失败，报错还看不懂。
+// ⚠️ [Code] 是 Pascal Script：注释只能写 // 或 { }，不能用分号（分号是语句分隔符）。
+function InitializeSetup(): Boolean;
+begin
+  Result := True;
+  if not IsAdminInstallMode then
+  begin
+    MsgBox('本安装程序需要管理员权限，才能把程序装到 Program Files。' + #13#10 + #13#10 +
+           '请右键点击安装包，选择「以管理员身份运行」。', mbError, MB_OK);
+    Result := False;
+  end;
+end;

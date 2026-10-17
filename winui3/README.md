@@ -153,10 +153,33 @@ CI 的每次构建都会建一个自己的预发布 tag，资产不会被下一�
 
 | 产物 | 用法 |
 |---|---|
-| `YukinoChan-<版本>-setup.exe` | **安装版**。默认装到 `%ProgramFiles%\YukinoChan\`，带开始菜单快捷方式与卸载入口；安装**需要管理员** |
+| `YukinoChan-<版本>-setup.exe` | **安装版**。默认装到 `%ProgramFiles%\YukinoChan\`，带开始菜单快捷方式与卸载入口；**双击即弹 UAC**（清单里就是 `requireAdministrator`） |
 | `YukinoChan-winui3-<版本>-x64.zip` | **绿色版**。解压到**固定目录**（别放临时目录，日志会写在它旁边），双击 `YukinoChan.exe` 即用 |
 
-安装脚本是 `winui3/tools/installer.iss`（Inno Setup 6，CI 里用 `choco install innosetup` 装，本机要先装 Inno Setup 6 才能编译）。
+安装脚本是 `winui3/tools/installer.iss`（Inno Setup 6；CI 里**钉死 6.7.3**，本机复现要先装 Inno Setup 6）。
+
+**安装包自己也要求管理员**（和主程序一致：双击立刻弹 UAC，不会「向导先出来、过一会儿再提权」）：
+Inno 的引导器模板 `SetupLdr.e32/e64` 清单里写死 `asInvoker`，`PrivilegesRequired=admin`
+只是让它启动之后再 runas 一次。所以 CI 会先把**编译器模板**的清单改成 `requireAdministrator`
+（`winui3/tools/patch_setup_manifest.py`），再用这套模板编译；`installer.iss` 里那句
+`DisablePrecompiledFileVerifications=setupldr` 就是为这一步准备的（Inno 6.7 起会校验模板哈希）。
+CI 编译完还有一步断言：真去读产物清单，不是 `requireAdministrator` 就判红，
+同时挡一下「安装包只剩 950KB 引导器」这种残缺产物。
+
+> ❌ **别改「已经编好的」setup.exe**：它是「PE 引导器 + 追尾在文件尾的安装数据」，
+> `mt.exe` 与 Win32 的 `UpdateResource` 写回时都会把追加数据整段丢掉 ——
+> 实测 75MB 的安装包被截成 1,000,448 字节，双击只会报「安装数据损坏」。
+> `patch_setup_manifest.py` 现在遇到带追加数据的文件会直接拒绝。
+>
+> ❌ 也别加 `PrivilegesRequiredOverridesAllowed`：它允许 `setup.exe /LOWEST` 强行按非管理员
+> 装到用户目录，跟「装到 `{commonpf}`」这个前提冲突。
+
+**「安装完成后启动」那条 `[Run]` 必须带 `runascurrentuser`**：Inno 对带 `postinstall` 的条目
+**默认用 `runasoriginaluser`**（提权前那个普通令牌），拿它去 `CreateProcess` 一个
+`requireAdministrator` 的程序会被拒 —— 用户点「完成」就弹
+`CreateProcess failed; code 740 请求的操作需要提升`，程序反而没起来
+（日志里是 `Run as: Original user` 紧跟 `code 740`）。`runascurrentuser` 继承 Setup 自己的
+管理员令牌，必定能起。
 
 装到 Program Files 后，程序要往安装目录写 `config.json` / `logs` / `runtime_stats` —— 所以主控端**声明式要求管理员**：
 `app.manifest` 里是 `requestedExecutionLevel = requireAdministrator`，**双击即由系统弹 UAC**，一次到位，
@@ -192,6 +215,15 @@ dotnet publish winui3/src/YukinoChan.App/YukinoChan.App.csproj -c Release -p:Pla
 # 3) 打包 + 自检（缺 .pri / XBF / FreeRDP 运行库会直接报错退出）
 python winui3/tools/package_release.py --build-dir ci-build --publish-dir ci-publish \
   --assets assets --out dist --name YukinoChan-winui3-2.1.0-x64 --version 2.1.0
+
+# 4) 编安装程序 —— 先把编译器目录复制一份，改掉模板清单再编（Program Files 里的别动）
+cp -r "/c/Program Files (x86)/Inno Setup 6" inno-patched
+python winui3/tools/patch_setup_manifest.py inno-patched/SetupLdr.e32 inno-patched/SetupLdr.e64
+inno-patched/ISCC.exe winui3/tools/installer.iss \
+  /DMyAppVersion=2.1.0 /DSrcDir="$PWD/dist/app" /DOutDir="$PWD/dist" /DIconFile="$PWD/assets/icon.ico"
+
+# 5) 验收：产物清单必须是 requireAdministrator
+python winui3/tools/patch_setup_manifest.py dist/YukinoChan-2.1.0-setup.exe --expect-admin
 ```
 
 > **为什么不能直接发 `dotnet publish` 的输出**：WinUI 3 的 `YukinoChan.pri` 与各页面的 `*.xbf`
@@ -219,6 +251,8 @@ winui3/
 ├─ YukinoChan.sln                   # 只包含 YukinoChan.App
 ├─ docs/                            # 设计文档（内嵌 RDP / 多会话通道 / 菜单重构计划书）
 ├─ tools/package_release.py         # 发布打包：合并 build+publish 输出、补素材、关键文件自检
+├─ tools/installer.iss              # 安装程序脚本（Inno Setup 6）
+├─ tools/patch_setup_manifest.py    # 把 Inno 模板 SetupLdr 的清单改成 requireAdministrator
 ├─ src/YukinoChan.RdpNative/        # 原生 FreeRDP 封装（ycn_rdp.c / .h + CMakeLists.txt）
 │  └─ ycn_rdp.c                     #   多会话上限 YCN_MAX_SESSIONS = 8
 └─ src/YukinoChan.App/
