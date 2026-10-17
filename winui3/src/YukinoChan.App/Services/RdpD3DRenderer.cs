@@ -82,10 +82,13 @@ namespace YukinoChan.Services
         private IDXGISwapChain1? _swapChain;
         private ID3D11Texture2D? _staging;
         private ID3D11Texture2D? _backBuffer;
+        private Microsoft.UI.Xaml.Controls.SwapChainPanel? _panel;
         private IntPtr _panelPtr;                 // SwapChainPanel 原生指针（SetCompositionScale 用）
         private uint _remoteWidth;
         private uint _remoteHeight;
 
+        private static int _liveRenderers;
+        public static int LiveRenderers => System.Threading.Volatile.Read(ref _liveRenderers);
         public bool Initialized { get; private set; }
 
         public string? LastError { get; private set; }
@@ -130,7 +133,7 @@ namespace YukinoChan.Services
                 _device = device;
                 _context = device.ImmediateContext;
 
-                var dxgiDevice = device.QueryInterface<IDXGIDevice>();
+                using var dxgiDevice = device.QueryInterface<IDXGIDevice>();
                 using var adapter = dxgiDevice.GetAdapter();
                 using var factory = adapter.GetParent<IDXGIFactory2>();
 
@@ -157,21 +160,13 @@ namespace YukinoChan.Services
                     return false;
                 }
 
+                _panel = panel;
                 _panelPtr = ((IWinRTObject)panel).NativeObject.ThisPtr;
-                var iid = new Guid("63aad0b8-7c24-40ff-85a8-640d944cc325");
-                Marshal.QueryInterface(_panelPtr, ref iid, out var nativePtr);
-                try
-                {
-                    var panelNative = (ISwapChainPanelNative)Marshal.GetObjectForIUnknown(nativePtr);
-                    panelNative.SetSwapChain(_swapChain.NativePointer);
-                }
-                finally
-                {
-                    Marshal.Release(nativePtr);
-                }
+                SetPanelSwapChain(_swapChain.NativePointer);
 
                 CreateStaging();
                 _backBuffer = _swapChain.GetBuffer<ID3D11Texture2D>(0);
+                if (!Initialized) { System.Threading.Interlocked.Increment(ref _liveRenderers); }
                 Initialized = true;
                 return true;
             }
@@ -179,6 +174,26 @@ namespace YukinoChan.Services
             {
                 LastError = ex.Message;
                 return false;
+            }
+        }
+
+        private unsafe void SetPanelSwapChain(IntPtr swapChain)
+        {
+            if (_panelPtr == IntPtr.Zero) { return; }
+            var iid = new Guid("63aad0b8-7c24-40ff-85a8-640d944cc325");
+            Marshal.ThrowExceptionForHR(Marshal.QueryInterface(_panelPtr, ref iid, out var native));
+            try
+            {
+                // Balance QueryInterface directly; an RCW would hold another COM reference
+                // until finalization, keeping the panel and its swap chain alive.
+                var vtable = *(IntPtr**)native;
+                var setSwapChain = (delegate* unmanaged[Stdcall]<IntPtr, IntPtr, int>)vtable[3];
+                Marshal.ThrowExceptionForHR(setSwapChain(native, swapChain));
+            }
+            finally
+            {
+                Marshal.Release(native);
+                GC.KeepAlive(_panel);
             }
         }
 
@@ -306,7 +321,15 @@ namespace YukinoChan.Services
         {
             lock (_gate)
             {
+                if (Initialized) { System.Threading.Interlocked.Decrement(ref _liveRenderers); }
                 Initialized = false;
+                try { SetPanelSwapChain(IntPtr.Zero); }
+                catch (Exception ex) { LastError = ex.Message; }
+                finally
+                {
+                    _panelPtr = IntPtr.Zero;
+                    _panel = null;
+                }
                 _staging?.Dispose();
                 _backBuffer?.Dispose();
                 _swapChain?.Dispose();

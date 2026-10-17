@@ -76,7 +76,10 @@ typedef struct ycn_rdp_callbacks
     void (*on_frame_ready)(void* user, int session, uint32_t width, uint32_t height, uint32_t stride);
     /* 远端桌面分辨率变更 */
     void (*on_desktop_resize)(void* user, int session, uint32_t width, uint32_t height);
-    /* 断开（每会话恰好一次；主动/被动/错误共用，用 reason 区分） */
+    /* 终态断开回调：每个已启动的会话恰好一次。调用前 FreeRDP、通道、GDI
+     * 和 native 帧资源均已释放，且之后不会再有该会话的 native 回调；session
+     * ID 已退役，不会指向后续会话。detail 仅在本回调期间有效。托管侧可在此
+     * 释放回调委托和 user/self-root。 */
     void (*on_disconnected)(void* user, int session, int reason, const char* detail);
     /* 非致命错误通报（会话可能继续存活） */
     void (*on_error)(void* user, int session, int code, const char* message);

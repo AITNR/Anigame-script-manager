@@ -161,8 +161,21 @@ public static class ExternalLogFilter
 
     /// <summary>把原始行解析成结构化的一行（规整 + 级别 + 关键字）。</summary>
     public static ExternalLogLine Parse(string? raw, IReadOnlyList<string>? keywords)
+        => Parse(raw, keywords, wasTruncated: false);
+
+    /// <summary>
+    /// 把已在原始字节层被截断的行标出，保留行首以维持级别识别。
+    /// </summary>
+    public static ExternalLogLine Parse(string? raw, IReadOnlyList<string>? keywords, bool wasTruncated)
     {
         var text = NormalizeLine(raw);
+        if (wasTruncated && text.Length > 0)
+        {
+            const string suffix = " [日志行原始字节超限，已截断]";
+            var keep = Math.Max(0, ExternalLogDefaults.MaxLineLength - suffix.Length);
+            text = text.Length <= keep ? text + suffix : text.Substring(0, keep) + suffix;
+        }
+
         return new ExternalLogLine
         {
             Text = text,

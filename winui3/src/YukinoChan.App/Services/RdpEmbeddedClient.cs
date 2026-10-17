@@ -53,6 +53,26 @@ namespace YukinoChan.Services
         private readonly object _gate = new();
         private RdpClientState _state = RdpClientState.Idle;
         private int _session;
+        private bool _disconnectRequested;
+        // Native callbacks must remain rooted even if asynchronous disposal times out.
+        private System.Runtime.InteropServices.GCHandle _callbackRoot;
+        private System.Threading.Tasks.TaskCompletionSource _completion = CompletedSource();
+        public System.Threading.Tasks.Task Completion { get { lock (_gate) { return _completion.Task; } } }
+
+        private static System.Threading.Tasks.TaskCompletionSource CompletedSource()
+        {
+            var source = new System.Threading.Tasks.TaskCompletionSource(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously);
+            source.SetResult();
+            return source;
+        }
+
+        private void ReleaseCallbackRoot()
+        {
+            lock (_gate)
+            {
+                if (_callbackRoot.IsAllocated) { _callbackRoot.Free(); }
+            }
+        }
 
         /// <summary>抓帧复用缓冲（避免每帧分配 8MB 触发 GC）。长度 ≥ 最近一帧的 stride*height。</summary>
         private byte[] _frameBuffer = Array.Empty<byte>();
@@ -86,6 +106,10 @@ namespace YukinoChan.Services
                 {
                     return false; // 非法迁移（如重复 Connect）
                 }
+                if (!_completion.Task.IsCompleted) { return false; }
+                _disconnectRequested = false;
+                _completion = new(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously);
+                _callbackRoot = System.Runtime.InteropServices.GCHandle.Alloc(this);
                 _state = next;
             }
 
@@ -100,8 +124,22 @@ namespace YukinoChan.Services
                 DesktopResized?.Invoke(this, (session, w, h));
             _onDisconnected = (user, session, reason, detail) =>
             {
-                lock (_gate) { _state = RdpClientStateMachine.Transition(_state, RdpClientEvent.NativeDisconnected); }
-                Disconnected?.Invoke(this, (session, reason, detail ?? string.Empty));
+                lock (_gate)
+                {
+                    _state = RdpClientStateMachine.Transition(_state, RdpClientEvent.NativeDisconnected);
+                    _session = 0;
+                    _frameBuffer = Array.Empty<byte>();
+                }
+                try { Disconnected?.Invoke(this, (session, reason, detail ?? string.Empty)); }
+                finally
+                {
+                    // The native terminal callback occurs after all native resource teardown.
+                    lock (_gate)
+                    {
+                        ReleaseCallbackRoot();
+                        _completion.TrySetResult();
+                    }
+                }
             };
             _onError = (user, session, code, message) =>
                 ErrorOccurred?.Invoke(this, (session, code, message ?? string.Empty));
@@ -132,17 +170,39 @@ namespace YukinoChan.Services
             };
 
             var cb = _nativeCallbacks.Value;
-            int session = RdpNativeInterop.ycn_rdp_connect(ref p, ref cb, IntPtr.Zero);
+            int session;
+            try { session = RdpNativeInterop.ycn_rdp_connect(ref p, ref cb, IntPtr.Zero); }
+            catch
+            {
+                lock (_gate)
+                {
+                    _state = RdpClientState.Failed;
+                    ReleaseCallbackRoot();
+                    _completion.TrySetResult();
+                }
+                throw;
+            }
             if (session <= 0)
             {
-                lock (_gate) { _state = RdpClientStateMachine.Transition(_state, RdpClientEvent.ConnectRejected); }
+                lock (_gate)
+                {
+                    _state = RdpClientStateMachine.Transition(_state, RdpClientEvent.ConnectRejected);
+                    ReleaseCallbackRoot();
+                    _completion.TrySetResult();
+                }
                 var buf = new byte[512];
                 RdpNativeInterop.ycn_rdp_last_error(0, buf, (UIntPtr)buf.Length);
                 throw new InvalidOperationException(
                     $"ycn_rdp_connect 失败（{session}）：{System.Text.Encoding.UTF8.GetString(buf).TrimEnd('\0')}");
             }
 
-            _session = session;
+            bool disconnect;
+            lock (_gate)
+            {
+                if (!_completion.Task.IsCompleted) { _session = session; }
+                disconnect = _disconnectRequested && !_completion.Task.IsCompleted;
+            }
+            if (disconnect) { RdpNativeInterop.ycn_rdp_disconnect(session); }
             return true;
         }
 
@@ -152,11 +212,9 @@ namespace YukinoChan.Services
             int session;
             lock (_gate)
             {
-                if (_state is RdpClientState.Idle or RdpClientState.Disconnected or RdpClientState.Failed)
-                {
-                    return;
-                }
+                _disconnectRequested = true;
                 session = _session;
+                if (session <= 0) { return; }
             }
             RdpNativeInterop.ycn_rdp_disconnect(session);
         }
@@ -175,16 +233,18 @@ namespace YukinoChan.Services
             }
 
             var size = checked((int)(st * h));
-            if (_frameBuffer.Length < size)
+            var buffer = _frameBuffer;
+            if (buffer.Length < size)
             {
-                _frameBuffer = new byte[size];
+                buffer = new byte[size];
+                _frameBuffer = buffer;
             }
 
             // 第二步在原生锁内整帧拷贝：与 end_paint 的写入互斥，
             // 所以绝不会读到「拷贝到一半」的半成品帧（撕裂根源）。
             unsafe
             {
-                fixed (byte* dst = _frameBuffer)
+                fixed (byte* dst = buffer)
                 {
                     rc = RdpNativeInterop.ycn_rdp_copy_frame(_session, dst, (uint)size, out w, out h, out st);
                 }
@@ -198,7 +258,7 @@ namespace YukinoChan.Services
             height = h;
             stride = st;
             // 注意：pixels 是复用缓冲，长度可能大于 stride*height —— 消费方按 stride/width/height 取值
-            pixels = _frameBuffer;
+            pixels = buffer;
             return true;
         }
 

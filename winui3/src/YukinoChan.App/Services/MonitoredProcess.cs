@@ -9,7 +9,7 @@ namespace YukinoChan.Services;
 /// <summary>
 /// 统一进程监控抽象，让普通子进程与 ShellExecuteEx(runas) 提权进程可以沿用同一套监控逻辑。
 /// </summary>
-public interface IMonitoredProcess
+public interface IMonitoredProcess : IDisposable
 {
     int Pid { get; }
 
@@ -24,49 +24,108 @@ public interface IMonitoredProcess
 
 public sealed class ManagedProcessAdapter : IMonitoredProcess
 {
-    private readonly Process _process;
+    private readonly object _gate = new();
+    private Process? _process;
+    private readonly int _pid;
 
     public ManagedProcessAdapter(Process process)
     {
         _process = process;
+        _pid = process.Id;
     }
 
-    public int Pid => _process.Id;
+    public int Pid => _pid;
 
     public int? Poll()
     {
-        if (_process.HasExited)
+        lock (_gate)
         {
-            return _process.ExitCode;
+            if (_process is null)
+            {
+                return null;
+            }
+
+            if (_process.HasExited)
+            {
+                return _process.ExitCode;
+            }
         }
 
         return null;
     }
 
-    public bool Wait(int milliseconds) => _process.WaitForExit(milliseconds);
+    public bool Wait(int milliseconds)
+    {
+        var remaining = milliseconds;
+        while (true)
+        {
+            if (Poll() is not null)
+            {
+                return true;
+            }
+
+            if (remaining <= 0)
+            {
+                return false;
+            }
+
+            var slice = Math.Min(100, remaining);
+            lock (_gate)
+            {
+                if (_process is null)
+                {
+                    return false;
+                }
+
+                if (_process.WaitForExit(slice))
+                {
+                    return true;
+                }
+            }
+
+            remaining -= slice;
+        }
+    }
 
     public void Terminate()
     {
         try
         {
-            if (_process.HasExited)
+            lock (_gate)
             {
-                return;
+                if (_process is null || _process.HasExited)
+                {
+                    return;
+                }
+
+                _process.Kill(entireProcessTree: true);
             }
 
-            _process.Kill(entireProcessTree: true);
-            _process.WaitForExit(5000);
+            Wait(5000);
         }
         catch
         {
             // 进程可能已退出或权限不足，忽略
         }
     }
+
+    public void Dispose()
+    {
+        Process? process;
+        lock (_gate)
+        {
+            process = _process;
+            _process = null;
+        }
+
+        process?.Dispose();
+    }
 }
 
 /// <summary>用 ShellExecuteEx(runas) 启动的提权进程适配器。</summary>
 public sealed class ElevatedProcessAdapter : IMonitoredProcess
 {
+    private readonly object _gate = new();
     private IntPtr _handle;
     private int? _exitCode;
 
@@ -80,19 +139,31 @@ public sealed class ElevatedProcessAdapter : IMonitoredProcess
 
     public int? Poll()
     {
-        if (_exitCode is not null)
+        IntPtr handleToClose = IntPtr.Zero;
+        int? exitCode = null;
+        lock (_gate)
         {
-            return _exitCode;
-        }
+            if (_exitCode is not null)
+            {
+                return _exitCode;
+            }
 
-        var result = NativeMethods.WaitForSingleObject(_handle, 0);
-        if (result == NativeMethods.WaitTimeout)
-        {
-            return null;
-        }
+            if (_handle == IntPtr.Zero)
+            {
+                return null;
+            }
 
-        if (result == NativeMethods.WaitObject0)
-        {
+            var result = NativeMethods.WaitForSingleObject(_handle, 0);
+            if (result == NativeMethods.WaitTimeout)
+            {
+                return null;
+            }
+
+            if (result != NativeMethods.WaitObject0)
+            {
+                return null;
+            }
+
             if (NativeMethods.GetExitCodeProcess(_handle, out var code))
             {
                 _exitCode = (int)code;
@@ -102,20 +173,13 @@ public sealed class ElevatedProcessAdapter : IMonitoredProcess
                 _exitCode = 0;
             }
 
-            try
-            {
-                NativeMethods.CloseHandle(_handle);
-            }
-            catch
-            {
-                // 忽略句柄关闭失败
-            }
-
+            handleToClose = _handle;
             _handle = IntPtr.Zero;
-            return _exitCode;
+            exitCode = _exitCode;
         }
 
-        return null;
+        CloseHandle(handleToClose);
+        return exitCode;
     }
 
     public bool Wait(int milliseconds)
@@ -135,7 +199,15 @@ public sealed class ElevatedProcessAdapter : IMonitoredProcess
             }
 
             var slice = Math.Min(step, remaining);
-            NativeMethods.WaitForSingleObject(_handle, (uint)slice);
+            lock (_gate)
+            {
+                if (_handle == IntPtr.Zero)
+                {
+                    return false;
+                }
+
+                NativeMethods.WaitForSingleObject(_handle, (uint)slice);
+            }
             remaining -= slice;
         }
     }
@@ -155,9 +227,32 @@ public sealed class ElevatedProcessAdapter : IMonitoredProcess
             // 落到 TerminateProcess 兜底
         }
 
-        if (_handle != IntPtr.Zero)
+        lock (_gate)
         {
-            NativeMethods.TerminateProcess(_handle, 1);
+            if (_handle != IntPtr.Zero)
+            {
+                NativeMethods.TerminateProcess(_handle, 1);
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        IntPtr handle;
+        lock (_gate)
+        {
+            handle = _handle;
+            _handle = IntPtr.Zero;
+        }
+
+        CloseHandle(handle);
+    }
+
+    private static void CloseHandle(IntPtr handle)
+    {
+        if (handle != IntPtr.Zero)
+        {
+            NativeMethods.CloseHandle(handle);
         }
     }
 }

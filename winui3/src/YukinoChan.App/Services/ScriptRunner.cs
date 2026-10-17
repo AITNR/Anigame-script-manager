@@ -104,6 +104,9 @@ public sealed class ScriptRunner
     /// </summary>
     private const double LaunchRelayGraceSeconds = 10.0;
     private const int ErrorLockBaseSeconds = 15;
+    private static readonly SemaphoreSlim s_taskThreadSlots = new(AppConfig.MaxActiveTaskThreads);
+    private static int s_liveTaskWorkers;
+    private static int s_liveLogWorkers;
 
     private readonly List<TaskConfig> _tasks;
     private readonly bool _shutdownAfterDone;
@@ -114,6 +117,7 @@ public sealed class ScriptRunner
 
     private readonly object _sync = new();
     private readonly List<IMonitoredProcess> _currentProcesses = new();
+    private readonly Queue<IMonitoredProcess> _processDisposalQueue = new();
     private readonly Dictionary<int, List<string>> _processNamesByPid = new();
     private readonly Dictionary<int, TaskConfig> _tasksByPid = new();
 
@@ -144,6 +148,9 @@ public sealed class ScriptRunner
     private bool _externalLogTailsClosed;
 
     private volatile bool _stopRequested;
+    private readonly CancellationTokenSource _stopCancellation = new();
+    private readonly object _runLock = new();
+    private Task? _runTask;
     /// <summary>
     /// 停止信号（<c>RequestStop</c> / <c>RequestEmergencyStop</c> 置位）。
     /// 让轮询循环能用可中断等待替代 <c>Thread.Sleep</c>：点「停止」时不必再
@@ -152,6 +159,14 @@ public sealed class ScriptRunner
     private readonly ManualResetEventSlim _stopSignal = new(false);
     private volatile bool _pauseRequested;
     private volatile bool _emergencyRequested;
+    private int _liveTaskWorkers;
+    private volatile bool _runFinished;
+
+    /// <summary>当前实际执行 <see cref="RunOneTask"/> 的任务 worker 数，可供主界面采样。</summary>
+    public static int LiveTaskWorkers => Volatile.Read(ref s_liveTaskWorkers);
+
+    /// <summary>当前外部日志轮询 worker 数，可供主界面采样。</summary>
+    public static int LiveLogWorkers => Volatile.Read(ref s_liveLogWorkers);
 
     public ScriptRunner(
         IEnumerable<TaskConfig> tasks,
@@ -187,7 +202,13 @@ public sealed class ScriptRunner
                     task.ExternalLogEncoding, task.ExternalLogFollowTail, scriptDirectory);
                 var state = new ExternalLogTailState(task, tail);
                 _externalLogTails[task] = state;
-                state.Worker = Task.Run(() => ExternalLogTailLoop(state));
+                var start = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                state.Worker = Task.Run(async () =>
+                {
+                    await start.Task.ConfigureAwait(false);
+                    await ExternalLogTailLoopAsync(state).ConfigureAwait(false);
+                });
+                start.SetResult(true);
             }
         }
         catch (Exception ex)
@@ -225,14 +246,24 @@ public sealed class ScriptRunner
         finally { state.Stop.Dispose(); }
     }
 
-    private void ExternalLogTailLoop(ExternalLogTailState state)
+    private async Task ExternalLogTailLoopAsync(ExternalLogTailState state)
     {
+        Interlocked.Increment(ref s_liveLogWorkers);
         try
         {
+            // 保持异步启动，不让注册日志 worker 的任务同步执行首次文件轮询。
+            await Task.Yield();
             while (!state.Stop.IsCancellationRequested)
             {
                 ReadExternalLog(state, final: false);
-                state.Stop.Token.WaitHandle.WaitOne(ExternalLogDefaults.PollIntervalMs);
+                try
+                {
+                    await Task.Delay(ExternalLogDefaults.PollIntervalMs, state.Stop.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (state.Stop.IsCancellationRequested)
+                {
+                    break;
+                }
             }
         }
         catch (Exception ex)
@@ -241,12 +272,31 @@ public sealed class ScriptRunner
         }
         finally
         {
-            try { ReadExternalLog(state, final: true); }
-            finally { state.Tail.Dispose(); }
+            try
+            {
+                // HasUnreadData covers both the 256 KiB read cap and the 200-line emit cap.
+                // Keep shutdown bounded even when a writer continues appending indefinitely.
+                for (var batch = 0; batch < 64; batch++)
+                {
+                    ReadExternalLog(state, final: true);
+                    if (!state.Tail.HasUnreadData) { break; }
+                }
+            }
+            finally
+            {
+                try
+                {
+                    state.Tail.Dispose();
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref s_liveLogWorkers);
+                }
+            }
         }
     }
 
-    private void ReadExternalLog(ExternalLogTailState state, bool final)
+    private int ReadExternalLog(ExternalLogTailState state, bool final)
     {
         var lines = final ? state.Tail.Drain(state.Task.ExternalLogKeywords)
             : state.Tail.Poll(state.Task.ExternalLogKeywords);
@@ -257,6 +307,7 @@ public sealed class ScriptRunner
             EmitExternalLogDiagnostic(state.Task, error.Length == 0 ? "日志采集已恢复。" : error);
         }
         foreach (var line in lines) { EmitExternalLogLine(state.Task, line); }
+        return lines.Count;
     }
 
     private void EmitExternalLogDiagnostic(TaskConfig task, string message) =>
@@ -269,8 +320,8 @@ public sealed class ScriptRunner
     private void EmitExternalLogLine(TaskConfig task, ExternalLogLine line, bool diagnostic = false)
     {
         // 诊断只走带任务归属的实时日志通道，不经 Logged/status.json.Events。
-        TaskExternalLogLineRead?.Invoke(this, new TaskExternalLogLine(task.DisplayName, line));
-        if (!diagnostic) { ExternalLogLineRead?.Invoke(this, line); }
+        InvokeSafely(TaskExternalLogLineRead, new TaskExternalLogLine(task.DisplayName, line), nameof(TaskExternalLogLineRead));
+        if (!diagnostic) { InvokeSafely(ExternalLogLineRead, line, nameof(ExternalLogLineRead)); }
     }
 
     public string AbnormalReportPath { get; }
@@ -335,6 +386,7 @@ public sealed class ScriptRunner
     public void RequestStop()
     {
         _stopRequested = true;
+        _stopCancellation.Cancel();
         _stopSignal.Set();
         _pauseRequested = false;
         Log("收到用户停止执行请求：正在按当前任务的启动脚本进程 → 目标进程 → 游戏窗口/扩展进程顺序收尾。");
@@ -352,6 +404,7 @@ public sealed class ScriptRunner
     public void RequestEmergencyStop()
     {
         _stopRequested = true;
+        _stopCancellation.Cancel();
         _pauseRequested = false;
         _emergencyRequested = true;
         _stopSignal.Set();
@@ -378,15 +431,21 @@ public sealed class ScriptRunner
 
         foreach (var process in processes)
         {
-            if (process.Poll() is null)
+            if (TerminateTrackedProcess(process))
             {
                 Log($"{scopeLabel}：正在终止脚本进程 PID：{process.Pid}");
-                process.Terminate();
             }
         }
     }
 
-    public Task RunAsync() => Task.Run(RunCore);
+    /// <summary>Starts this runner at most once; concurrent callers observe the same execution task.</summary>
+    public Task RunAsync()
+    {
+        lock (_runLock)
+        {
+            return _runTask ??= Task.Run(RunCore);
+        }
+    }
 
     // ---------------- 主循环 ----------------
 
@@ -464,7 +523,30 @@ public sealed class ScriptRunner
                     RaiseTaskStarted(task.DisplayName, index + 1, total);
                     RaiseStatus("运行中");
                     RaiseElapsed(0);
-                    var outcome = RunOneTask(task, index + 1, total);
+                    if (!WaitForTaskThreadSlot())
+                    {
+                        stopped = true;
+                        break;
+                    }
+
+                    RunOutcome outcome;
+                    try
+                    {
+                        outcome = RunOneTask(task, index + 1, total);
+                    }
+                    catch (Exception ex)
+                    {
+                        var message = $"任务「{task.DisplayName}」执行异常：{ex.Message}";
+                        Log(message);
+                        MarkTaskError(message, task.DisplayName);
+                        RaiseTaskCompleted(task.DisplayName, index + 1, total, 0, "执行异常", abnormal: true);
+                        outcome = RunOutcome.Continue;
+                    }
+                    finally
+                    {
+                        s_taskThreadSlots.Release();
+                    }
+
                     index++;
 
                     if (outcome != RunOutcome.Continue)
@@ -488,11 +570,6 @@ public sealed class ScriptRunner
                 SaveAbnormalReport();
                 RaiseFinished(true);
                 return;
-            }
-
-            lock (_sync)
-            {
-                _currentProcesses.Clear();
             }
 
             if (HadTaskError)
@@ -522,7 +599,7 @@ public sealed class ScriptRunner
             {
                 var delay = Math.Max(1, _shutdownDelaySeconds == 0 ? 60 : _shutdownDelaySeconds);
                 Log($"已启用自动关机，将交由主界面弹出 {delay} 秒倒计时确认窗口。");
-                ShutdownPrompt?.Invoke(this, delay);
+                InvokeSafely(ShutdownPrompt, delay, nameof(ShutdownPrompt));
             }
             else
             {
@@ -546,6 +623,7 @@ public sealed class ScriptRunner
         finally
         {
             StopAllExternalLogTails();
+            QueueAllTrackedProcessesForDisposeIfFinished(markRunFinished: true);
         }
     }
 
@@ -554,6 +632,10 @@ public sealed class ScriptRunner
         var policy = ConcurrentPolicies.Normalize(groupTasks[0].ConcurrentPolicy);
         Log($"开始并发组「{groupName}」，共 {groupTasks.Count} 个任务，策略：{ConcurrentPolicies.Label(policy)}。");
         RaiseTaskStarted($"并发组：{groupName}", startIndex, total);
+
+        // WaitFirst 仍在本组成员全部启动后才等待组首任务。若前面的 WaitFirst
+        // 任务仍占用 16 个活动槽位，后续组成员会等待槽位，即使本组组首已完成；
+        // 这是上限带来的背压，不改变任务策略。
 
         var results = new Dictionary<int, RunOutcome>();
         var resultsLock = new object();
@@ -567,17 +649,41 @@ public sealed class ScriptRunner
 
         for (var i = 0; i < groupTasks.Count; i++)
         {
+            if (!WaitForTaskThreadSlot())
+            {
+                return RunOutcome.StopRequested;
+            }
+
             var capturedIndex = i;
             var capturedTask = groupTasks[i];
             var thread = new Thread(() =>
             {
-                var outcome = RunOneTask(capturedTask, startIndex + capturedIndex, total);
-                lock (resultsLock)
+                try
                 {
-                    results[capturedIndex] = outcome;
-                }
+                    RunOutcome outcome;
+                    try
+                    {
+                        outcome = RunOneTask(capturedTask, startIndex + capturedIndex, total);
+                    }
+                    catch (Exception ex)
+                    {
+                        var message = $"任务「{capturedTask.DisplayName}」执行异常：{ex.Message}";
+                        Log(message);
+                        MarkTaskError(message, capturedTask.DisplayName);
+                        RaiseTaskCompleted(capturedTask.DisplayName, startIndex + capturedIndex, total, 0, "执行异常", abnormal: true);
+                        outcome = RunOutcome.Continue;
+                    }
 
-                doneEvents[capturedIndex].Set();
+                    lock (resultsLock)
+                    {
+                        results[capturedIndex] = outcome;
+                    }
+                }
+                finally
+                {
+                    doneEvents[capturedIndex].Set();
+                    s_taskThreadSlots.Release();
+                }
             })
             {
                 IsBackground = true,
@@ -585,7 +691,16 @@ public sealed class ScriptRunner
             };
 
             threads.Add(thread);
-            thread.Start();
+            try
+            {
+                thread.Start();
+            }
+            catch
+            {
+                s_taskThreadSlots.Release();
+                doneEvents[capturedIndex].Set();
+                throw;
+            }
             Thread.Sleep(200);
         }
 
@@ -604,7 +719,10 @@ public sealed class ScriptRunner
             }
 
             Log($"并发组「{groupName}」组首任务已完成，继续后续队列。");
-            return results.TryGetValue(0, out var first) ? first : RunOutcome.Continue;
+            lock (resultsLock)
+            {
+                return results.TryGetValue(0, out var first) ? first : RunOutcome.Continue;
+            }
         }
 
         while (true)
@@ -633,11 +751,14 @@ public sealed class ScriptRunner
             WaitPoll(250);
         }
 
-        foreach (var outcome in results.Values)
+        lock (resultsLock)
         {
-            if (outcome != RunOutcome.Continue)
+            foreach (var outcome in results.Values)
             {
-                return RunOutcome.StopAll;
+                if (outcome != RunOutcome.Continue)
+                {
+                    return RunOutcome.StopAll;
+                }
             }
         }
 
@@ -646,6 +767,25 @@ public sealed class ScriptRunner
     }
 
     private RunOutcome RunOneTask(TaskConfig task, int index, int total)
+    {
+        Interlocked.Increment(ref s_liveTaskWorkers);
+        Interlocked.Increment(ref _liveTaskWorkers);
+        try
+        {
+            return RunOneTaskCore(task, index, total);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref s_liveTaskWorkers);
+            var remaining = Interlocked.Decrement(ref _liveTaskWorkers);
+            if (remaining == 0)
+            {
+                QueueAllTrackedProcessesForDisposeIfFinished();
+            }
+        }
+    }
+
+    private RunOutcome RunOneTaskCore(TaskConfig task, int index, int total)
     {
         var name = task.DisplayName;
         var scriptText = task.ScriptPath.Trim();
@@ -758,7 +898,7 @@ public sealed class ScriptRunner
             return RunOutcome.Continue;
         }
 
-        TaskLaunchSucceeded?.Invoke(this, name);
+        InvokeSafely(TaskLaunchSucceeded, name, nameof(TaskLaunchSucceeded));
 
         if (task.WaitMode == WaitModes.FireAndContinue)
         {
@@ -825,7 +965,7 @@ public sealed class ScriptRunner
                 return RunOutcome.StopRequested;
             }
 
-            var exitCode = process.Poll();
+            var exitCode = PollTrackedProcess(process);
             var now = stopwatch.Elapsed.TotalSeconds;
             var monitorKind = monitorSpec.Kind;
 
@@ -949,7 +1089,7 @@ public sealed class ScriptRunner
                 return false;
             }
 
-            var exitCode = process.Poll();
+            var exitCode = PollTrackedProcess(process);
             if (exitCode is not null)
             {
                 var (present, matchedKeyword) = IsMonitorPresent(monitorSpec);
@@ -1080,10 +1220,9 @@ public sealed class ScriptRunner
 
         foreach (var process in directProcesses ?? new List<IMonitoredProcess>())
         {
-            if (process is not null && process.Poll() is null)
+            if (process is not null && TerminateTrackedProcess(process))
             {
                 Log($"{scopeLabel}：正在终止脚本进程 PID：{process.Pid}");
-                process.Terminate();
             }
         }
 
@@ -1807,6 +1946,29 @@ public sealed class ScriptRunner
         }
     }
 
+    /// <summary>Wait for capacity before beginning a task, without making a stop request wait for a slot.</summary>
+    private bool WaitForTaskThreadSlot()
+    {
+        while (!_stopRequested)
+        {
+            if (s_taskThreadSlots.Wait(250))
+            {
+                // Wait 成功后可能立刻收到停止请求；此时归还已取得的槽位。
+                if (_stopRequested)
+                {
+                    s_taskThreadSlots.Release();
+                    return false;
+                }
+
+                return true;
+            }
+
+            WaitIfPaused();
+        }
+
+        return false;
+    }
+
     private void TrackProcess(IMonitoredProcess process, List<string> processNames, TaskConfig task)
     {
         lock (_sync)
@@ -1825,10 +1987,105 @@ public sealed class ScriptRunner
     {
         lock (_sync)
         {
-            _currentProcesses.Remove(process);
+            if (!_currentProcesses.Remove(process))
+            {
+                return;
+            }
+
             _processNamesByPid.Remove(process.Pid);
             _tasksByPid.Remove(process.Pid);
+            EnqueueProcessForDisposeLocked(process);
         }
+
+        DrainProcessDisposalQueue();
+    }
+
+    /// <summary>在登记锁内读取进程状态，避免停止线程同时终止或释放同一进程句柄。</summary>
+    private int? PollTrackedProcess(IMonitoredProcess process)
+    {
+        lock (_sync)
+        {
+            // 清理线程可能还拿着摘除前的快照；已摘除的进程不再触碰其句柄。
+            return _currentProcesses.Contains(process) ? process.Poll() : null;
+        }
+    }
+
+    /// <summary>在登记锁内确认仍受跟踪后终止，和轮询、释放句柄互斥。</summary>
+    private bool TerminateTrackedProcess(IMonitoredProcess process)
+    {
+        lock (_sync)
+        {
+            if (!_currentProcesses.Contains(process) || process.Poll() is not null)
+            {
+                return false;
+            }
+
+            process.Terminate();
+            return true;
+        }
+    }
+
+    private void EnqueueProcessForDisposeLocked(IMonitoredProcess process)
+    {
+        if (process is IDisposable)
+        {
+            _processDisposalQueue.Enqueue(process);
+        }
+    }
+
+    /// <summary>锁外释放已摘除的句柄；绝不在这里终止或 Kill 进程。</summary>
+    private void DrainProcessDisposalQueue()
+    {
+        while (true)
+        {
+            IMonitoredProcess? process;
+            lock (_sync)
+            {
+                process = _processDisposalQueue.Count > 0 ? _processDisposalQueue.Dequeue() : null;
+            }
+
+            if (process is null)
+            {
+                return;
+            }
+
+            try
+            {
+                ((IDisposable)process).Dispose();
+            }
+            catch (Exception ex)
+            {
+                Log($"释放脚本进程 PID：{process.Pid} 的句柄失败：{ex.Message}");
+            }
+        }
+    }
+
+    /// <summary>运行结束且所有任务 worker 退出后，释放尚未由任务路径摘除的句柄。</summary>
+    private void QueueAllTrackedProcessesForDisposeIfFinished(bool markRunFinished = false)
+    {
+        lock (_sync)
+        {
+            if (markRunFinished)
+            {
+                _runFinished = true;
+            }
+
+            if (!_runFinished || Volatile.Read(ref _liveTaskWorkers) != 0)
+            {
+                return;
+            }
+
+            foreach (var process in _currentProcesses)
+            {
+                EnqueueProcessForDisposeLocked(process);
+            }
+
+            _currentProcesses.Clear();
+            _processNamesByPid.Clear();
+            _tasksByPid.Clear();
+        }
+
+        DrainProcessDisposalQueue();
     }
 
     /// <summary>
@@ -1889,9 +2146,21 @@ public sealed class ScriptRunner
 
     private void SchedulePressEnter(int delaySeconds, string taskName)
     {
-        var thread = new Thread(() =>
+        _ = SchedulePressEnterAsync(delaySeconds, taskName);
+    }
+
+    private async Task SchedulePressEnterAsync(int delaySeconds, string taskName)
+    {
+        try
         {
-            Thread.Sleep(Math.Max(0, delaySeconds) * 1000);
+            var remainingMilliseconds = (long)Math.Max(0, delaySeconds) * 1000;
+            while (remainingMilliseconds > 0)
+            {
+                var waitMilliseconds = (int)Math.Min(remainingMilliseconds, int.MaxValue);
+                await Task.Delay(waitMilliseconds, _stopCancellation.Token).ConfigureAwait(false);
+                remainingMilliseconds -= waitMilliseconds;
+            }
+
             if (_stopRequested)
             {
                 return;
@@ -1906,12 +2175,11 @@ public sealed class ScriptRunner
             {
                 Log($"任务「{taskName}」发送 Enter 失败：{ex.Message}");
             }
-        })
+        }
+        catch (OperationCanceledException) when (_stopCancellation.IsCancellationRequested)
         {
-            IsBackground = true,
-        };
-
-        thread.Start();
+            // 延迟 Enter 到期前队列已停止。
+        }
     }
 
     private string? CaptureTimeoutScreenshot(string taskName, string stage)
@@ -1968,7 +2236,7 @@ public sealed class ScriptRunner
 
         if (notifyError)
         {
-            TaskError?.Invoke(this, message);
+            InvokeSafely(TaskError, message, nameof(TaskError));
         }
     }
 
@@ -2068,20 +2336,21 @@ public sealed class ScriptRunner
     private void Log(string message)
     {
         var line = _logger.Log(message);
-        Logged?.Invoke(this, line);
+        InvokeSafely(Logged, line, nameof(Logged));
     }
 
-    private void RaiseStatus(string status) => StatusChanged?.Invoke(this, status);
+    private void RaiseStatus(string status) => InvokeSafely(StatusChanged, status, nameof(StatusChanged));
 
-    private void RaiseProgress(int current, int total) => ProgressChanged?.Invoke(this, (current, total));
+    private void RaiseProgress(int current, int total) => InvokeSafely(ProgressChanged, (current, total), nameof(ProgressChanged));
 
-    private void RaiseElapsed(int seconds) => ElapsedChanged?.Invoke(this, seconds);
+    private void RaiseElapsed(int seconds) => InvokeSafely(ElapsedChanged, seconds, nameof(ElapsedChanged));
 
-    private void RaiseTaskStarted(string name, int index, int total) => TaskStarted?.Invoke(this, (name, index, total));
+    private void RaiseTaskStarted(string name, int index, int total) => InvokeSafely(TaskStarted, (name, index, total), nameof(TaskStarted));
 
     // 注意：并发组下本回调会在工作线程上触发，订阅方需自行切回 UI 线程。
-    private void RaiseTaskCompleted(string name, int index, int total, int elapsedSeconds, string status, bool abnormal) =>
-        TaskCompleted?.Invoke(this, new TaskCompletedInfo
+    private void RaiseTaskCompleted(string name, int index, int total, int elapsedSeconds, string status, bool abnormal)
+    {
+        InvokeSafely(TaskCompleted, new TaskCompletedInfo
         {
             Name = name,
             Index = index,
@@ -2090,12 +2359,32 @@ public sealed class ScriptRunner
             Status = status,
             IsAbnormal = abnormal,
             FinishedAt = DateTimeOffset.Now,
-        });
+        }, nameof(TaskCompleted));
+    }
 
     private void RaiseFinished(bool stoppedOrError)
     {
         StopAllExternalLogTails();
-        Finished?.Invoke(this, stoppedOrError);
+        InvokeSafely(Finished, stoppedOrError, nameof(Finished));
+    }
+
+    /// <summary>隔离订阅者异常，避免后台任务线程因事件回调抛出而退出进程。</summary>
+    private void InvokeSafely<T>(EventHandler<T>? handler, T args, string eventName)
+    {
+        if (handler is null) { return; }
+
+        foreach (EventHandler<T> subscriber in handler.GetInvocationList())
+        {
+            try
+            {
+                subscriber(this, args);
+            }
+            catch (Exception ex)
+            {
+                try { _logger.Log($"事件「{eventName}」订阅者异常：{ex.Message}"); }
+                catch { /* 日志设施异常也不能逃出后台 worker。 */ }
+            }
+        }
     }
 
     private static void AddUnique(List<string> target, string? value)

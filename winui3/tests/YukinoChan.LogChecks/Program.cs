@@ -20,10 +20,12 @@ var tests = new (string Name, Action Run)[]
 {
     ("Agent payload identity ignores patched EXE timestamp", TestAgentPayloadIdentity),
     ("Agent capability placeholder and takeover", TestAgentCapabilities),
+    ("RdpBridge normalized For cache and bounded BOM status", TestRdpBridgeCacheAndStatus),
     ("RdpBridge live-log NDJSON protocol", TestRdpBridgeLiveLogs),
     ("RdpChannelSession isolation and bounded collections", TestRdpChannelSession),
     ("ExternalLogFilter normalization and classification", TestExternalLogFilter),
     ("ExternalLogTail incremental, rotation, partial lines and encoding", TestExternalLogTail),
+    ("ExternalLogTail large backlog drains in order across polls", TestExternalLogTailLargeBacklog),
 };
 
 var failures = new List<string>();
@@ -225,6 +227,32 @@ static void TestRdpBridgeLiveLogs()
     Equal(0, missing.Count, "missing command file yields no rows");
 }
 
+static void TestRdpBridgeCacheAndStatus()
+{
+    using var temp = new TempDirectory();
+    var equivalentPath = Path.Combine(temp.Path, "bridge", "..", "bridge") + "   ";
+    var first = RdpBridge.For(equivalentPath);
+    var second = RdpBridge.For(Path.GetFullPath(Path.Combine(temp.Path, "bridge")));
+    Assert(ReferenceEquals(first, second), "normalized equivalent bridge paths reuse the active cached instance");
+    Directory.CreateDirectory(first.BridgeDir);
+
+    var statusJson = JsonSerializer.Serialize(new RdpStatus
+    {
+        CommandId = "bom-status",
+        Phase = "running",
+        StatusText = "BOM 可读",
+    });
+    File.WriteAllText(first.StatusPath, statusJson, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+    var status = first.TryReadStatus();
+    Assert(status is not null, "UTF-8 BOM status is readable");
+    Equal("bom-status", status!.CommandId, "BOM status command id survives read");
+    Equal("BOM 可读", status.StatusText, "BOM status text survives read");
+
+    File.WriteAllBytes(first.StatusPath, Encoding.UTF8.GetBytes("{\"CommandId\":\"oversized\",\"Padding\":\"" +
+        new string('x', 1024 * 1024) + "\"}"));
+    Assert(new FileInfo(first.StatusPath).Length > 1024 * 1024, "oversized status fixture exceeds the one MiB boundary");
+    Assert(first.TryReadStatus() is null, "status over one MiB is rejected");
+}
 static void TestRdpChannelSession()
 {
     using var temp = new TempDirectory();
@@ -445,6 +473,82 @@ static void Equal<T>(T expected, T actual, string message)
     }
 }
 
+static void TestExternalLogTailLargeBacklog()
+{
+    using var temp = new TempDirectory();
+    var path = Path.Combine(temp.Path, "backlog.log");
+    const int lineCount = 4501;
+    using (var writer = new StreamWriter(path, append: false, new UTF8Encoding(false)))
+    {
+        for (var i = 0; i < lineCount; i++)
+        {
+            writer.WriteLine($"[INFO] backlog-{i:D4}");
+        }
+    }
+
+    using var tail = new ExternalLogTail(path, "*.log", ExternalLogEncodings.Utf8, followTail: false);
+    var seen = new List<string>(lineCount);
+    for (var poll = 0; poll < 100 && seen.Count < lineCount; poll++)
+    {
+        var rows = tail.Poll(Array.Empty<string>());
+        Assert(rows.Count <= 200, $"poll {poll + 1} respects the bounded output batch");
+        seen.AddRange(rows.Select(row => row.Text));
+    }
+
+    Equal(lineCount, seen.Count, "large backlog is completely drained across multiple polls");
+    for (var i = 0; i < lineCount; i++)
+    {
+        Equal($"[INFO] backlog-{i:D4}", seen[i], $"backlog row {i} remains ordered and is not duplicated");
+    }
+
+    Equal(0, tail.Poll(Array.Empty<string>()).Count, "poll after complete backlog drain does not duplicate rows");
+}
+static void TestExternalLogTailOversizeAndUtf16Utf32()
+{
+    using var temp = new TempDirectory();
+    var oversizePath = Path.Combine(temp.Path, "oversize.log");
+    var prefix = "[ERROR] " + new string('x', 120_000);
+    File.WriteAllText(oversizePath, prefix, new UTF8Encoding(false));
+    using var oversizeTail = new ExternalLogTail(oversizePath, "*.log", ExternalLogEncodings.Utf8, followTail: false);
+    var first = oversizeTail.Poll(Array.Empty<string>());
+    Equal(0, first.Count, "an incomplete oversized line remains pending until its newline");
+    Assert(prefix.Length > 64 * 1024, "oversized line fixture exceeds the pending bound");
+
+    File.AppendAllText(oversizePath, "\n[INFO] after-oversize\n", new UTF8Encoding(false));
+    var recovered = oversizeTail.Poll(Array.Empty<string>());
+    Equal(2, recovered.Count, "oversized line and its following normal line are both recovered");
+    Assert(recovered[0].Text.Contains("日志行原始字节超限", StringComparison.Ordinal), "oversized line is explicitly marked as truncated");
+    Equal("[INFO] after-oversize", recovered[1].Text, "normal line after oversized input is not swallowed");
+
+    AssertEncodingInSingleByteChunks(temp.Path, "utf16le.log", new UnicodeEncoding(false, true), "utf16le-一", "utf16le-二");
+    AssertEncodingInSingleByteChunks(temp.Path, "utf16be.log", new UnicodeEncoding(true, true), "utf16be-一", "utf16be-二");
+    AssertEncodingInSingleByteChunks(temp.Path, "utf32le.log", new UTF32Encoding(false, true), "utf32le-一", "utf32le-二");
+    AssertEncodingInSingleByteChunks(temp.Path, "utf32be.log", new UTF32Encoding(true, true), "utf32be-一", "utf32be-二");
+}
+
+static void AssertEncodingInSingleByteChunks(string directory, string fileName, Encoding encoding,
+    string firstExpected, string secondExpected)
+{
+    var path = Path.Combine(directory, fileName);
+    var bytes = encoding.GetBytes(firstExpected + "\n" + secondExpected + "\n");
+    File.WriteAllBytes(path, Array.Empty<byte>());
+    using var tail = new ExternalLogTail(path, "*.log", ExternalLogEncodings.Auto, followTail: false);
+    var seen = new List<string>();
+    for (var i = 0; i < bytes.Length; i++)
+    {
+        using (var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite))
+        {
+            stream.WriteByte(bytes[i]);
+            stream.Flush();
+        }
+        var rows = tail.Poll(Array.Empty<string>());
+        seen.AddRange(rows.Select(row => row.Text));
+    }
+
+    Equal(2, seen.Count, $"{fileName} emits both complete lines from bytewise chunks");
+    Equal(firstExpected, seen[0], $"{fileName} decodes first line");
+    Equal(secondExpected, seen[1], $"{fileName} decodes second line");
+}
 static void TestAgentPayloadIdentity()
 {
     using var temp = new TempDirectory();

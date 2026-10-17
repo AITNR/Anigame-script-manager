@@ -9,6 +9,9 @@ namespace YukinoChan.Models;
 /// <summary>全局应用配置，字段与 Python 版 config.json 完全一致。</summary>
 public sealed class AppConfig : ObservableObject
 {
+    /// <summary>进程级共享的活动任务 worker 上限；所有 ScriptRunner 共用此上限。</summary>
+    public const int MaxActiveTaskThreads = 16;
+
     /// <summary>
     /// WinUI 3 主题。除 light / dark 之外，仍保留 Python 版皮肤名以便旧配置平滑迁移，
     /// 这些皮肤统一映射到 Fluent 默认主题。

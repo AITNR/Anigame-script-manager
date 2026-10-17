@@ -33,6 +33,12 @@ public sealed class RdpBridge
 {
     private const int MaxEvents = 500;
     private const int ReadRetry = 5;
+    private const int MaxLiveLogReadBytes = 512 * 1024;
+    // Keep the historical session contract: a normal 220-row burst is consumed in one tick.
+    // The 512 KiB byte limit remains the primary backlog/allocation boundary.
+    private const int MaxLiveLogLinesPerRead = 500;
+    private const int MaxStatusReadBytes = 1024 * 1024;
+    private const int CacheScavengeInterval = 64;
 
     /// <summary>耗时统计快照的文件名（Agent 写、主控端读）。</summary>
     public const string StatsFileName = "stats.json";
@@ -40,7 +46,8 @@ public sealed class RdpBridge
     public const string LiveLogFileSuffix = ".ndjson";
 
     private static readonly object CacheGate = new();
-    private static readonly Dictionary<string, RdpBridge> Cache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, WeakReference<RdpBridge>> Cache = new(StringComparer.OrdinalIgnoreCase);
+    private static int _cacheAccesses;
 
     private static readonly JsonSerializerOptions WriteOptions = new()
     {
@@ -65,8 +72,7 @@ public sealed class RdpBridge
     /// <summary>建一座指向指定目录的桥。目录选取请优先用 <see cref="For"/> / <see cref="ForChannel"/>。</summary>
     public RdpBridge(string directory)
     {
-        var text = (directory ?? string.Empty).Trim();
-        BridgeDir = text.Length == 0 ? DefaultBridgeDir() : text;
+        BridgeDir = NormalizeBridgeDirectory(directory);
     }
 
     /// <summary>本座桥的共享目录。</summary>
@@ -75,8 +81,8 @@ public sealed class RdpBridge
     /// <summary>是否用了自定义目录（不是按当前账户派生的默认目录）。</summary>
     public bool IsCustomized =>
         !string.Equals(
-            Path.GetFullPath(BridgeDir).TrimEnd(Path.DirectorySeparatorChar),
-            Path.GetFullPath(DefaultBridgeDir()).TrimEnd(Path.DirectorySeparatorChar),
+            BridgeDir,
+            NormalizeBridgeDirectory(null),
             StringComparison.OrdinalIgnoreCase);
 
     /// <summary>最近一次写入失败的原因，用于界面提示与排障。</summary>
@@ -136,18 +142,40 @@ public sealed class RdpBridge
     /// <summary>按目录取桥实例（同目录复用同一实例）。传空 = 默认目录。</summary>
     public static RdpBridge For(string? directory)
     {
-        var text = (directory ?? string.Empty).Trim();
-        var key = text.Length == 0 ? DefaultBridgeDir() : text;
+        var key = NormalizeBridgeDirectory(directory);
 
         lock (CacheGate)
         {
-            if (!Cache.TryGetValue(key, out var bridge))
+            if (Cache.TryGetValue(key, out var reference) && reference.TryGetTarget(out var bridge))
             {
-                bridge = new RdpBridge(key);
-                Cache[key] = bridge;
+                ScavengeDeadCacheEntries();
+                return bridge;
             }
 
+            bridge = new RdpBridge(key);
+            Cache[key] = new WeakReference<RdpBridge>(bridge);
+            ScavengeDeadCacheEntries();
             return bridge;
+        }
+    }
+
+    private static string NormalizeBridgeDirectory(string? directory)
+    {
+        var text = (directory ?? string.Empty).Trim();
+        var expanded = text.Length == 0 ? DefaultBridgeDir() : Environment.ExpandEnvironmentVariables(text);
+        return Path.TrimEndingDirectorySeparator(Path.GetFullPath(expanded));
+    }
+
+    private static void ScavengeDeadCacheEntries()
+    {
+        if ((++_cacheAccesses & (CacheScavengeInterval - 1)) != 0)
+        {
+            return;
+        }
+
+        foreach (var key in Cache.Where(pair => !pair.Value.TryGetTarget(out _)).Select(pair => pair.Key).ToArray())
+        {
+            Cache.Remove(key);
         }
     }
 
@@ -332,7 +360,7 @@ public sealed class RdpBridge
             RdpStatus status;
             try
             {
-                var existing = ReadTextWithRetry(StatusPath);
+                var existing = ReadTextWithRetry(StatusPath, MaxStatusReadBytes);
                 status = string.IsNullOrWhiteSpace(existing)
                     ? new RdpStatus()
                     : JsonSerializer.Deserialize<RdpStatus>(existing, ReadOptions) ?? new RdpStatus();
@@ -466,7 +494,7 @@ public sealed class RdpBridge
 
             stream.Position = byteOffset;
             // Bound each poll so a backlog cannot allocate an entire run on the UI thread.
-            var count = (int)Math.Min(512 * 1024, stream.Length - byteOffset);
+            var count = (int)Math.Min(MaxLiveLogReadBytes, stream.Length - byteOffset);
             var bytes = new byte[count];
             var read = 0;
             while (read < bytes.Length)
@@ -503,6 +531,11 @@ public sealed class RdpBridge
                         if (item is not null && string.Equals(item.CommandId, commandId, StringComparison.Ordinal) && !string.IsNullOrEmpty(item.Message))
                         {
                             logs.Add(item);
+                            if (logs.Count >= MaxLiveLogLinesPerRead)
+                            {
+                                completeEnd = i + 1;
+                                break;
+                            }
                         }
                     }
                     catch (JsonException)
@@ -630,7 +663,7 @@ public sealed class RdpBridge
                 return null;
             }
 
-            var text = ReadTextWithRetry(StatusPath);
+            var text = ReadTextWithRetry(StatusPath, MaxStatusReadBytes);
             return string.IsNullOrWhiteSpace(text)
                 ? null
                 : JsonSerializer.Deserialize<RdpStatus>(text, ReadOptions);
@@ -811,13 +844,32 @@ public sealed class RdpBridge
         }
     }
 
-    private static string ReadTextWithRetry(string path)
+    private static string ReadTextWithRetry(string path, int? maxBytes = null)
     {
         for (var attempt = 0; attempt < ReadRetry; attempt++)
         {
             try
             {
                 using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                if (maxBytes is int limit)
+                {
+                    if (stream.Length > limit)
+                    {
+                        throw new IOException($"文件超过读取上限（{limit} 字节）：{path}");
+                    }
+
+                    var bytes = new byte[(int)stream.Length];
+                    var read = 0;
+                    while (read < bytes.Length)
+                    {
+                        var count = stream.Read(bytes, read, bytes.Length - read);
+                        if (count == 0) { break; }
+                        read += count;
+                    }
+
+                    return DecodeBoundedText(bytes, read);
+                }
+
                 using var reader = new StreamReader(stream, Encoding.UTF8);
                 return reader.ReadToEnd();
             }
@@ -828,5 +880,12 @@ public sealed class RdpBridge
         }
 
         return string.Empty;
+    }
+
+    private static string DecodeBoundedText(byte[] bytes, int count)
+    {
+        using var memory = new MemoryStream(bytes, 0, count, writable: false);
+        using var reader = new StreamReader(memory, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        return reader.ReadToEnd();
     }
 }

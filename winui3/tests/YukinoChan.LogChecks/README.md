@@ -13,10 +13,10 @@ dotnet run --project .\winui3\tests\YukinoChan.LogChecks\YukinoChan.LogChecks.cs
 
 普通模式覆盖：
 
-- `RdpBridge.AppendLiveLogBatch` / `TryReadLiveLogs` 的 NDJSON、中文、换行、增量、半 JSON、坏行、错误 command 和截断；
+- `RdpBridge.For` 的规范化路径实例复用；`TryReadStatus` 的 UTF-8 BOM 兼容与 1 MiB 大小拒绝；`AppendLiveLogBatch` / `TryReadLiveLogs` 的 NDJSON、中文、换行、增量、半 JSON、坏行、错误 command 和截断；
 - `RdpChannelSession` 的 live-log 容量、普通 `task_done` / `finished` 隔离和 command 重置；
 - `ExternalLogFilter` 的规整、级别和关键字；
-- `ExternalLogTail` 的增量、轮转、半行、UTF-8 分块和 GBK。
+- `ExternalLogTail` 的增量、轮转、半行、UTF-8 分块、GBK，以及 4000+ 行积压跨多次 Poll 的完整有序消费。
 
 tail 的半行断言用于锁定生产 tail 的完整行语义；若失败应作为回归失败报告，不要通过修改本测试绕过。
 

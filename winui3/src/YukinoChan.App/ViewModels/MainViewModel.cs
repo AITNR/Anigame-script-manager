@@ -59,6 +59,7 @@ public sealed class MainViewModel : ObservableObject
 
     private ScriptRunner? _runner;
     private Task? _runTask;
+    private DispatcherQueueTimer? _memorySampleTimer;
     private DispatcherQueueTimer? _bubbleRestoreTimer;
     private DispatcherQueueTimer? _errorReleaseTimer;
 
@@ -96,6 +97,24 @@ public sealed class MainViewModel : ObservableObject
 
         LogLines = new ObservableCollection<string>();
         StatRows = new ObservableCollection<StatRow>();
+    }
+
+    private void LogMemorySample()
+    {
+        try
+        {
+            using var process = System.Diagnostics.Process.GetCurrentProcess();
+            AppendLog($"[memory] private_mib={process.PrivateMemorySize64 / 1048576} working_set_mib={process.WorkingSet64 / 1048576} " +
+                $"threads={process.Threads.Count} handles={process.HandleCount} managed_mib={GC.GetTotalMemory(false) / 1048576} " +
+                $"renderers={RdpD3DRenderer.LiveRenderers} clients={_embeds.Values.Count(c => c.Client is not null)} " +
+                $"task_workers={ScriptRunner.LiveTaskWorkers} log_workers={ScriptRunner.LiveLogWorkers} " +
+                $"soft_states={YukinoChan.Views.RdpView.LiveSoftRenderStates} soft_in_flight={YukinoChan.Views.RdpView.SoftRendersInFlight}");
+            foreach (var connection in _embeds.Values)
+            {
+                if (connection.Client is { } client) { AppendSurfaceLog(connection.Key, "[memory] " + client.Diag()); }
+            }
+        }
+        catch (Exception) { /* Sampling must not interrupt execution. */ }
     }
 
     // ---------------- 配置 ----------------
@@ -307,6 +326,10 @@ public sealed class MainViewModel : ObservableObject
         RefreshStats();
         ReloadChannels(refreshReadiness: false);
         SelectedTask = ScopeTasks.FirstOrDefault();
+        _memorySampleTimer = _dispatcher.CreateTimer();
+        _memorySampleTimer.Interval = TimeSpan.FromMinutes(1);
+        _memorySampleTimer.Tick += (_, _) => LogMemorySample();
+        _memorySampleTimer.Start();
 
         if (!HasUsableTaskConfig())
         {
@@ -1885,7 +1908,8 @@ public sealed class MainViewModel : ObservableObject
             return;
         }
 
-        var bitmap = new BitmapImage { UriSource = new Uri(path) };
+        // The mascot panel is narrow; cap decoded pixels before setting the URI.
+        var bitmap = new BitmapImage { DecodePixelWidth = 512, UriSource = new Uri(path) };
         MascotImage = bitmap;
     }
 
@@ -3137,6 +3161,8 @@ public sealed class MainViewModel : ObservableObject
         public required string Key { get; init; }
 
         public RdpEmbeddedClient? Client { get; set; }
+        public Task Teardown { get; set; } = Task.CompletedTask;
+        public int ConnectGeneration { get; set; }
 
         // 上次连接用的参数 —— 自动重连必须按原样重来：
         // 换了账户会登错人，换了分辨率会让会话尺寸跳变。
@@ -3475,6 +3501,32 @@ public sealed class MainViewModel : ObservableObject
         DisposeSurface(key); // 幂等清理本通道的旧实例（不重置黑屏重试计数）
 
         var conn = GetOrCreateConnection(key);
+        var generation = ++conn.ConnectGeneration;
+        if (!conn.Teardown.IsCompleted)
+        {
+            conn.UserDisconnect = false;
+            var teardown = conn.Teardown;
+            _ = ContinueConnectAfterTeardownAsync();
+            message = "等待旧内嵌连接释放后重新连接…";
+            return true;
+
+            async Task ContinueConnectAfterTeardownAsync()
+            {
+                try { await teardown.ConfigureAwait(false); }
+                catch (Exception ex)
+                {
+                    AppendSurfaceLog(key, "旧连接释放失败：" + ex.Message);
+                    return;
+                }
+                Post(() =>
+                {
+                    if (generation == conn.ConnectGeneration && !conn.UserDisconnect && conn.Client is null)
+                    {
+                        TryStartEmbeddedConnect(key, host, targetUser, width, height, out _);
+                    }
+                });
+            }
+        }
         conn.LastHost = normalized;
         conn.User = user;
         conn.Width = width;
@@ -3493,7 +3545,10 @@ public sealed class MainViewModel : ObservableObject
         var client = new RdpEmbeddedClient();
         conn.OnConnected = (_, e) => OnEmbedConnected(conn, e);
         conn.OnFrameArrived = (_, e) => OnEmbedFrameArrived(conn, e);
-        conn.OnDisconnected = (_, e) => OnEmbedDisconnected(conn, e);
+        conn.OnDisconnected = (_, e) => Post(() =>
+        {
+            if (ReferenceEquals(conn.Client, client)) { OnEmbedDisconnected(conn, e); }
+        });
         client.Connected += conn.OnConnected;
         client.FrameArrived += conn.OnFrameArrived;
         client.Disconnected += conn.OnDisconnected;
@@ -3611,6 +3666,7 @@ public sealed class MainViewModel : ObservableObject
         var timer = _dispatcher.CreateTimer();
         timer.Interval = TimeSpan.FromSeconds(6);
         var ticks = 0;
+        var sampling = 0;
         timer.Tick += (_, _) =>
         {
             ticks++;
@@ -3628,8 +3684,8 @@ public sealed class MainViewModel : ObservableObject
                 return; // 仍在连接中，下一拍再看
             }
 
-            // 抓帧与亮度采样放到工作线程：它是阻塞式原生调用（锁内 8MB memcpy），
-            // 在 UI 线程上等这把锁就是整窗假死。
+            // At most one outstanding sample per connection, even if native grab stalls.
+            if (System.Threading.Interlocked.CompareExchange(ref sampling, 1, 0) != 0) { return; }
             _ = Task.Run(() =>
             {
                 // client 可能在这一拍里被换掉 / 断开：拿不到帧就当作「还没有帧」
@@ -3657,6 +3713,12 @@ public sealed class MainViewModel : ObservableObject
                 return (Copied: true, Width: w, Height: h, Brightness: brightness, Ticks: ticks);
             }).ContinueWith(t =>
             {
+                System.Threading.Interlocked.Exchange(ref sampling, 0);
+                if (!ReferenceEquals(conn.Client, client) || !ReferenceEquals(conn.Watchdog, timer))
+                {
+                    _ = t.Exception; // Observe an obsolete sample failure without affecting the new connection.
+                    return;
+                }
                 // 采样本身炸了（极端情况）：不当成黑屏，等下一拍
                 if (t.IsFaulted)
                 {
@@ -3821,16 +3883,11 @@ public sealed class MainViewModel : ObservableObject
         // 在 UI 线程上等就是最长 5 秒的界面冻结 —— 点「断开」时用户会以为又卡死了。
         // 所以这里只做解绑，把真正的原生断开丢到工作线程；UI 侧立刻返回。
         // ⚠️ 不能改 client 内部的字段：解绑之后它只被这一个后台任务引用。
-        _ = Task.Run(() =>
+        conn.Teardown = Task.Run(async () =>
         {
-            try
-            {
-                client.Dispose();
-            }
-            catch
-            {
-                // 释放失败不阻断 UI（原生侧自有兜底）
-            }
+            client.Dispose();
+            // A five-second native wait timeout is not permission to start another session.
+            await client.Completion.ConfigureAwait(false);
         });
 
         conn.Watchdog?.Stop();
@@ -3850,6 +3907,9 @@ public sealed class MainViewModel : ObservableObject
     {
         foreach (var key in _embeds.Keys.ToList())
         {
+            var connection = _embeds[key];
+            connection.UserDisconnect = true;
+            connection.ConnectGeneration++;
             DisposeSurface(key);
         }
     }

@@ -119,7 +119,7 @@ public sealed class TaskConfig : ObservableObject, ICloneable
     public int ConfirmEnterDelaySeconds
     {
         get => _confirmEnterDelaySeconds;
-        set => SetProperty(ref _confirmEnterDelaySeconds, value);
+        set => SetProperty(ref _confirmEnterDelaySeconds, Math.Max(0, value));
     }
 
     /// <summary>

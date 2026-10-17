@@ -18,17 +18,14 @@ namespace YukinoChan.Views
     public sealed partial class RdpView : UserControl
     {
         private RdpEmbeddedClient? _client;
-        private SoftwareBitmapSource? _bitmapSource;
+        private SoftRenderState? _softRenderState;
         /// <summary>
-        /// 软渲染复用的 SoftwareBitmap（尺寸不变就原地更新内容）。
+        /// 软渲染复用的 SoftwareBitmap（由 SoftRenderState 持有；尺寸不变就原地更新内容）。
         /// 🔑 2026-10-16 修：原来是每帧 <c>CreateCopyFromBuffer</c> new 一个 8.3MB 对象，
         /// 每秒 ~200MB 内存压力全涌进 <c>GC.AddMemoryPressure</c>，UI 线程最终堵死在该调用里
         /// （dump 实证：栈顶 <c>System.GC._AddMemoryPressure</c>，LOH 16.7MB = 2×8.3MB 帧缓冲）。
         /// 现在整条连接只建一次，内存压力从「每帧 8.3MB」降到「每连接一次」。
         /// </summary>
-        private SoftwareBitmap? _softBitmap;
-        private int _softBitmapWidth;
-        private int _softBitmapHeight;
         private Microsoft.UI.Dispatching.DispatcherQueue? _dispatcher;
         private RdpD3DRenderer? _renderer;
         private bool _d3dFailed;               // D3D 初始化失败后本实例不再重试（回退软渲染）
@@ -36,16 +33,17 @@ namespace YukinoChan.Views
         private bool _renderSuspended;         // 全屏时页面内渲染器挂起，避免双路渲染
         private long _lastFrameArrivedTick;    // 最近一次 end_paint（原生线程写，帧节奏统计用）
         private Microsoft.UI.Dispatching.DispatcherQueueTimer? _presentTimer;  // 16ms 呈现节拍器（≈60Hz）
-        private bool _softRendering;           // 软渲染路线正在拷帧（防 async 重入）
+        private static long s_liveSoftRenderStates;
+        private static long s_softRendersInFlight;
 
         /// <summary>
         /// 渲染世代号。每次 DetachClient / Disconnect 自增；
         /// RenderFrameAsync 在 await 前后比对自己那一代的号，不匹配就立即放弃。
         ///
         /// 🔑 为什么必须有（2026-10-16 实测）：原来 OnPresentTick 用
-        /// <c>_ = RenderFrameAsync(...)</c> 即发即弃，而 <c>_softRendering</c> 只防「重入」不防「堆积」。
+        /// <c>_ = RenderFrameAsync(...)</c> 即发即弃，而旧的全局防重入标志无法区分连接世代。
         /// 页面切走 / 弹出窗口 / 每次重连都会留下一批卡在 await SetBitmapAsync 的任务，
-        /// 它们持着已废弃的 _bitmapSource / _softBitmap 无法回收。
+        /// 它们持着已废弃的 SoftwareBitmapSource / SoftwareBitmap 无法回收。
         /// dump 实证：健康进程仅运行 3 分钟就堆到 36 个
         /// AsyncStateMachineBox&lt;RenderFrameAsync&gt;（而 RdpView 只有 14 个），卡死现场是 32 个。
         /// 这些僵尸任务持续调 SetBitmapAsync → XAML 反复重绑合成表面
@@ -56,6 +54,101 @@ namespace YukinoChan.Views
 
         /// <summary>本实例当前在飞（已发出、尚未结束）的渲染任务数；仅供诊断。</summary>
         private int _renderInFlight;
+
+        /// <summary>当前尚未释放的软渲染资源状态数，供 VM 的周期诊断采样。</summary>
+        public static long LiveSoftRenderStates => System.Threading.Interlocked.Read(ref s_liveSoftRenderStates);
+
+        /// <summary>所有 RdpView 当前在飞的软渲染任务数，供 VM 的周期诊断采样。</summary>
+        public static long SoftRendersInFlight => System.Threading.Interlocked.Read(ref s_softRendersInFlight);
+
+        /// <summary>
+        /// 一次连接的软渲染资源。断开时先使状态失效并取消 WinRT 操作；若仍有
+        /// SetBitmapAsync 在飞，则由最后一个退出的渲染任务释放其 bitmap。
+        /// </summary>
+        private sealed class SoftRenderState
+        {
+            private int _inFlight;
+            private int _rendering;
+            private int _retired;
+            private int _disposed;
+
+            public SoftRenderState(SoftwareBitmapSource source)
+            {
+                Source = source;
+                System.Threading.Interlocked.Increment(ref RdpView.s_liveSoftRenderStates);
+            }
+
+            public SoftwareBitmapSource? Source { get; private set; }
+            public SoftwareBitmap? Bitmap { get; set; }
+            public int BitmapWidth { get; set; }
+            public int BitmapHeight { get; set; }
+            public System.Threading.CancellationTokenSource Cancellation { get; } = new();
+            public bool IsRetired => System.Threading.Volatile.Read(ref _retired) != 0;
+
+            public bool TryBeginRender() =>
+                !IsRetired && System.Threading.Interlocked.CompareExchange(ref _rendering, 1, 0) == 0;
+
+            public void EndRender() => System.Threading.Volatile.Write(ref _rendering, 0);
+
+            public void Enter()
+            {
+                System.Threading.Interlocked.Increment(ref _inFlight);
+                System.Threading.Interlocked.Increment(ref RdpView.s_softRendersInFlight);
+            }
+
+            public void Exit()
+            {
+                var remaining = System.Threading.Interlocked.Decrement(ref _inFlight);
+                System.Threading.Interlocked.Decrement(ref RdpView.s_softRendersInFlight);
+                if (remaining == 0 && IsRetired)
+                {
+                    DisposeResources();
+                }
+            }
+
+            public void Retire()
+            {
+                if (System.Threading.Interlocked.Exchange(ref _retired, 1) != 0)
+                {
+                    return;
+                }
+
+                Cancellation.Cancel();
+                if (System.Threading.Volatile.Read(ref _inFlight) == 0)
+                {
+                    DisposeResources();
+                }
+            }
+
+            private void DisposeResources()
+            {
+                if (System.Threading.Interlocked.Exchange(ref _disposed, 1) != 0)
+                {
+                    return;
+                }
+
+                var bitmap = Bitmap;
+                Bitmap = null;
+                BitmapWidth = 0;
+                BitmapHeight = 0;
+                Source = null;
+                try
+                {
+                    bitmap?.Dispose();
+                }
+                finally
+                {
+                    try
+                    {
+                        Cancellation.Dispose();
+                    }
+                    finally
+                    {
+                        System.Threading.Interlocked.Decrement(ref RdpView.s_liveSoftRenderStates);
+                    }
+                }
+            }
+        }
         private bool _renderPathLogged;        // 「当前渲染路径」只写一次日志
         private long _frameArrivals;           // 统计窗口内的帧到达次数（原生线程写）
         private long _maxArrivalGapMs;         // 统计窗口内最大帧间隔（原生线程写）
@@ -180,10 +273,9 @@ namespace YukinoChan.Views
             if (YukinoChan.Services.RdpD3DRenderer.ShouldUseSoftware)
             {
                 // 软渲染：直接把 Image 挂上 SoftwareBitmapSource（不用等 D3D 先失败）
-                if (_bitmapSource is null)
+                if (_softRenderState is null || _softRenderState.IsRetired)
                 {
-                    _bitmapSource = new SoftwareBitmapSource();
-                    PartFrame.Source = _bitmapSource;
+                    CreateSoftRenderState();
                 }
 
                 PartFrame.Visibility = Visibility.Visible;
@@ -217,17 +309,11 @@ namespace YukinoChan.Views
             _renderer = null;
             _initQueued = false;
             _d3dFailed = false;
-            _softRendering = false;
             _renderPathLogged = false;
             _statsWindowStart = 0;
             System.Threading.Interlocked.Exchange(ref _frameArrivals, 0);
             System.Threading.Interlocked.Exchange(ref _maxArrivalGapMs, 0);
-            _bitmapSource = null;
-            // 软渲染 bitmap 也要释放：它持着 8.3MB 非 GC 内存，不复用就泄漏
-            _softBitmap?.Dispose();
-            _softBitmap = null;
-            _softBitmapWidth = 0;
-            _softBitmapHeight = 0;
+            RetireSoftRenderState();
             _presentTimer?.Stop();
             _presentTimer = null;
             _lastFrameArrivedTick = 0;
@@ -261,17 +347,11 @@ namespace YukinoChan.Views
             _renderer = null;
             _initQueued = false;
             _d3dFailed = false;
-            _softRendering = false;
             _renderPathLogged = false;
             _statsWindowStart = 0;
             System.Threading.Interlocked.Exchange(ref _frameArrivals, 0);
             System.Threading.Interlocked.Exchange(ref _maxArrivalGapMs, 0);
-            _bitmapSource = null;
-            // 软渲染 bitmap 也要释放：它持着 8.3MB 非 GC 内存，不复用就泄漏
-            _softBitmap?.Dispose();
-            _softBitmap = null;
-            _softBitmapWidth = 0;
-            _softBitmapHeight = 0;
+            RetireSoftRenderState();
             _presentTimer?.Stop();
             _presentTimer = null;
             _lastFrameArrivedTick = 0;
@@ -293,6 +373,24 @@ namespace YukinoChan.Views
         public void SuspendRendering() => _renderSuspended = true;
 
         public void ResumeRendering() => _renderSuspended = false;
+
+        private void RetireSoftRenderState()
+        {
+            var state = _softRenderState;
+            _softRenderState = null;
+            state?.Retire();
+        }
+
+        private bool IsCurrentClient(RdpEmbeddedClient client, int generation) =>
+            ReferenceEquals(_client, client) &&
+            generation == System.Threading.Volatile.Read(ref _renderGeneration);
+
+        private void CreateSoftRenderState()
+        {
+            RetireSoftRenderState();
+            _softRenderState = new SoftRenderState(new SoftwareBitmapSource());
+            PartFrame.Source = _softRenderState.Source;
+        }
 
         /// <summary>启动 16ms 呈现节拍器（静默检测 + 兑底节流，见 OnPresentTick）。</summary>
         private void StartPresentTimer()
@@ -395,15 +493,26 @@ namespace YukinoChan.Views
 
         private void OnClientConnected(object? sender, (int Session, uint Width, uint Height) e)
         {
+            if (sender is not RdpEmbeddedClient client || !ReferenceEquals(_client, client))
+            {
+                return;
+            }
+
+            var generation = System.Threading.Volatile.Read(ref _renderGeneration);
             // 锁状态必须在**任何按键之前**同步过去：小键盘与方向键共用扫描码，
             // 差异全靠服务器侧 NumLock（见 KeyboardToggleState 注释）。
             // 事件在原生线程触发，同步是线程安全的入队操作，直接调即可。
-            _client?.SyncKeyboardState();
+            client.SyncKeyboardState();
             // 🔑 尺寸写入与其他 D3D 操作一样排到 UI 线程，与 OnDesktopResized /
             // OnFrameArrived 的写点收口到同一线程 —— 三处曾各写各的，双线程可见性不一致
             // 时 Present 会拿旧尺寸比对帧尺寸，误判成「需要重建交换链」。
             var enqueued = _dispatcher?.TryEnqueue(() =>
             {
+                if (!IsCurrentClient(client, generation))
+                {
+                    return;
+                }
+
                 _remoteWidth = e.Width;
                 _remoteHeight = e.Height;
                 ShowOverlay($"已连接 {e.Width}×{e.Height}", progress: false, hide: true);
@@ -412,6 +521,12 @@ namespace YukinoChan.Views
 
         private void OnDesktopResized(object? sender, (int Session, uint Width, uint Height) e)
         {
+            if (sender is not RdpEmbeddedClient client || !ReferenceEquals(_client, client))
+            {
+                return;
+            }
+
+            var generation = System.Threading.Volatile.Read(ref _renderGeneration);
             // 🔑 远端分辨率**只在 UI 线程改**。本回调由原生帧线程触发，
             // 而 D3D 设备的其余全部操作（Initialize / Present / 回退时Dispose）都在 UI 线程
             // —— 一个隐式「单线程独占」的资源曾被这里从第二个线程戳了一下，
@@ -420,6 +535,11 @@ namespace YukinoChan.Views
             // 正好让 Present 里的尺寸不一致分支（自己也会 ResizeRemote）与这里互相踩。
             var enqueued = _dispatcher?.TryEnqueue(() =>
             {
+                if (!IsCurrentClient(client, generation))
+                {
+                    return;
+                }
+
                 _remoteWidth = e.Width;
                 _remoteHeight = e.Height;
                 _renderer?.ResizeRemote(e.Width, e.Height);
@@ -434,11 +554,11 @@ namespace YukinoChan.Views
                 return; // 全屏期间页面内渲染器挂起，全屏窗口的渲染器接管
             }
 
-            var client = _client;
-            if (client is null || client.Session != e.Session)
+            if (sender is not RdpEmbeddedClient client || !ReferenceEquals(_client, client))
             {
                 return;
             }
+            var generation = System.Threading.Volatile.Read(ref _renderGeneration);
 
             // 服务器按条带逐步重绘，条带中途快照会撕裂（M5 实测）：这里只记录到达时间，
             // 实际取帧交给呈现节拍器（16ms tick）：等 end_paint 静默 ≥8ms（一轮画完）
@@ -469,10 +589,21 @@ namespace YukinoChan.Views
             if (_renderer is null && !_initQueued && !_d3dFailed && !YukinoChan.Services.RdpD3DRenderer.ShouldUseSoftware)
             {
                 _initQueued = true;
+                if (!IsCurrentClient(client, generation))
+                {
+                    _initQueued = false;
+                    return;
+                }
+
                 var initW = e.Width;
                 var initH = e.Height;
                 var enqueued = _dispatcher?.TryEnqueue(() =>
                 {
+                    if (!IsCurrentClient(client, generation))
+                    {
+                        return;
+                    }
+
                     _renderer = new RdpD3DRenderer();
                     if (_renderer.Initialize(PartPanel, initW, initH))
                     {
@@ -488,8 +619,7 @@ namespace YukinoChan.Views
                         _renderer.Dispose();
                         _renderer = null;
                         _d3dFailed = true;
-                        _bitmapSource = new SoftwareBitmapSource();
-                        PartFrame.Source = _bitmapSource;
+                        CreateSoftRenderState();
                         PartFrame.Visibility = Visibility.Visible;
                     }
                     // 面板 DIP 尺寸 = 帧尺寸；Viewbox(Uniform) 负责缩放与居中
@@ -505,9 +635,12 @@ namespace YukinoChan.Views
                 {
                     //排队失败（无dispatcher / 页面已卸载）：必须复位，否则再也不会有初始化，
                     // 且下面那个补写分支会误以为「已排队」而只写尺寸、不建渲染器。
-                    _initQueued = false;
-                    _remoteWidth = e.Width;
-                    _remoteHeight = e.Height;
+                    if (IsCurrentClient(client, generation))
+                    {
+                        _initQueued = false;
+                        _remoteWidth = e.Width;
+                        _remoteHeight = e.Height;
+                    }
                 }
             }
             else if (_remoteWidth == 0 || _remoteHeight == 0)
@@ -520,6 +653,11 @@ namespace YukinoChan.Views
                 // 「帧尺寸变了」而重建交换链）。判据也放进UI 线程里读，保证读写同线程。
                 _dispatcher?.TryEnqueue(() =>
                 {
+                    if (!IsCurrentClient(client, generation))
+                    {
+                        return;
+                    }
+
                     if (_remoteWidth == 0 || _remoteHeight == 0)
                     {
                         _remoteWidth = e.Width;
@@ -590,20 +728,19 @@ namespace YukinoChan.Views
                     _d3dFailed = true; // 本帧起回退软渲染（renderer 失效不再重试）
                     _renderer.Dispose();
                     _renderer = null;
-                    _bitmapSource = new SoftwareBitmapSource();
-                    PartFrame.Source = _bitmapSource;
+                    CreateSoftRenderState();
                     PartFrame.Visibility = Visibility.Visible;
                     PartPanel.Visibility = Visibility.Collapsed;
                     PartViewbox.Visibility = Visibility.Collapsed;
                 }
             }
-            else if (_bitmapSource is not null && !_softRendering)
+            else if (_softRenderState is { IsRetired: false } state && state.TryBeginRender())
             {
                 // 软渲染回退路线：同一套节拍（否则回退后撕裂原样回来）
                 LogRenderPathOnce("SoftwareBitmap（软渲染回退，无 D3D）");
                 // 带上当前世代号：若本次任务在 await 中时连接已被换掉，
-                // 它会自行退出，不再碰已废弃的 _bitmapSource / _softBitmap。
-                _ = RenderFrameAsync(client.Session, _renderGeneration);
+                // 它会自行退出，不再碰已废弃的 SoftwareBitmapSource / SoftwareBitmap。
+                _ = RenderFrameAsync(client, _renderGeneration, state);
             }
         }
 
@@ -690,24 +827,19 @@ namespace YukinoChan.Views
         /// 现在：bitmap 尺寸不变就复用同一个实例，每帧只 <c>CopyFromBuffer</c> 原地更新内容，
         /// 内存压力从「每帧 8.3MB」降到「每连接一次 8.3MB」。尺寸变化（远端改分辨率）才重建。
         /// </summary>
-        private async System.Threading.Tasks.Task RenderFrameAsync(int session, int generation)
+        private async System.Threading.Tasks.Task RenderFrameAsync(RdpEmbeddedClient client, int generation, SoftRenderState state)
         {
-            // 世代校验：本任务发出后连接已被换掉 → 直接丢弃
-            if (generation != System.Threading.Volatile.Read(ref _renderGeneration))
-            {
-                return;
-            }
-
-            if (_softRendering)
-            {
-                return; // 上一帧还在拷：下一拍再来
-            }
-            _softRendering = true;
             System.Threading.Interlocked.Increment(ref _renderInFlight);
+            state.Enter();
             try
             {
-                var client = _client;
-                if (client is null || client.Session != session)
+                // 世代校验：本任务发出后连接已被换掉 → 直接丢弃
+                if (state.IsRetired || generation != System.Threading.Volatile.Read(ref _renderGeneration))
+                {
+                    return;
+                }
+
+                if (!IsCurrentClient(client, generation))
                 {
                     return;
                 }
@@ -717,7 +849,7 @@ namespace YukinoChan.Views
                     return;
                 }
 
-                if (_bitmapSource is null)
+                if (state.Source is null)
                 {
                     return;
                 }
@@ -726,26 +858,30 @@ namespace YukinoChan.Views
                 var byteCount = checked((int)(stride * h));
 
                 // 尺寸变化（远端改分辨率）才重建；否则原地更新，避免每帧触发 AddMemoryPressure
-                if (_softBitmap is null || _softBitmapWidth != (int)w || _softBitmapHeight != (int)h)
+                if (state.Bitmap is null || state.BitmapWidth != (int)w || state.BitmapHeight != (int)h)
                 {
-                    _softBitmap?.Dispose();
-                    _softBitmap = SoftwareBitmap.CreateCopyFromBuffer(
+                    state.Bitmap?.Dispose();
+                    state.Bitmap = SoftwareBitmap.CreateCopyFromBuffer(
                         System.Runtime.InteropServices.WindowsRuntime.WindowsRuntimeBufferExtensions.AsBuffer(pixels, 0, byteCount),
                         BitmapPixelFormat.Bgra8, (int)w, (int)h, BitmapAlphaMode.Ignore);
-                    _softBitmapWidth = (int)w;
-                    _softBitmapHeight = (int)h;
+                    state.BitmapWidth = (int)w;
+                    state.BitmapHeight = (int)h;
                 }
                 else
                 {
-                    _softBitmap.CopyFromBuffer(
+                    state.Bitmap.CopyFromBuffer(
                         System.Runtime.InteropServices.WindowsRuntime.WindowsRuntimeBufferExtensions.AsBuffer(pixels, 0, byteCount));
                 }
 
-                await _bitmapSource.SetBitmapAsync(_softBitmap);
+                var setBitmapOperation = state.Source.SetBitmapAsync(state.Bitmap);
+                using (state.Cancellation.Token.Register(() => setBitmapOperation.Cancel()))
+                {
+                    await setBitmapOperation;
+                }
 
                 // await 回来后再校验：等待期间可能已断开 / 换过实例。
                 // 不校验的话，后续计数会记到已废弃的对象上（无害但误导）。
-                if (generation != System.Threading.Volatile.Read(ref _renderGeneration))
+                if (state.IsRetired || generation != System.Threading.Volatile.Read(ref _renderGeneration))
                 {
                     return;
                 }
@@ -758,15 +894,27 @@ namespace YukinoChan.Views
             }
             finally
             {
-                _softRendering = false;
+                state.Exit();
+                state.EndRender();
                 System.Threading.Interlocked.Decrement(ref _renderInFlight);
             }
         }
 
         private void OnClientDisconnected(object? sender, (int Session, int Reason, string Detail) e)
         {
+            if (sender is not RdpEmbeddedClient client || !ReferenceEquals(_client, client))
+            {
+                return;
+            }
+
+            var generation = System.Threading.Volatile.Read(ref _renderGeneration);
             var enqueued = _dispatcher?.TryEnqueue(() =>
             {
+                if (!IsCurrentClient(client, generation))
+                {
+                    return;
+                }
+
                 ShowOverlay($"已断开：{e.Detail}", progress: false);
                 SessionDisconnected?.Invoke(this, e);
             });

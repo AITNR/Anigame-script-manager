@@ -46,6 +46,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
+#include <limits.h>
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 
@@ -106,6 +107,8 @@ typedef struct
 	HANDLE stop_event;
 	volatile LONG state;      /* YcnState */
 	volatile LONG disconnected_reported; /* on_disconnected 恰好一次 */
+	volatile LONG abort_in_progress; /* CONNECTING abort protects context lifetime */
+	volatile LONG connect_in_progress;
 
 	ycn_rdp_callbacks cb;
 	void* user;
@@ -179,6 +182,9 @@ typedef struct
 static YcnSession g_sessions[YCN_MAX_SESSIONS];
 static CRITICAL_SECTION g_lock;
 static INIT_ONCE g_init_once = INIT_ONCE_STATIC_INIT;
+static int64_t g_next_session_id = 1;
+static volatile LONG g_total_created = 0;
+static volatile LONG g_total_released = 0;
 static char g_global_error[YCN_ERRBUF_LEN]; /* session 未找到时的兜底 */
 
 /* ---------------- 工具 ---------------- */
@@ -244,11 +250,45 @@ static BOOL process_init(void)
 
 static YcnSession* find_session(int id)
 {
-	if (id < 1 || id > YCN_MAX_SESSIONS)
+	int i;
+	if (id <= 0)
 		return NULL;
-	if (!g_sessions[id - 1].used)
-		return NULL;
-	return &g_sessions[id - 1];
+	for (i = 0; i < YCN_MAX_SESSIONS; i++)
+	{
+		if (g_sessions[i].used && g_sessions[i].id == id)
+			return &g_sessions[i];
+	}
+	return NULL;
+}
+
+/* Connect setup failures happen before the event thread owns the FreeRDP objects. */
+static void ycn_abandon_connect(YcnSession* s, freerdp* instance, HANDLE stop_event,
+                                HANDLE thread)
+{
+	if (thread)
+		CloseHandle(thread);
+	if (stop_event)
+		CloseHandle(stop_event);
+	if (instance)
+	{
+		if (instance->context)
+			freerdp_context_free(instance);
+		freerdp_free(instance);
+	}
+	EnterCriticalSection(&g_lock);
+	s->instance = NULL;
+	s->thread = NULL;
+	s->stop_event = NULL;
+	s->cb.on_connected = NULL;
+	s->cb.on_frame_ready = NULL;
+	s->cb.on_desktop_resize = NULL;
+	s->cb.on_disconnected = NULL;
+	s->cb.on_error = NULL;
+	s->user = NULL;
+	s->used = 0;
+	InterlockedExchange(&s->state, YCN_STATE_IDLE);
+	InterlockedIncrement(&g_total_released);
+	LeaveCriticalSection(&g_lock);
 }
 
 /* ---------------- 帧回调链（gdi EndPaint 铩） ---------------- */
@@ -2007,7 +2047,9 @@ static BOOL ycn_post_connect(freerdp* instance)
 		}
 	}
 
-	InterlockedExchange(&s->state, YCN_STATE_RUNNING);
+	if (InterlockedCompareExchange(&s->state, YCN_STATE_RUNNING,
+	                               YCN_STATE_CONNECTING) != YCN_STATE_CONNECTING)
+		return FALSE;
 
 	if (s->cb.on_connected)
 		s->cb.on_connected(s->user, s->id,
@@ -2077,11 +2119,32 @@ static int ycn_verify_x509(freerdp* instance, const BYTE* data, size_t length,
 static DWORD WINAPI event_loop(LPVOID arg)
 {
 	YcnSession* s = (YcnSession*)arg;
-	freerdp* instance = s->instance;
+	freerdp* instance = NULL;
+	HANDLE thread_handle = NULL;
+	HANDLE stop_event = NULL;
+	ycn_rdp_callbacks callbacks;
+	void* callback_user = NULL;
+	int callback_id = 0;
+	uint8_t* frame = NULL;
+	BOOL connected = FALSE;
+	BOOL report_disconnected = FALSE;
 	int fail_reason = YCN_DISCONNECT_ERROR;
 	char detail[YCN_ERRBUF_LEN];
 
 	detail[0] = '\0';
+
+	EnterCriticalSection(&g_lock);
+	instance = s->instance;
+	if (InterlockedCompareExchange(&s->state, 0, 0) == YCN_STATE_STOPPING)
+	{
+		InterlockedExchange(&s->connect_in_progress, 0);
+		LeaveCriticalSection(&g_lock);
+		_snprintf_s(detail, sizeof(detail), _TRUNCATE, "connect cancelled");
+		fail_reason = YCN_DISCONNECT_LOCAL;
+		goto teardown;
+	}
+	InterlockedExchange(&s->connect_in_progress, 1);
+	LeaveCriticalSection(&g_lock);
 
 	if (!freerdp_connect(instance))
 	{
@@ -2093,6 +2156,8 @@ static DWORD WINAPI event_loop(LPVOID arg)
 	}
 	else
 	{
+		connected = TRUE;
+		fail_reason = YCN_DISCONNECT_REMOTE;
 		/* 事件泵：官方句柄就绪驱动模式（同 wfreerdp/spike）。
 		 * **必须**等 transport 句柄就绪才调 check_event_handles——
 		 * 无数据时定时轮询 check 会污染 client 加密流：之后任何
@@ -2211,15 +2276,91 @@ static DWORD WINAPI event_loop(LPVOID arg)
 			 * 本拍 check 照常跑一次，下一拍循环条件退出 */
 		}
 	}
+	InterlockedExchange(&s->connect_in_progress, 0);
 
-	/* 收尾：只发一次 on_disconnected */
-	if (InterlockedCompareExchange(&s->disconnected_reported, 1, 0) == 0)
+teardown:
+	/* Publish STOPPING before waiting: disconnect only acquires an abort reference
+	 * while the session is CONNECTING under this same lock. */
+	EnterCriticalSection(&g_lock);
+	if (InterlockedCompareExchange(&s->state, 0, 0) == YCN_STATE_STOPPING)
+		fail_reason = YCN_DISCONNECT_LOCAL;
+	InterlockedExchange(&s->state, YCN_STATE_STOPPING);
+	callbacks = s->cb;
+	callback_user = s->user;
+	callback_id = s->id;
+	frame = s->frame;
+	s->frame = NULL;
+	s->frame_valid = FALSE;
+	LeaveCriticalSection(&g_lock);
+
+	/* References registered before STOPPING protect freerdp_connect/abort from
+	 * teardown. No new abort reference can be acquired after the locked transition. */
+	while (InterlockedCompareExchange(&s->abort_in_progress, 0, 0) != 0 ||
+	       InterlockedCompareExchange(&s->connect_in_progress, 0, 0) != 0)
+		Sleep(1);
+
+	if (connected)
+		freerdp_disconnect(instance);
+	if (instance->context)
 	{
-		if (s->cb.on_disconnected)
-			s->cb.on_disconnected(s->user, s->id, fail_reason, detail);
+		gdi_free(instance);
+		freerdp_context_free(instance);
 	}
+	freerdp_free(instance);
+	free(frame);
 
-	/* detach：槽位由 disconnect() 的 join 侧释放，这里不碰 s 的实例字段 */
+	/* FreeRDP and every channel are gone.  Release the slot before the managed
+	 * terminal callback; IDs are never reused, so a late old-client call cannot
+	 * address a newly allocated slot. */
+	EnterCriticalSection(&g_lock);
+	callbacks = s->cb;
+	callback_user = s->user;
+	callback_id = s->id;
+	report_disconnected = InterlockedCompareExchange(&s->disconnected_reported, 1, 0) == 0;
+	thread_handle = s->thread;
+	stop_event = s->stop_event;
+	s->instance = NULL;
+	s->frame_width = 0;
+	s->frame_height = 0;
+	s->frame_stride = 0;
+	s->thread = NULL;
+	s->stop_event = NULL;
+	{
+		int k;
+		for (k = 0; k < YCN_RDPSND_SLOTS; k++)
+		{
+			s->rdpsnd_device[k] = NULL;
+			s->rdpsnd_plugin[k] = NULL;
+			s->rdpsnd_orig_set_volume[k] = NULL;
+			s->rdpsnd_orig_play[k] = NULL;
+			s->rdpsnd_orig_play_ex[k] = NULL;
+		}
+		s->rdpsnd_slot_count = 0;
+	}
+	s->mouse_head = s->mouse_tail = 0;
+	s->key_head = s->key_tail = 0;
+	s->sync_flags = 0;
+	s->pending_sync = 0;
+	s->cb.on_connected = NULL;
+	s->cb.on_frame_ready = NULL;
+	s->cb.on_desktop_resize = NULL;
+	s->cb.on_disconnected = NULL;
+	s->cb.on_error = NULL;
+	s->user = NULL;
+	InterlockedExchange(&s->state, YCN_STATE_IDLE);
+	s->used = 0;
+	InterlockedIncrement(&g_total_released);
+	LeaveCriticalSection(&g_lock);
+
+	if (stop_event)
+		CloseHandle(stop_event);
+	if (thread_handle)
+		CloseHandle(thread_handle);
+
+	/* Terminal callback: after this point no FreeRDP/channel/native callback for
+	 * this session can occur, so managed code may release its GCHandle roots. */
+	if (report_disconnected && callbacks.on_disconnected)
+		callbacks.on_disconnected(callback_user, callback_id, fail_reason, detail);
 	return 0;
 }
 
@@ -2241,11 +2382,11 @@ YCN_API int ycn_rdp_connect(const ycn_rdp_params* params, const ycn_rdp_callback
 	process_init();
 
 	EnterCriticalSection(&g_lock);
-	for (id = 1; id <= YCN_MAX_SESSIONS; id++)
+	for (id = 0; id < YCN_MAX_SESSIONS; id++)
 	{
-		if (!g_sessions[id - 1].used)
+		if (!g_sessions[id].used)
 		{
-			slot = id - 1;
+			slot = id;
 			break;
 		}
 	}
@@ -2255,7 +2396,22 @@ YCN_API int ycn_rdp_connect(const ycn_rdp_params* params, const ycn_rdp_callback
 		set_global_error("会话表已满（上限 %d）", YCN_MAX_SESSIONS);
 		return YCN_ERR_SESSION_FULL;
 	}
+	if (g_next_session_id > INT_MAX)
+	{
+		LeaveCriticalSection(&g_lock);
+		set_global_error("session id space exhausted");
+		return YCN_ERR_SESSION_FULL;
+	}
 	s = &g_sessions[slot];
+	memset(s, 0, sizeof(*s));
+	s->used = 1;
+	s->id = (int)g_next_session_id++;
+	id = s->id;
+	s->cb = *callbacks;
+	s->user = user;
+	InterlockedExchange(&s->state, YCN_STATE_CONNECTING);
+	InterlockedExchange(&s->disconnected_reported, 0);
+	InterlockedIncrement(&g_total_created);
 	memset(s->last_error, 0, sizeof(s->last_error));
 	LeaveCriticalSection(&g_lock);
 
@@ -2280,14 +2436,10 @@ YCN_API int ycn_rdp_connect(const ycn_rdp_params* params, const ycn_rdp_callback
 	s->gfx_init_rc = 0;
 	s->gfx_codecs_null = -1;
 	s->gfx_progressive_null = -1;
-	s->cb = *callbacks;
-	s->user = user;
 	s->frame_valid = FALSE;
 	s->frame_width = 0;
 	s->frame_height = 0;
 	s->frame_stride = 0;
-	InterlockedExchange(&s->state, YCN_STATE_CONNECTING);
-	InterlockedExchange(&s->disconnected_reported, 0);
 	s->mouse_head = 0;
 	s->mouse_tail = 0;
 	s->key_head = 0;
@@ -2299,6 +2451,7 @@ YCN_API int ycn_rdp_connect(const ycn_rdp_params* params, const ycn_rdp_callback
 	if (!instance)
 	{
 		set_session_error(s, "freerdp_new 失败");
+		ycn_abandon_connect(s, NULL, NULL, NULL);
 		return YCN_ERR_NO_MEMORY;
 	}
 	s->instance = instance;
@@ -2331,7 +2484,7 @@ YCN_API int ycn_rdp_connect(const ycn_rdp_params* params, const ycn_rdp_callback
 	{
 		set_session_error(s, "freerdp_context_new 失败");
 		freerdp_free(instance);
-		s->instance = NULL;
+		ycn_abandon_connect(s, NULL, NULL, NULL);
 		return YCN_ERR_NO_MEMORY;
 	}
 
@@ -2381,26 +2534,24 @@ YCN_API int ycn_rdp_connect(const ycn_rdp_params* params, const ycn_rdp_callback
 	if (!s->stop_event)
 	{
 		set_session_error(s, "CreateEvent 失败");
-		freerdp_context_free(instance);
-		freerdp_free(instance);
-		s->instance = NULL;
+		ycn_abandon_connect(s, instance, NULL, NULL);
 		return YCN_ERR_NO_MEMORY;
 	}
 
+	/* 创建线程时持有 g_lock：event_loop 会先取得同一把锁，直到 thread
+	 * 已写入 session。普通 CreateThread 没有 ResumeThread 失败窗口，也不会
+	 * 留下一条永久挂起的系统线程。 */
+	EnterCriticalSection(&g_lock);
 	s->thread = CreateThread(NULL, 0, event_loop, s, 0, NULL);
 	if (!s->thread)
 	{
+		LeaveCriticalSection(&g_lock);
 		set_session_error(s, "CreateThread 失败");
-		CloseHandle(s->stop_event);
-		s->stop_event = NULL;
-		freerdp_context_free(instance);
-		freerdp_free(instance);
-		s->instance = NULL;
+		ycn_abandon_connect(s, instance, s->stop_event, NULL);
 		return YCN_ERR_THREAD_FAILED;
 	}
-
-	s->used = 1;
-	return s->id = (int)(slot + 1);
+	LeaveCriticalSection(&g_lock);
+	return id;
 }
 
 YCN_API void ycn_rdp_disconnect(int session)
@@ -2408,83 +2559,65 @@ YCN_API void ycn_rdp_disconnect(int session)
 	YcnSession* s;
 	HANDLE thread = NULL;
 	HANDLE stop = NULL;
-	freerdp* instance = NULL;
+	rdpContext* abort_context = NULL;
+	LONG state;
 
 	EnterCriticalSection(&g_lock);
 	s = find_session(session);
 	if (s)
 	{
-		thread = s->thread;
-		stop = s->stop_event;
-		instance = s->instance;
+		state = InterlockedCompareExchange(&s->state, YCN_STATE_STOPPING, YCN_STATE_RUNNING);
+		if (state == YCN_STATE_CONNECTING)
+		{
+			state = InterlockedCompareExchange(&s->state, YCN_STATE_STOPPING,
+			                                   YCN_STATE_CONNECTING);
+			/* Keep the context alive across the unlocked abort call.  The event
+			 * thread waits for this reference before starting teardown. */
+			if (state == YCN_STATE_CONNECTING &&
+			    InterlockedCompareExchange(&s->connect_in_progress, 0, 0) != 0 &&
+			    s->instance && s->instance->context)
+			{
+				InterlockedIncrement(&s->abort_in_progress);
+				abort_context = s->instance->context;
+			}
+		}
+		if (state != YCN_STATE_IDLE)
+		{
+			if (s->thread)
+				DuplicateHandle(GetCurrentProcess(), s->thread, GetCurrentProcess(),
+				                &thread, 0, FALSE, DUPLICATE_SAME_ACCESS);
+			if (s->stop_event)
+				DuplicateHandle(GetCurrentProcess(), s->stop_event, GetCurrentProcess(),
+				                &stop, 0, FALSE, DUPLICATE_SAME_ACCESS);
+		}
 	}
 	LeaveCriticalSection(&g_lock);
 
 	if (!s)
 		return;
 
-	/* 已在收尾则不重复 */
-	if (InterlockedCompareExchange(&s->state, YCN_STATE_STOPPING, YCN_STATE_RUNNING) == YCN_STATE_STOPPING)
-		return;
+	if (abort_context)
+	{
+		freerdp_abort_connect_context(abort_context);
+		InterlockedDecrement(&s->abort_in_progress);
+	}
 
 	if (stop)
 		SetEvent(stop);
-	/* 主动触发断开：优雅关闭连接（事件循环会退出） */
-	if (instance)
-		freerdp_disconnect(instance);
-
 	if (thread)
 	{
-		/* 回调里禁止调 disconnect（死锁保护由 state 标志保证）；
-		 * join 前先放开锁——本函数不持锁进来，安全 */
-		WaitForSingleObject(thread, 5000);
+		/* 超时意味着线程仍可能使用对象：保留槽、句柄与全部对象供线程收尾。 */
+		if (WaitForSingleObject(thread, 5000) != WAIT_OBJECT_0)
+		{
+			CloseHandle(thread);
+			if (stop)
+				CloseHandle(stop);
+			return;
+		}
 		CloseHandle(thread);
 	}
 	if (stop)
 		CloseHandle(stop);
-
-	EnterCriticalSection(&g_lock);
-	if (s->instance)
-	{
-		if (s->instance->context)
-		{
-			gdi_free(s->instance);
-			freerdp_context_free(s->instance);
-		}
-		freerdp_free(s->instance);
-		s->instance = NULL;
-	}
-	free(s->frame);
-	s->frame = NULL;
-	s->frame_valid = FALSE;
-	s->frame_width = 0;
-	s->frame_height = 0;
-	s->frame_stride = 0;
-	s->thread = NULL;
-	s->stop_event = NULL;
-	/* 静音挂钩随会话一起作废：device 对象已被 FreeRDP 释放，绝不能再解引用。
-	 * ⚠️ 必须在上面 freerdp_context_free 之后清 —— 顺序反了会拿到悬垂指针。 */
-	{
-		int k;
-		for (k = 0; k < YCN_RDPSND_SLOTS; k++)
-		{
-			s->rdpsnd_device[k] = NULL;
-			s->rdpsnd_plugin[k] = NULL;
-			s->rdpsnd_orig_set_volume[k] = NULL;
-			s->rdpsnd_orig_play[k] = NULL;
-			s->rdpsnd_orig_play_ex[k] = NULL;
-		}
-		s->rdpsnd_slot_count = 0;
-	}
-	s->mouse_head = 0;
-	s->mouse_tail = 0;
-	s->key_head = 0;
-	s->key_tail = 0;
-	s->sync_flags = 0;
-	s->pending_sync = 0;
-	InterlockedExchange(&s->state, YCN_STATE_IDLE);
-	s->used = 0;
-	LeaveCriticalSection(&g_lock);
 }
 
 YCN_API int ycn_rdp_send_mouse(int session, uint32_t flags, uint16_t x, uint16_t y)
@@ -2643,6 +2776,11 @@ YCN_API int ycn_rdp_set_muted(int session, int muted)
 		LeaveCriticalSection(&g_lock);
 		return YCN_ERR_SESSION_NOT_FOUND;
 	}
+	if (InterlockedCompareExchange(&s->state, 0, 0) != YCN_STATE_RUNNING)
+	{
+		LeaveCriticalSection(&g_lock);
+		return YCN_ERR_NOT_CONNECTED;
+	}
 	InterlockedExchange(&s->muted, muted ? 1 : 0);
 
 	/* 🔑 推音量**必须在锁内**完成，且必须当场调 orig，不能把 device 指针缓存到锁外再用。
@@ -2728,6 +2866,11 @@ YCN_API int ycn_rdp_get_muted(int session)
 		LeaveCriticalSection(&g_lock);
 		return YCN_ERR_SESSION_NOT_FOUND;
 	}
+	if (InterlockedCompareExchange(&s->state, 0, 0) != YCN_STATE_RUNNING)
+	{
+		LeaveCriticalSection(&g_lock);
+		return YCN_ERR_NOT_CONNECTED;
+	}
 	muted = (int)InterlockedCompareExchange(&s->muted, 0, 0);
 	LeaveCriticalSection(&g_lock);
 	return muted;
@@ -2748,7 +2891,8 @@ YCN_API int ycn_rdp_grab_frame(int session, uint32_t* out_width, uint32_t* out_h
 		LeaveCriticalSection(&g_lock);
 		return YCN_ERR_SESSION_NOT_FOUND;
 	}
-	if (s->frame_valid && s->frame)
+	if (InterlockedCompareExchange(&s->state, 0, 0) == YCN_STATE_RUNNING &&
+	    s->frame_valid && s->frame)
 	{
 		*out_width = s->frame_width;
 		*out_height = s->frame_height;
@@ -2778,7 +2922,8 @@ YCN_API int ycn_rdp_copy_frame(int session, uint8_t* dst, uint32_t dst_size,
 	 * 因此绝不会读到拷贝到一半的帧（撕裂安全）。 */
 	EnterCriticalSection(&g_lock);
 	s = find_session(session);
-	if (s && s->frame_valid && s->frame && s->frame_height > 0)
+	if (s && InterlockedCompareExchange(&s->state, 0, 0) == YCN_STATE_RUNNING &&
+	    s->frame_valid && s->frame && s->frame_height > 0)
 	{
 		if (out_width)
 			*out_width = s->frame_width;
@@ -2838,24 +2983,38 @@ YCN_API void ycn_rdp_diag(int session, char* buf, size_t buflen)
 {
 	YcnSession* s;
 	rdpSettings* settings = NULL;
+	int live = 0;
+	int i;
 
 	if (!buf || buflen == 0)
 		return;
 	buf[0] = '\0';
 
 	EnterCriticalSection(&g_lock);
+	for (i = 0; i < YCN_MAX_SESSIONS; i++)
+		if (g_sessions[i].used)
+			live++;
 	s = find_session(session);
-	if (s && s->instance && s->instance->context)
+	if (s && InterlockedCompareExchange(&s->state, 0, 0) == YCN_STATE_RUNNING &&
+	    s->instance && s->instance->context)
 		settings = s->instance->context->settings;
-	if (s && settings)
+	if (s)
 	{
 		_snprintf_s(buf, buflen, _TRUNCATE,
-		            "load_addins=%d static_ch=%u dyn_ch=%u gfx_state=%d dvc=%u gfx_init=%d codecs_null=%d names=[%s]",
-		            s->addins_rc,
-		            (unsigned)freerdp_settings_get_uint32(settings, FreeRDP_StaticChannelCount),
-		            (unsigned)freerdp_settings_get_uint32(settings, FreeRDP_DynamicChannelCount),
+		            "live_sessions=%d total_created=%ld total_released=%ld load_addins=%d static_ch=%u dyn_ch=%u gfx_state=%d dvc=%u gfx_init=%d codecs_null=%d names=[%s]",
+		            live, (long)InterlockedCompareExchange(&g_total_created, 0, 0),
+		            (long)InterlockedCompareExchange(&g_total_released, 0, 0), s->addins_rc,
+		            settings ? (unsigned)freerdp_settings_get_uint32(settings, FreeRDP_StaticChannelCount) : 0u,
+		            settings ? (unsigned)freerdp_settings_get_uint32(settings, FreeRDP_DynamicChannelCount) : 0u,
 		            (int)s->gfx_state, (unsigned)s->dvc_connected,
 		            s->gfx_init_rc, s->gfx_codecs_null, s->dvc_names);
+	}
+	else
+	{
+		_snprintf_s(buf, buflen, _TRUNCATE,
+		            "live_sessions=%d total_created=%ld total_released=%ld",
+		            live, (long)InterlockedCompareExchange(&g_total_created, 0, 0),
+		            (long)InterlockedCompareExchange(&g_total_released, 0, 0));
 	}
 	LeaveCriticalSection(&g_lock);
 }
