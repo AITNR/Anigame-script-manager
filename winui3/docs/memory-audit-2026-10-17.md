@@ -188,3 +188,77 @@ GPU 本地内存的首末差与每小时斜率。
 
 限制：主控是 `requireAdministrator`，非提权 shell 有时读不到 GPU 计数器，该列留空，
 **不要把空值当 0**。
+
+---
+
+# 附：会话代理进程（2026-10-17 21:00–21:15 实测）
+
+主控端的内存查完，同一台机器上还常驻着**每个目标账户一个**的会话代理。代理是纯后台进程
+（跑脚本 / 等指令 / 回状态），没有窗口，所以它的内存曲线跟主控是两回事，单独记在这里。
+
+## 1. 实测（三组对照）
+
+| 对象 | Private | WorkingSet | 线程 | 句柄 | 备注 |
+|---|---|---|---|---|---|
+| 生产代理 A（zdh，PID 65496，4.5h） | 34.4 MB | 40.8–42.5 MB | 8 | 331 | 跑过 1h25m 任务后 |
+| 生产代理 B（bh3，PID 75644，4.7h） | 35.4–36.3 MB | 45.0–46.4 MB | 8 | 329–341 | 同上 |
+| 旧构建空载探针（1Hz 心跳） | 14.2 → 17.2（5min）→ 23.4（12min）→ **27.9（31min 后走平）** | 60 → 70 MB | 8–15 | 340–349 | ProgramData 那份 exe，`--rdp-agent` + 临时桥 |
+| 新构建空载探针（5s 心跳、无消息泵） | 10.9 → 12.6（5min）→ **15.8（7.5min 后走平）** | 43 → 50 MB | 8–12 | 288–294 | 本次改动后的 Release 构建 |
+| 空白 .NET 8 控制台（基线） | 7.0–8.0 MB | 22–26 MB | 7–8 | — | 说明 CLR 本身就要 8 MB |
+
+两个生产代理在 20:25 / 20:37 / 21:11 三次采样**一个字节都没涨**（34.4 / 35.4），
+而新起的探针会在半小时内爬到自己的平衡点 —— 所以代理侧**不是泄漏**，
+是"空载平衡点"高低的问题。
+
+## 2. 那 20 多 MB 是什么（两个来源，都跟 GUI 无关）
+
+1. **1 秒一拍的心跳是"读-改-写整个 status.json"**
+   `AgentHost` 空闲时每秒调一次 `RdpBridge.UpdateStatus`：读回文件 → `JsonSerializer`
+   反序列化 → 改字段 → 缩进序列化 → 写 `.tmp` → **两次 `GrantUsersFullControl`** → 覆盖。
+   生产桥里的 status.json 有 **20–23 KB**（带着上一轮最多 500 条 Events），
+   按 1 秒一拍 ≈ 每天 2 GB 写盘、上百 GB 临时对象。
+   实测探针托管堆从 1.2 MB（15 秒）线性涨到 6.8 MB（6 分钟），即 **~23 KB/s** 的垃圾 ——
+   正好对应"每次心跳几 KB × 每秒一次"，踩在 Gen0 上直到平衡点。
+2. **一个从来没建成过的 WinRT 消息泵**
+   上一版用 `DispatcherQueueController.CreateOnCurrentThread()` 维持进程存活，
+   但真实代理里**每一次都抛 `COMException 0x80040111`（CLASS_E_CLASSNOTAVAILABLE）** ——
+   `%ProgramData%\YukinoChan\agent\startup_error.log` 里躺着 21 条同样的记录，
+   从 10-12 到 10-17，每个启动批次一条。也就是说生产环境**一直在跑兜底分支**，
+   而这个失败的尝试每次仍先把 WinRT 投影那套 DLL 拉进进程：
+   `Microsoft.Windows.SDK.NET.dll`（24 MB）、`Microsoft.WinUI.dll`（7 MB）、
+   `Microsoft.WindowsAppRuntime.dll`、`CoreMessaging.dll` 等（旧探针共加载 94 个模块）。
+
+代理没有 GUI，上面两样都不该付。
+
+## 3. 本次改动（3 个文件）
+
+| 文件 | 改动 |
+|---|---|
+| `Services/AgentHost.cs` | 删掉 `DispatcherQueueController` 与自建 Win32 消息循环；主线程改为 `WaitLoop(loop)` 同步等常驻循环（**这正是生产一直在走的分支**，行为不变）；空闲心跳从 1s 放宽到 5s（查指令仍是 1s） |
+| `Services/NativeMethods.cs` | 删掉随之无用的 `PeekMessageW`/`TranslateMessage`/`DispatchMessageW`/`PostQuitMessage` 与 `Message` 结构 |
+| `Program.cs` | 只改注释：代理宿主现在是纯后台进程，不再提消息泵 |
+
+`_smoke` 同步更新：原先"必须有 PeekMessageW"这类**跟着实现走**的断言已换成不变量
+（"代理宿主不 using 任何 Microsoft.UI/WinRT""不激活 Dispatcher""靠 WaitLoop 存活"），
+并补上 `Smoke.csproj` 漏链的 4 个文件 —— 7c7350c 引入 `ExternalLogTail` 之后冒烟工程本来编不过，
+这与本次改动无关，是拉代码后没同步的欠账。
+
+## 4. 验证（不是"看代码觉得对"）
+
+- 空载探针 12 分钟：status.json `UpdatedAt` 新鲜度 **4.6s → 1.1s**（≤5s，主控 `RdpHeartbeat`
+  超时 20s，留 4 倍余量），`Phase=idle` 正常 → 心跳没被改坏；
+- 内存：30s 10.9 MB → 5min 12.6 MB → 7.5min **15.8 MB 走平**（旧构建同口径 17.2 / 27.9）；
+- `repo/startup_error.log` 最后一条仍是 10-04，**没有新的 0x80040111**；
+- 冒烟：代理宿主相关 7 条断言全 PASS（其余 9 条失败在 XAML/原生裸指针等**本次没碰的文件**上，
+  是 7c7350c 拉代码后的既有欠账，先记账不动）。
+
+**还没验证的**（必须补）：把新代理部署到 `%ProgramData%\YukinoChan\agent` 后在真实 RDP 会话里跑一轮，
+再触发一次真实任务、看任务结束回到 idle 的水位 —— 这次只验证了空载，没有跑真任务。
+
+## 5. 结论
+
+- 代理侧**没有泄漏**，之前的 34–36 MB 是一个"空载平衡点"，成因是 1Hz 全量重写 status.json
+  + 一个 100% 失败但照样加载 WinRT 的消息泵；
+- 改动后空载平衡点从 **27.9 MB → 15.8 MB**（探针口径），按生产 status.json 更大来估，
+  真实代理应从 34–36 MB 降到 **20 MB 上下**（待真机复测，别把估算当验收）；
+- 剩下能省的已经不多：CLR 基线 8 MB + 少量程序集，再去掉也没意义。

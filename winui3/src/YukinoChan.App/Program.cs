@@ -181,8 +181,8 @@ public static class Program
         // 主题资源与 XBF、并把整个 XAML 运行时拉起来（空载就要几十 MB 常驻内存）。
         // 而代理的执行链（RdpAgentRunner / ScriptRunner / RdpBridge / 截图 / 关机）
         // 不引用任何 XAML 类型，那个运行时纯属白付 —— 代理是每个目标账户一份、全天常驻。
-        // AgentHost 内部用 DispatcherQueueController 建消息泵维持进程，语义与原来的
-        // 隐藏 XAML 窗口一致（详见 Services/AgentHost.cs 的类注释）。
+        // AgentHost 现在是纯后台宿主：不开窗口、不建消息泵、不碰 WinRT，
+        // 主线程同步等常驻循环就是"让进程别退出"的全部手段（详见 AgentHost 类注释）。
         //
         // 放在这里还有一个附带好处：XAML 启动失败（窗口站非交互、缺桌面会话）这条老故障
         // 对代理彻底不存在了 —— 代理根本不需要 XAML。

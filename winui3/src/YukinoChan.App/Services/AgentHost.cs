@@ -4,7 +4,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.UI.Dispatching;
 
 using YukinoChan.Models;
 
@@ -13,21 +12,37 @@ namespace YukinoChan.Services;
 /// <summary>
 /// RDP 会话代理的宿主：<c>--rdp-agent</c> 模式下的进程入口。
 ///
-/// 【为什么不走 WinUI 启动】
-/// 原实现在 agent 模式下也走 <c>Application.Start</c>：加载 App.xaml 的主题资源与
-/// XBF、造一个 XAML <c>Window</c> 再立刻 <c>AppWindow.Hide()</c>，
-/// 全部目的只为换一个"消息循环 + 进程别退出"。
-/// 但代理的执行链（<see cref="RdpAgentRunner"/> / <see cref="ScriptRunner"/> /
-/// <see cref="RdpBridge"/> / 截图 / 关机）**不引用任何 XAML 类型** ——
+/// <para>【代理没有 GUI，也就不需要消息泵】</para>
+///
+/// 这条线是分两步砍下来的，两步都记在这里，免得以后有人又"顺手"加回来：
+///
+/// <para>第一步（原实现）：agent 也走 <c>Application.Start</c>，加载 App.xaml 的主题资源与 XBF、
+/// 造一个 XAML Window 再 <c>AppWindow.Hide()</c>，全部目的只为换一个"消息循环 + 进程别退出"。
+/// 而代理的执行链（<see cref="RdpAgentRunner"/> / <see cref="ScriptRunner"/> /
+/// <see cref="RdpBridge"/> / 截图 / 关机）<b>不引用任何 XAML 类型</b> ——
 /// 全项目引用 XAML 的只有 <c>RdpD3DRenderer</c>、<c>MainViewModel</c>、
 /// <c>DialogHelper</c>、<c>WindowHelper</c>，一个都不在这条链上。
-/// 而 WinUI 3 空载启动的常驻内存是几十 MB 量级（实测每个空闲代理 Private ≈ 105MB /
-/// WS ≈ 155MB，2026-10-05），代理又是「每个目标账户一个、全天常驻」——
-/// 三个账户就是三份白付的钱。
+/// WinUI 3 空载常驻内存几十 MB（实测每个空闲代理 Private ≈ 105MB / WS ≈ 155MB，2026-10-05），
+/// 代理又是「每个目标账户一个、全天常驻」—— 三个账户就是三份白付的钱。</para>
 ///
-/// 所以这里用 <see cref="DispatcherQueueController"/> 在当前线程建一个消息泵：
-/// 只靠它维持进程存活，不碰 XAML 运行时、不加载主题资源。
-/// 语义与原来的隐藏窗口完全一致：进程不主动退出，只有桥目录彻底不可用才退出。
+/// <para>第二步（本版）：第一步之后改用 <c>Microsoft.UI.Dispatching.DispatcherQueueController</c>
+/// 建消息泵，本意是"只维持进程存活、不碰 XAML"。但实测<b>每个真实代理都建不起来</b>：
+/// <c>CreateOnCurrentThread()</c> 一律抛 <c>COMException 0x80040111</c>
+/// （CLASS_E_CLASSNOTAVAILABLE，代理进程没有 WinAppSDK 的激活上下文），
+/// 于是每次都落到"主线程同步等循环"的兜底分支。也就是说：</para>
+/// <list type="bullet">
+///   <item>那个消息泵在生产的每一次启动里<b>从来没有建成过</b>，
+///         <c>startup_error.log</c> 里躺着 20+ 条同样的 0x80040111；</item>
+///   <item>但它每次都要先把 WinRT 投影那套 DLL 加载进来才失败 ——
+///         实测代理因此额外加载 <c>Microsoft.Windows.SDK.NET.dll</c>（24MB）、
+///         <c>Microsoft.WinUI.dll</c>（7MB）、<c>Microsoft.WindowsAppRuntime.dll</c>、
+///         <c>CoreMessaging.dll</c> 等一批只有 GUI 才用得着的东西。</item>
+/// </list>
+///
+/// <para>代理是纯后台进程：不开窗、不收窗口消息、不碰 XAML/WinRT。
+/// 维持进程存活只需要主线程阻塞在一个等待上，所以这里<b>直接同步等循环</b>，
+/// 一个 WinRT 类型都不碰。退出只有两条路：循环自己结束（桥目录彻底不可用），
+/// 或 <see cref="ExitAgent"/> 里的 <c>Environment.Exit</c>。</para>
 /// </summary>
 public static class AgentHost
 {
@@ -41,6 +56,21 @@ public static class AgentHost
     /// 主控端 RdpHeartbeat.TimeoutSeconds = 20 秒，1 秒一次留足余量，不会误报失联。
     /// </summary>
     private const int AgentPollIntervalSeconds = 1;
+
+    /// <summary>
+    /// 空闲时<b>写心跳</b>的间隔（秒）。与"查指令"的节奏分开，是有原因的：
+    ///
+    /// 心跳不是只有 372 字节 —— 生产桥里的 status.json 有 20–23 KB（带着上一轮任务最多
+    /// 500 条 Events），而 <c>UpdateStatus</c> 是"读回来 → 反序列化 → 改字段 → 缩进序列化 →
+    /// 原子写盘"，写盘前后还要各做一次 `GrantUsersFullControl`。按 1 秒一拍算，空闲代理每天
+    /// 白写约 2 GB、白分配上百 GB 的临时对象；实测空闲进程的托管堆就是这样以 ~23 KB/s 线性
+    /// 涨到 ~28 MB 才稳（见 docs/memory-audit-2026-10-17.md「代理进程」一节）。
+    ///
+    /// 放松到 5 秒：主控端 `RdpHeartbeat.TimeoutSeconds = 20`，仍留 4 倍余量，
+    /// 判失联的依据是 UpdatedAt 的新鲜度，不是写入频率。
+    /// 查指令仍是 <see cref="AgentPollIntervalSeconds"/> = 1 秒一拍 —— 指令延迟不变。
+    /// </summary>
+    private const int AgentHeartbeatIntervalSeconds = 5;
 
     /// <summary>
     /// 连续写心跳失败多少次就判定桥目录彻底不可用（次）。
@@ -65,92 +95,28 @@ public static class AgentHost
         // 本机多账户场景则按"自己登录的是哪个账户"自动派生（与主控端算出的目录一致）。
         RdpBridge.ConfigureAgent(RdpAgentRunner.ExtractBridgePath(args));
 
-        // 消息泵只用来维持进程存活（见下面的 PumpMessages）。
-        //
-        // 这里**不再初始化 NotificationService**：完成通知已改成"只由主控端发"，
-        // 代理侧一颗通知都不发；而代理跑在目标账户里，真去注册也只会在别人的
-        // 用户配置里塞一条本程序的通知身份，纯属污染。
-        var controller = TryCreateDispatcher();
-
         // 代理循环跑在工作线程：它全程 await（Task.Delay / 文件 IO / 进程管理），
-        // 从不碰 UI 线程，也就不需要消息泵与它同线程。
+        // 从不碰 UI 线程，也不需要任何窗口或消息泵。
+        //
+        // 这里**不初始化 NotificationService**：完成通知已改成"只由主控端发"，
+        // 代理侧一颗通知都不发；而代理跑在目标账户里，真去注册也只会在别人的
+        // 用户配置里塞一条本程序的通知身份，纯属污染。它内部还要 DispatcherQueue，
+        // 碰它就等于把 WinRT 那套重新拉进代理进程。
         var loop = Task.Run(RunAgentLoopAsync);
 
-        if (controller is null)
-        {
-            // 拿不到消息泵时，主线程同步等循环结束。
-            // 循环是 while(true)，正常不会返回；返回了说明桥目录废了。
-            WaitLoop(loop);
-            return 0;
-        }
-
-        // 阻塞在这里 —— 这就是原来那个隐藏 XAML 窗口的全部作用：维持进程存活。
-        //
-        // ⚠️ WinAppSDK 的 DispatcherQueue **没有**阻塞式 Run()（那是 UWP CoreDispatcher 的 API，
-        // 名字像但不是同一个类型，别再当成有）。Controller 只管建队列和 ShutdownQueue，
-        // 要"跑到没人投消息为止"必须自己拉 Win32 消息循环 —— 这正是 CoreDispatcher 当年的做法。
-        // 队列本身是靠线程消息队列驱动的，所以这个循环同时也在泵 controller 那个队列。
-        var exitCode = 0;
-        try
-        {
-            exitCode = PumpMessages();
-        }
-        finally
-        {
-            SafeShutdown(controller);
-        }
-
-        return exitCode;
+        // 主线程就是"让进程活着"的那根钉子：同步等循环结束。
+        // 循环是 while(true)，正常不返回；返回了说明桥目录废了。
+        WaitLoop(loop);
+        return 0;
     }
-
-    /// <summary>
-    /// Win32 消息循环：取一条消息就派发一条，直到收到 <c>WM_QUIT</c>。
-    ///
-    /// 为什么必须是它：进程要活得有消息循环，WinAppSDK 又没提供现成的阻塞泵。
-    /// 有了它就不必再造一个 XAML 窗口（那要加载整套 XAML 运行时 + 主题资源 + XBF，
-    /// 空载就是几十 MB，而代理是每个目标账户一份、全天常驻）。
-    ///
-    /// 收尾：<see cref="RdpAgentRunner"/> 那边结束会话若走"注销"会由系统发 WM_QUIT；
-    /// 桥目录彻底不可用时 <see cref="ExitAgent"/> 直接 <c>Environment.Exit</c>，也到不了这里。
-    /// 所以正常情况下这个循环是"永久阻塞"的 —— 与原实现行为一致。
-    /// </summary>
-    private static int PumpMessages()
-    {
-        while (true)
-        {
-            // PeekMessage 而非 GetMessage：队列空时立刻返回 false，
-            // 于是我们每轮还能顺带看一眼 loop 有没有自己结束（理论上不会，
-            // 但真到了那一步也不该死等）。
-            if (!NativeMethods.PeekMessageW(out var msg, IntPtr.Zero, 0, 0, NativeMethods.PmRemove))
-            {
-                if (_loopEnded)
-                {
-                    return 0;
-                }
-
-                Thread.Sleep(50);
-                continue;
-            }
-
-            if (msg.message == NativeMethods.WmQuit)
-            {
-                return unchecked((int)msg.wParam.ToInt64());
-            }
-
-            NativeMethods.TranslateMessage(ref msg);
-            NativeMethods.DispatchMessageW(ref msg);
-        }
-    }
-
-    /// <summary>代理循环是否已经自己结束（正常只在桥目录彻底不可用时）。</summary>
-    private static volatile bool _loopEnded;
 
     /// <summary>
     /// 常驻主循环：等指令 → 执行 → 回到等待，只有在桥目录彻底不可用时才退出。
     ///
     /// 关键约束：
     ///   1. "没有指令"进入等待，不再退出（旧实现读不到就 ExitAgent，正是事故根因）。
-    ///   2. 等待期间持续写心跳（UpdatedAt 每秒刷新，Phase=idle），主控端据此判定"代理在线"。
+    ///   2. 等待期间持续写心跳（Phase=idle），主控端据此判定"代理在线"；
+    ///      写盘节奏见 <see cref="AgentHeartbeatIntervalSeconds"/>。
     ///   3. 写心跳只在【等待】分支执行；任务执行期间本方法正 await 在 RunAsync 上，
     ///      不会插手，从而不会覆盖 RdpAgentRunner 正在写的任务状态。
     /// </summary>
@@ -168,18 +134,16 @@ public static class AgentHost
             AppPaths.WriteStartupError(ex);
             ExitAgent();
         }
-        finally
-        {
-            // 通知消息泵可以收尾了（正常走不到这里 —— 循环是 while(true)，
-            // 只有桥目录彻底不可用时才会真的返回）。
-            _loopEnded = true;
-        }
     }
 
     private static async Task WaitForCommandsAsync()
     {
         var bridgeFailures = 0;
         var bridge = RdpBridge.Agent;
+
+        // 上一次成功写心跳的时刻。初值取 MinValue：刚进入等待（含一轮任务跑完回来）
+        // 立刻写一拍，主控端不用等满一个心跳周期才看到 idle。
+        var lastHeartbeatAt = DateTime.MinValue;
 
         while (true)
         {
@@ -209,31 +173,42 @@ public static class AgentHost
 
             // 没有指令：写一条 idle 心跳，证明"代理在线，等待指令"。
             // 任务在跑时不会走到这里，因此不会覆盖 Runner 的任务状态。
-            var alive = bridge.UpdateStatus(status =>
+            //
+            // 节奏按 AgentHeartbeatIntervalSeconds 放慢（写盘比查指令贵得多，理由见常量注释）；
+            // 不写盘的那几拍只做上面的读指令 + 清 stop，指令延迟仍是 1 秒。
+            var now = DateTime.UtcNow;
+            if (lastHeartbeatAt == DateTime.MinValue ||
+                now - lastHeartbeatAt >= TimeSpan.FromSeconds(AgentHeartbeatIntervalSeconds))
             {
-                status.Phase = "idle";
-                status.LiveLogProtocol = RdpLiveLogProtocol.Current;
-                status.LiveLogError = string.Empty;
-                status.StatusText = "代理在线，等待指令。";
-                status.AgentUser = Environment.UserName;
-                status.CurrentTask = string.Empty;
-                return status;
-            });
-
-            if (alive)
-            {
-                bridgeFailures = 0;
-            }
-            else
-            {
-                // 连状态都写不出去 —— 共享目录已不可用，累加到阈值再退出，避免死撑
-                bridgeFailures++;
-                if (bridgeFailures >= AgentBridgeFailureLimit)
+                var alive = bridge.UpdateStatus(status =>
                 {
-                    AppPaths.WriteStartupError(new IOException(
-                        $"会话代理无法写入指令桥目录 {bridge.BridgeDir}：{bridge.LastError}"));
-                    ExitAgent();
-                    return;
+                    status.Phase = "idle";
+                    status.LiveLogProtocol = RdpLiveLogProtocol.Current;
+                    status.LiveLogError = string.Empty;
+                    status.StatusText = "代理在线，等待指令。";
+                    status.AgentUser = Environment.UserName;
+                    status.CurrentTask = string.Empty;
+                    return status;
+                });
+
+                lastHeartbeatAt = now;
+
+                if (alive)
+                {
+                    bridgeFailures = 0;
+                }
+                else
+                {
+                    // 连状态都写不出去 —— 共享目录已不可用，累加到阈值再退出，避免死撑。
+                    // 计数按"真的尝试过"的次数来，所以只在写盘分支里累加。
+                    bridgeFailures++;
+                    if (bridgeFailures >= AgentBridgeFailureLimit)
+                    {
+                        AppPaths.WriteStartupError(new IOException(
+                            $"会话代理无法写入指令桥目录 {bridge.BridgeDir}：{bridge.LastError}"));
+                        ExitAgent();
+                        return;
+                    }
                 }
             }
 
@@ -242,26 +217,9 @@ public static class AgentHost
     }
 
     /// <summary>
-    /// 在当前线程建一个消息泵。
-    ///
-    /// 用 <see cref="DispatcherQueueController"/> 而不是 XAML 窗口：前者只要
-    /// CoreMessaging 的线程消息队列，不碰 XAML 运行时，也不加载任何主题资源。
-    ///
-    /// 拿不到就返回 null —— 消息泵只为让进程别退出，不能因此让代理起不来。
+    /// 主线程阻塞等待常驻循环。代理既没有窗口也没有消息泵，
+    /// "进程别退出"靠的就是这里 —— 直到循环返回（桥目录彻底不可用）才离开。
     /// </summary>
-    private static DispatcherQueueController? TryCreateDispatcher()
-    {
-        try
-        {
-            return DispatcherQueueController.CreateOnCurrentThread();
-        }
-        catch (Exception ex)
-        {
-            AppPaths.WriteStartupError(ex);
-            return null;
-        }
-    }
-
     private static void WaitLoop(Task loop)
     {
         try
@@ -272,18 +230,6 @@ public static class AgentHost
         {
             AppPaths.WriteStartupError(ex);
             ExitAgent();
-        }
-    }
-
-    private static void SafeShutdown(DispatcherQueueController controller)
-    {
-        try
-        {
-            controller.ShutdownQueue();
-        }
-        catch
-        {
-            // 进程本来就要退出，忽略
         }
     }
 
