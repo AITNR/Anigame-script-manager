@@ -88,31 +88,100 @@
 
         <!-- ===== 这条通道的事件（可折叠，收起后画面更大） ===== -->
         <Border Grid.Row="3" Padding="14,8" Style="{StaticResource YukinoCardStyle}">
-            <Grid RowSpacing="6">
+                <Grid RowSpacing="6">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
                 <Grid Grid.Row="0">
-                    <TextBlock Text="通道事件" VerticalAlignment="Center"
-                               Style="{StaticResource BodyStrongTextBlockStyle}" />
-                    <HyperlinkButton x:Name="ToggleEventsButton" Content="收起"
-                                     HorizontalAlignment="Right" Click="OnToggleEventsClicked" />
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="运行信息" VerticalAlignment="Center"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <ToggleSwitch x:Name="FollowExternalLogsToggle" Grid.Column="1"
+                                      Header="跟随底部" IsOn="True" MinWidth="0"
+                                      OnContent="" OffContent=""
+                                      Toggled="OnFollowExternalLogsChanged"
+                                      ToolTipService.ToolTip="新日志到达时自动滚动到底部。关闭后可停留在历史位置查看。" />
+                        <HyperlinkButton x:Name="ToggleEventsButton" Grid.Column="2" Content="收起"
+                                         HorizontalAlignment="Right" Click="OnToggleEventsClicked" />
                 </Grid>
 
-                <ListView x:Name="EventList" Grid.Row="1" Height="140"
-                          ItemsSource="{x:Bind Events, Mode=OneWay}"
-                          SelectionMode="None">
-                    <ListView.ItemTemplate>
-                        <DataTemplate x:DataType="models:RdpTaskEvent">
-                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                <TextBlock Text="{x:Bind Time}" Opacity="0.55" FontSize="12" />
-                                <TextBlock Text="{x:Bind Headline}" TextWrapping="Wrap" />
-                            </StackPanel>
-                        </DataTemplate>
-                    </ListView.ItemTemplate>
-                </ListView>
+                    <TabView x:Name="EventsTabs" Grid.Row="1" Height="174"
+                             IsAddTabButtonVisible="False"
+                             TabWidthMode="SizeToContent"
+                             SelectionChanged="OnEventsTabChanged">
+                        <TabViewItem Header="运行事件" IsClosable="False">
+                            <ListView x:Name="EventList" Height="140"
+                                      ItemsSource="{x:Bind Events, Mode=OneWay}"
+                                      SelectionMode="None">
+                                <ListView.ItemTemplate>
+                                    <DataTemplate x:DataType="models:RdpTaskEvent">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <TextBlock Text="{x:Bind Time}" Opacity="0.55" FontSize="12" />
+                                            <TextBlock Text="{x:Bind Headline}" TextWrapping="Wrap" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ListView.ItemTemplate>
+                            </ListView>
+                        </TabViewItem>
+
+                        <TabViewItem x:Name="ExternalLogsTab" Header="实时日志" IsClosable="False">
+                            <Grid RowSpacing="4">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                </Grid.RowDefinitions>
+                                <Grid Grid.Row="0" ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <ComboBox x:Name="LogLevelFilter" SelectedIndex="0"
+                                              SelectionChanged="OnLogLevelChanged" MinWidth="120">
+                                        <ComboBoxItem Content="全部级别" Tag="all" />
+                                        <ComboBoxItem Content="警告和错误" Tag="warn" />
+                                        <ComboBoxItem Content="仅错误" Tag="error" />
+                                    </ComboBox>
+                                    <TextBlock Text="{x:Bind LiveLogStatusText, Mode=OneWay}"
+                                               VerticalAlignment="Center" Opacity="0.7" FontSize="12" />
+                                    </StackPanel>
+                                    <Button Grid.Column="1" Content="清空当前显示" HorizontalAlignment="Right"
+                                            Click="OnClearExternalLogsClicked" />
+                                </Grid>
+                                <ListView x:Name="ExternalLogList" Grid.Row="1"
+                                          ItemsSource="{x:Bind ExternalLogRows, Mode=OneWay}"
+                                          KeyDown="OnLogKeyDown"
+                                          SelectionMode="None">
+                                    <ListView.ItemTemplate>
+                                        <DataTemplate x:DataType="views:RdpLogRow">
+                                            <Grid ColumnSpacing="8" Padding="0,1">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto" />
+                                                    <ColumnDefinition Width="110" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Grid.Column="0" Text="{x:Bind Time}"
+                                                           Opacity="0.55" FontSize="12" />
+                                                <TextBlock Grid.Column="1" Text="{x:Bind Task}"
+                                                           TextTrimming="CharacterEllipsis" />
+                                                <TextBlock Grid.Column="2" Text="{x:Bind Level}"
+                                                           Opacity="0.7" FontSize="12" />
+                                                <TextBlock Grid.Column="3" Text="{x:Bind Body}"
+                                                           TextWrapping="Wrap" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ListView.ItemTemplate>
+                                </ListView>
+                            </Grid>
+                        </TabViewItem>
+                    </TabView>
             </Grid>
         </Border>
     </Grid>

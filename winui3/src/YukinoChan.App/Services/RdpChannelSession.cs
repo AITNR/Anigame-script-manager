@@ -70,6 +70,7 @@ public sealed class RdpChannelSession
 {
     /// <summary>界面事件列表保留条数的默认值与范围，统一取自 <see cref="ExternalLogDefaults"/>。</summary>
     public const int MaxEventLines = ExternalLogDefaults.EventLineLimit;
+    public const int MaxExternalLogLines = ExternalLogDefaults.EventLineLimit;
 
     /// <summary>
     /// 停止请求没收到回执时的重发间隔。
@@ -83,7 +84,11 @@ public sealed class RdpChannelSession
 
     private readonly RdpBridge _bridge;
     private long _lastEventSeq;
+    private long _liveLogByteOffset;
+    private long _lastLiveLogSeq;
+    private string _liveLogCommandId = string.Empty;
     private int _eventLineLimit = MaxEventLines;
+    private readonly int _externalLogLineLimit = MaxExternalLogLines;
     private bool _staleReported;
     private bool _awaitingLogged;
     private bool _completionReported;
@@ -132,9 +137,14 @@ public sealed class RdpChannelSession
         {
             Events.RemoveAt(0);
         }
+
     }
 
     public ObservableCollection<RdpTaskEvent> Events { get; } = new();
+
+    /// <summary>独立的实时外部日志窗口，不与普通运行事件共享容量或序号。</summary>
+    public ObservableCollection<RdpLiveLog> ExternalLogs { get; } = new();
+    public string LiveLogStatusText { get; private set; } = "等待本轮日志。";
 
     /// <summary>当前下发指令的 Id —— 用于校验桥里的 status.json 是不是本指令写的。</summary>
     public string? CommandId { get; private set; }
@@ -215,8 +225,11 @@ public sealed class RdpChannelSession
         IsStale = false;
         LastHeartbeatAt = null;
         Events.Clear();
+        ExternalLogs.Clear();
+        LiveLogStatusText = "等待代理接管与日志输出。";
 
         _lastEventSeq = 0;
+        ResetLiveLogCursor(commandId);
         _staleReported = false;
         _awaitingLogged = false;
         _completionReported = false;
@@ -237,7 +250,9 @@ public sealed class RdpChannelSession
         HeartbeatText = "－";
         IsStale = false;
         Events.Clear();
+        ExternalLogs.Clear();
         _lastEventSeq = 0;
+        ResetLiveLogCursor($"local-{Guid.NewGuid():N}");
         _staleReported = false;
         _awaitingLogged = false;
         _completionReported = false;
@@ -304,34 +319,104 @@ public sealed class RdpChannelSession
     }
 
     /// <summary>
-    /// 本地执行路径下直接补一条外部日志事件。
+    /// 本地执行路径下直接补一条独立实时日志。
     ///
     /// 为什么单独开一个入口：远程通道的事件是从 status.json 里按 Seq 去重收进来的，
-    /// 本地没有桥、没有代理回写的 Seq，只能由 VM 拿到行之后就地补一条。
-    /// 序号自己维护自增，保证与远程路径下"按 Seq 去重"的展示逻辑一致。
+    /// 本地没有桥，只能由 VM 拿到行之后就地补一条；序号仍按本次运行批次自增。
     /// </summary>
-    public void AddExternalLogLine(string text, bool abnormal)
+    public void AddExternalLogLine(string text, bool abnormal, string level = "info", string? taskName = null)
     {
-        var seq = _lastEventSeq + 1;
-        _lastEventSeq = seq;
-
-        Events.Add(new RdpTaskEvent
+        AddLiveLog(new RdpLiveLog
         {
-            Seq = seq,
-            Kind = RdpEventKinds.ExternalLog,
+            CommandId = _liveLogCommandId,
+            Seq = _lastLiveLogSeq + 1,
             Time = DateTime.Now.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture),
-            TaskName = CurrentTask ?? string.Empty,
+            TaskName = taskName ?? CurrentTask ?? string.Empty,
             Message = text,
-            Index = Progress,
-            Total = Total,
-            ElapsedSeconds = ElapsedSeconds,
+            Level = level,
             IsAbnormal = abnormal,
         });
+    }
 
-        while (Events.Count > _eventLineLimit)
+    private bool AddLiveLog(RdpLiveLog log)
+    {
+        if (!string.Equals(log.CommandId, _liveLogCommandId, StringComparison.Ordinal))
         {
-            Events.RemoveAt(0);
+            return false;
         }
+
+        if (log.Seq > 0 && log.Seq <= _lastLiveLogSeq)
+        {
+            return false;
+        }
+
+        if (log.Seq > 0)
+        {
+            _lastLiveLogSeq = log.Seq;
+        }
+
+        ExternalLogs.Add(log);
+        while (ExternalLogs.Count > _externalLogLineLimit)
+        {
+            ExternalLogs.RemoveAt(0);
+        }
+
+        return true;
+    }
+
+    private void ResetLiveLogCursor(string commandId)
+    {
+        _liveLogCommandId = commandId ?? string.Empty;
+        _liveLogByteOffset = 0;
+        _lastLiveLogSeq = 0;
+    }
+
+    /// <summary>
+    /// 已成功读取的完整 NDJSON 行边界，仅由 UI 线程提交。
+    /// </summary>
+    public long LiveLogByteOffset => _liveLogByteOffset;
+
+    public void ApplyLiveLogs(string commandId, long byteOffset, IEnumerable<RdpLiveLog> logs)
+    {
+        if (!string.Equals(commandId, _liveLogCommandId, StringComparison.Ordinal)) return;
+        _liveLogByteOffset = byteOffset;
+        // Only the visible tail enters ObservableCollection; the complete stream stays on disk.
+        foreach (var log in logs.TakeLast(_externalLogLineLimit)) AddLiveLog(log);
+    }
+
+    public List<RdpLiveLog> ConsumeLiveLogs()
+    {
+        var result = new List<RdpLiveLog>();
+        var commandId = string.IsNullOrWhiteSpace(CommandId) ? _liveLogCommandId : CommandId;
+        if (string.IsNullOrWhiteSpace(commandId))
+        {
+            return result;
+        }
+
+        if (!string.Equals(_liveLogCommandId, commandId, StringComparison.Ordinal))
+        {
+            ResetLiveLogCursor(commandId);
+        }
+
+        if (!_bridge.TryReadLiveLogs(commandId, ref _liveLogByteOffset, out var logs))
+        {
+            return result;
+        }
+
+        foreach (var log in logs)
+        {
+            if (!string.Equals(log.CommandId, commandId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (AddLiveLog(log))
+            {
+                result.Add(log);
+            }
+        }
+
+        return result;
     }
 
 
@@ -396,6 +481,9 @@ public sealed class RdpChannelSession
 
         _awaitingLogged = false;
 
+        LiveLogStatusText = status.LiveLogProtocol < 1
+            ? "当前代理不支持独立实时日志，请重新部署会话代理。"
+            : string.IsNullOrWhiteSpace(status.LiveLogError) ? "正在接收本通道日志。" : status.LiveLogError;
         // ② 归属一致 → 应用进度
         Phase = status.Phase;
         Progress = status.Progress;
@@ -412,6 +500,13 @@ public sealed class RdpChannelSession
             }
 
             _lastEventSeq = ev.Seq;
+
+            // 兼容旧代理但不再把外部高频日志收进普通事件窗口。
+            if (ev.Kind == RdpEventKinds.ExternalLog)
+            {
+                continue;
+            }
+
             Events.Add(ev);
             while (Events.Count > _eventLineLimit)
             {

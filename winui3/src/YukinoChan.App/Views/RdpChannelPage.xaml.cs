@@ -1,16 +1,56 @@
 // -*- coding: utf-8 -*-
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
+using Microsoft.UI.Xaml.Input;
 using YukinoChan.Models;
 using YukinoChan.Services;
 using YukinoChan.ViewModels;
 
 namespace YukinoChan.Views;
+
+/// <summary>通道页实时日志的显示行，不改变桥接事件模型。</summary>
+public sealed class RdpLogRow
+{
+    public RdpLogRow(RdpLiveLog source)
+    {
+        Seq = source.Seq;
+        Time = source.Time;
+        Task = string.IsNullOrWhiteSpace(source.TaskName) ? "－" : source.TaskName;
+
+        if (source.IsAbnormal || string.Equals(source.Level, "error", StringComparison.OrdinalIgnoreCase))
+        {
+            Level = "错误";
+            Body = source.Message;
+        }
+        else if (string.Equals(source.Level, "warn", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(source.Level, "warning", StringComparison.OrdinalIgnoreCase))
+        {
+            Level = "警告";
+            Body = source.Message;
+        }
+        else
+        {
+            Level = string.IsNullOrWhiteSpace(source.Level) ||
+                    string.Equals(source.Level, "unknown", StringComparison.OrdinalIgnoreCase)
+                ? "信息"
+                : source.Level;
+            Body = source.Message;
+        }
+    }
+
+    public long Seq { get; }
+    public string Time { get; }
+    public string Task { get; }
+    public string Level { get; }
+    public string Body { get; }
+
+}
 
 /// <summary>
 /// 一条会话通道的页面：**只显示本通道**的画面 + 进度 / 心跳 / 事件。
@@ -26,8 +66,13 @@ namespace YukinoChan.Views;
 public sealed partial class RdpChannelPage : Page, System.ComponentModel.INotifyPropertyChanged
 {
     private readonly ObservableCollection<RdpTaskEvent> _emptyEvents = new();
+    private readonly ObservableCollection<RdpLogRow> _externalLogRows = new();
+    private readonly ObservableCollection<RdpLiveLog> _emptyExternalLogs = new();
+    private long _clearThroughSeq;
+    private string _renderedCommandId = string.Empty;
 
     private RdpChannelSession? _session;
+    private RdpChannelSession? _renderedLogSession;
 
     /// <summary>导航参数带来的通道 id（<c>_sessions</c> 里还没有时用它兜底）。</summary>
     private string _channelId = string.Empty;
@@ -57,6 +102,8 @@ public sealed partial class RdpChannelPage : Page, System.ComponentModel.INotify
     public RdpChannelPage()
     {
         InitializeComponent();
+        ExternalLogList.AddHandler(UIElement.PointerWheelChangedEvent,
+            new PointerEventHandler(OnLogPointerWheel), true);
 
         Cell0.PopOutRequested += OnCellPopOut;
         Cell0.FullScreenRequested += OnCellFullScreen;
@@ -140,6 +187,10 @@ public sealed partial class RdpChannelPage : Page, System.ComponentModel.INotify
 
     public ObservableCollection<RdpTaskEvent> Events => _session?.Events ?? _emptyEvents;
 
+    public ObservableCollection<RdpLogRow> ExternalLogRows => _externalLogRows;
+
+    public string LiveLogStatusText => _session?.LiveLogStatusText ?? "开始执行后显示本通道的脚本日志。";
+
     // ---------------- 生命周期 ----------------
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
@@ -157,6 +208,7 @@ public sealed partial class RdpChannelPage : Page, System.ComponentModel.INotify
         }
 
         _pageAlive = true;
+        SyncExternalLogs();
         RefreshSurface();
         RaiseAllChanged();
 
@@ -166,6 +218,9 @@ public sealed partial class RdpChannelPage : Page, System.ComponentModel.INotify
         _refreshTimer.IsRepeating = true;
         _refreshTimer.Tick += (_, _) =>
         {
+            _session = VM.Sessions.FirstOrDefault(s =>
+                s.IsRemote && string.Equals(s.ChannelId, _channelId, StringComparison.OrdinalIgnoreCase));
+            SyncExternalLogs();
             RefreshSurface();
             RaiseAllChanged();
         };
@@ -293,8 +348,87 @@ public sealed partial class RdpChannelPage : Page, System.ComponentModel.INotify
     private void OnToggleEventsClicked(object sender, RoutedEventArgs e)
     {
         _eventsCollapsed = !_eventsCollapsed;
-        EventList.Visibility = _eventsCollapsed ? Visibility.Collapsed : Visibility.Visible;
+        EventsTabs.Visibility = _eventsCollapsed ? Visibility.Collapsed : Visibility.Visible;
         ToggleEventsButton.Content = _eventsCollapsed ? "展开" : "收起";
+    }
+
+    private void OnClearExternalLogsClicked(object sender, RoutedEventArgs e)
+    {
+        _clearThroughSeq = (_session?.ExternalLogs ?? _emptyExternalLogs).Select(l => l.Seq).DefaultIfEmpty(0).Max();
+        _externalLogRows.Clear();
+    }
+
+    private void OnFollowExternalLogsChanged(object sender, RoutedEventArgs e)
+    {
+        if (FollowExternalLogsToggle?.IsOn == true)
+        {
+            ScrollExternalLogsToBottom();
+        }
+    }
+
+    private void OnEventsTabChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (e.AddedItems.OfType<TabViewItem>().Contains(ExternalLogsTab) && FollowExternalLogsToggle?.IsOn == true)
+        {
+            ScrollExternalLogsToBottom();
+        }
+    }
+
+    private void OnLogPointerWheel(object sender, PointerRoutedEventArgs e)
+    {
+        if (e.GetCurrentPoint(ExternalLogList).Properties.MouseWheelDelta > 0)
+            FollowExternalLogsToggle.IsOn = false;
+    }
+
+    private void OnLogKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key is Windows.System.VirtualKey.Up or Windows.System.VirtualKey.PageUp or Windows.System.VirtualKey.Home)
+            FollowExternalLogsToggle.IsOn = false;
+    }
+
+    private void OnLogLevelChanged(object sender, SelectionChangedEventArgs e) => SyncExternalLogs();
+
+    private void SyncExternalLogs()
+    {
+        if (ExternalLogList is null) return;
+        var source = _session?.ExternalLogs ?? _emptyExternalLogs;
+        var commandId = source.FirstOrDefault()?.CommandId ?? _session?.CommandId ?? string.Empty;
+        if (!ReferenceEquals(_renderedLogSession, _session) || commandId != _renderedCommandId)
+        {
+            _renderedLogSession = _session;
+            _renderedCommandId = commandId;
+            _clearThroughSeq = 0;
+            _externalLogRows.Clear();
+        }
+        var level = (LogLevelFilter?.SelectedItem as ComboBoxItem)?.Tag as string ?? "all";
+        var rows = source.Where(l => l.Seq > _clearThroughSeq &&
+            (level == "all" || l.Level == level || level == "warn" && l.Level == "error"))
+            .Select(l => new RdpLogRow(l)).ToList();
+        // Incremental reconciliation preserves the user's scroll position while following is off.
+        var desired = rows.Select(r => r.Seq).ToHashSet();
+        for (var i = _externalLogRows.Count - 1; i >= 0; i--)
+            if (!desired.Contains(_externalLogRows[i].Seq)) _externalLogRows.RemoveAt(i);
+        for (var i = 0; i < rows.Count; i++)
+            if (i >= _externalLogRows.Count || _externalLogRows[i].Seq != rows[i].Seq)
+                _externalLogRows.Insert(i, rows[i]);
+        if (FollowExternalLogsToggle?.IsOn == true && ReferenceEquals(EventsTabs?.SelectedItem, ExternalLogsTab))
+            ScrollExternalLogsToBottom();
+    }
+
+    private void ScrollExternalLogsToBottom()
+    {
+        if (ExternalLogList is null || ExternalLogList.Items.Count == 0)
+        {
+            return;
+        }
+
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (ExternalLogList.Items.Count > 0)
+            {
+                ExternalLogList.ScrollIntoView(ExternalLogList.Items[ExternalLogList.Items.Count - 1]);
+            }
+        });
     }
 
     /// <summary>全屏状态变化：切本格的按钮文案（画面本身由协调器挂起/恢复渲染）。</summary>

@@ -21,7 +21,8 @@ namespace YukinoChan.Services;
 ///   status.json   Agent 写、主控端读（进度 + 事件流）
 ///   stop.json     主控端写、Agent 读（请求停止 / 紧急停止）
 ///   stats.json    Agent 写、主控端读（本轮跑完后发布的耗时统计快照）
-/// 写入一律走"临时文件 + 原子替换"，读取容忍并发 IOException 并重试，
+/// 状态文件写入走"临时文件 + 原子替换"；实时日志使用独立追加式 NDJSON，
+/// 读取容忍并发 IOException 并重试，
 /// 避免主控端正在读时 Agent 正好重写导致解析到半个文件。
 ///
 /// 为什么改成实例类：多会话通道并行时，每个通道必须有自己的一座桥
@@ -35,6 +36,8 @@ public sealed class RdpBridge
 
     /// <summary>耗时统计快照的文件名（Agent 写、主控端读）。</summary>
     public const string StatsFileName = "stats.json";
+    public const string LiveLogFilePrefix = "live-log-";
+    public const string LiveLogFileSuffix = ".ndjson";
 
     private static readonly object CacheGate = new();
     private static readonly Dictionary<string, RdpBridge> Cache = new(StringComparer.OrdinalIgnoreCase);
@@ -42,6 +45,13 @@ public sealed class RdpBridge
     private static readonly JsonSerializerOptions WriteOptions = new()
     {
         WriteIndented = true,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
+
+    private readonly object _liveLogWriteGate = new();
+    private readonly object _statusWriteGate = new();
+    private static readonly JsonSerializerOptions LiveLogOptions = new()
+    {
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
     };
 
@@ -104,6 +114,16 @@ public sealed class RdpBridge
 
     /// <summary>耗时统计快照文件：Agent 写、主控端读。老版本 Agent 不写它，主控端读不到就退回复本目录兜底。</summary>
     public string StatsPath => Path.Combine(BridgeDir, StatsFileName);
+
+    public string LiveLogPath(string commandId) =>
+        Path.Combine(BridgeDir, $"{LiveLogFilePrefix}{SafeFilePart(commandId)}{LiveLogFileSuffix}");
+
+    private static string SafeFilePart(string value)
+    {
+        var text = string.IsNullOrWhiteSpace(value) ? "unknown" : value.Trim();
+        var invalid = Path.GetInvalidFileNameChars();
+        return new string(text.Select(ch => invalid.Contains(ch) ? '_' : ch).ToArray());
+    }
 
     // ---------------- 桥实例的选取 ----------------
 
@@ -297,8 +317,13 @@ public sealed class RdpBridge
 
     // ---------------- Agent：回写状态 ----------------
 
-    /// <summary>Agent 侧读改写状态。Agent 是 status.json 的唯一写者，无需加锁。</summary>
+    /// <summary>Agent 的进度、完成与诊断回调可能并行；串行化状态读改写。</summary>
     public bool UpdateStatus(Func<RdpStatus, RdpStatus> mutator)
+    {
+        lock (_statusWriteGate) return UpdateStatusCore(mutator);
+    }
+
+    private bool UpdateStatusCore(Func<RdpStatus, RdpStatus> mutator)
     {
         EnsureDirectory();
         try
@@ -347,6 +372,155 @@ public sealed class RdpBridge
         return events.Count <= MaxEvents
             ? events
             : events.GetRange(events.Count - MaxEvents, MaxEvents);
+    }
+
+    // ---------------- Agent / 主控：独立实时日志 ----------------
+
+    /// <summary>Agent 批量追加实时日志；不会读改写 status.json。</summary>
+    public bool AppendLiveLogBatch(string commandId, IReadOnlyList<RdpLiveLog> logs)
+    {
+        if (logs.Count == 0 || string.IsNullOrWhiteSpace(commandId)) return true;
+        lock (_liveLogWriteGate)
+        {
+            EnsureDirectory();
+            try
+            {
+                var path = LiveLogPath(commandId);
+                GrantUsersFullControl(path);
+                // Each record must be a single physical line, including messages with newlines.
+                var buffer = new StringBuilder();
+                foreach (var log in logs)
+                {
+                    if (log is null || string.IsNullOrWhiteSpace(log.Message)) continue;
+                    log.CommandId = commandId;
+                    buffer.Append(JsonSerializer.Serialize(log, LiveLogOptions)).Append('\n');
+                }
+
+                var bytes = Encoding.UTF8.GetBytes(buffer.ToString());
+                using (var stream = new FileStream(path, FileMode.OpenOrCreate, FileAccess.Write, FileShare.ReadWrite))
+                {
+                    var start = stream.Length;
+                    stream.Position = start;
+                    try
+                    {
+                        stream.Write(bytes);
+                        stream.Flush();
+                    }
+                    catch
+                    {
+                        // A retry must not leave a partial JSON row ahead of the next batch.
+                        try { stream.SetLength(start); } catch { }
+                        throw;
+                    }
+                }
+                GrantUsersFullControl(path);
+                LastError = string.Empty;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LastError = ex.Message;
+                return false;
+            }
+        }
+    }
+
+    /// <summary>Only delete this feature's old per-command transport files; keep the current run.</summary>
+    public void PruneLiveLogs(string currentCommandId, int keepFiles = 30)
+    {
+        try
+        {
+            var current = LiveLogPath(currentCommandId);
+            foreach (var file in Directory.EnumerateFiles(BridgeDir, "live-log-*.ndjson")
+                .Where(f => !string.Equals(f, current, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(File.GetLastWriteTimeUtc).Skip(Math.Max(1, keepFiles) - 1))
+            {
+                TryDeleteQuietly(file);
+            }
+        }
+        catch { /* Retention failures cannot affect execution. */ }
+    }
+
+    /// <summary>主控从字节偏移读取完整 NDJSON 行；半行保留到下一次读取。</summary>
+    public bool TryReadLiveLogs(string commandId, ref long byteOffset, out List<RdpLiveLog> logs)
+    {
+        logs = new List<RdpLiveLog>();
+        if (string.IsNullOrWhiteSpace(commandId))
+        {
+            return false;
+        }
+
+        try
+        {
+            var path = LiveLogPath(commandId);
+            if (!File.Exists(path))
+            {
+                return false;
+            }
+
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            if (byteOffset < 0 || byteOffset > stream.Length)
+            {
+                byteOffset = 0;
+            }
+
+            stream.Position = byteOffset;
+            // Bound each poll so a backlog cannot allocate an entire run on the UI thread.
+            var count = (int)Math.Min(512 * 1024, stream.Length - byteOffset);
+            var bytes = new byte[count];
+            var read = 0;
+            while (read < bytes.Length)
+            {
+                var n = stream.Read(bytes, read, bytes.Length - read);
+                if (n == 0)
+                {
+                    break;
+                }
+
+                read += n;
+            }
+
+            var completeEnd = 0;
+            for (var i = 0; i < read; i++)
+            {
+                if (bytes[i] != (byte)'\n')
+                {
+                    continue;
+                }
+
+                var length = i - completeEnd;
+                if (length > 0 && bytes[completeEnd + length - 1] == (byte)'\r')
+                {
+                    length--;
+                }
+
+                if (length > 0)
+                {
+                    var line = Encoding.UTF8.GetString(bytes, completeEnd, length);
+                    try
+                    {
+                        var item = JsonSerializer.Deserialize<RdpLiveLog>(line, ReadOptions);
+                        if (item is not null && string.Equals(item.CommandId, commandId, StringComparison.Ordinal) && !string.IsNullOrEmpty(item.Message))
+                        {
+                            logs.Add(item);
+                        }
+                    }
+                    catch (JsonException)
+                    {
+                        // Consume malformed rows so one bad line cannot block later logs.
+                    }
+                }
+
+                completeEnd = i + 1;
+            }
+
+            byteOffset += completeEnd;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     // ---------------- Agent：发布耗时统计快照 ----------------

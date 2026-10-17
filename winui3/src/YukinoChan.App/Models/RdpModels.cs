@@ -871,6 +871,18 @@ public sealed class RdpStopRequest
     public string RequestedAt { get; set; } = DateTimeOffset.Now.ToString("o");
 }
 
+/// <summary>代理写入独立 live-log-{commandId}.ndjson 流的一行外部脚本日志。</summary>
+public sealed class RdpLiveLog
+{
+    public string CommandId { get; set; } = string.Empty;
+    public long Seq { get; set; }
+    public string Time { get; set; } = DateTime.Now.ToString("HH:mm:ss");
+    public string TaskName { get; set; } = string.Empty;
+    public string Message { get; set; } = string.Empty;
+    public string Level { get; set; } = "info";
+    public bool IsAbnormal { get; set; }
+}
+
 /// <summary>Agent 回写给主控端的一条事件（序号单调递增，主控端按序号去重）。</summary>
 public sealed class RdpTaskEvent
 {
@@ -930,6 +942,8 @@ public sealed class RdpStatus
     public string UpdatedAt { get; set; } = DateTimeOffset.Now.ToString("o");
     public string Machine { get; set; } = Environment.MachineName;
     public List<RdpTaskEvent> Events { get; set; } = new();
+    public int LiveLogProtocol { get; set; }
+    public string LiveLogError { get; set; } = string.Empty;
 
     [JsonIgnore]
     public bool IsRunning => Phase is "running" or "idle";

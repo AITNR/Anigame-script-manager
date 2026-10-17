@@ -56,6 +56,13 @@ public sealed class RdpAgentRunner
     /// <summary>停止请求只处理一次（击键连点 / 多拍重复读到同一个请求时不要反复下发）。</summary>
     private bool _stopHandled;
 
+    private readonly object _liveLogGate = new();
+    private readonly object _liveLogFlushGate = new();
+    private readonly List<RdpLiveLog> _pendingLiveLogs = new();
+    private long _liveLogSeq;
+    private Timer? _liveLogTimer;
+    private bool _liveLogWriteFailureReported;
+
     public RdpAgentRunner(RdpCommand command)
     {
         _command = command;
@@ -82,6 +89,7 @@ public sealed class RdpAgentRunner
         // 先补发一次历史快照：本轮跑之前主控端就该看到"这个账户以前跑过什么"，
         // 否则刚重启 / 刚部署完代理时统计页仍是空的，容易被当成故障。
         PublishStatsSnapshot();
+        _bridge.PruneLiveLogs(_command.Id);
 
         var tasks = new List<TaskConfig>();
         for (var i = 0; i < _command.Tasks.Count; i++)
@@ -137,13 +145,10 @@ public sealed class RdpAgentRunner
             }
         };
 
-        // 外部脚本实时日志：脚本进程跑起来后由 ScriptRunner 建跟踪器，
-        // 这里只负责把读到的行落进本通道当天的独立日志文件。
-        //
-        // ⚠️ **刻意不回写成事件**：事件列表界面只留 200 行滚动窗口，
-        // BetterGI 一天上千行日志灌进去会把「任务完成 / 全部结束」顶出屏幕 ——
-        // 那才是要看的信息。日志因此全部落独立文件，靠设置页查看 / 清理。
-        runner.ExternalLogLineRead += (_, line) => OnExternalLogLine(line);
+        // 外部脚本实时日志走独立 NDJSON 流，不进入 status.json.Events。
+        // 高频日志与任务完成/停止事件分离，避免互相覆盖；本地归档仍照常保留。
+        runner.TaskExternalLogLineRead += (_, item) => OnExternalLogLine(item);
+        _liveLogTimer = new Timer(_ => FlushLiveLogs(), null, 250, 250);
 
         runner.StatusChanged += (_, text) => Update(status =>
         {
@@ -250,11 +255,13 @@ public sealed class RdpAgentRunner
             {
                 var message = $"代理执行异常：{ex.Message}";
                 Log(message);
+                FlushLiveLogs();
                 Append(RdpEventKinds.Finished, message, abnormal: true);
                 FinishSession("error", message);
                 return;
             }
 
+            FlushLiveLogs(); // Flush before Finished/logoff: the controller may stop polling immediately.
             var summary = hadError ? "已完成（有异常）" : "全部任务已完成";
             // 异常与否写进事件：常驻代理会把 Phase 从 done 迅速改成 idle，主控端来不及看相位，
             // 只能靠这条 Finished 事件的 abnormal 标记来区分"正常结束"与"有异常结束"。
@@ -269,6 +276,9 @@ public sealed class RdpAgentRunner
             // 本轮已经结束，留着它只会污染下一轮（主控端靠 CommandId 兜底能挡住误停，
             // 但排障时看到一份没人消费的 stop.json 非常误导）。
             stopWatch.Cancel();
+            _liveLogTimer?.Dispose();
+            _liveLogTimer = null;
+            FlushLiveLogs();
             _bridge.ClearStop();
         }
     }
@@ -306,14 +316,12 @@ public sealed class RdpAgentRunner
     }
 
     /// <summary>
-    /// 处理外部脚本日志的一行：回写成事件（主控端可见）+ 落进独立日志文件。
-    ///
-    /// <para>两件事都做，是因为它们用途不同：事件给"现在正在看界面的人"，
-    /// 独立文件给"事后排障的人"。事件流会被 200 行滚动窗口淘汰，
-    /// 文件则按通道分目录、每天一份、保留最近 30 份。</para>
+    /// 处理外部脚本日志：写入独立归档文件，并排队写入主控实时日志流。
+    /// 不触碰 status.json.Events，避免高频日志影响任务状态事件。
     /// </summary>
-    private void OnExternalLogLine(ExternalLogLine line)
+    private void OnExternalLogLine(TaskExternalLogLine item)
     {
+        var line = item.Line;
         if (line.Text.Length == 0)
         {
             return;
@@ -322,18 +330,75 @@ public sealed class RdpAgentRunner
         try
         {
             var text = ExternalLogText(line);
-
-            // ① 落进本通道当天的独立日志文件（事后排障用，按通道分目录、每天一份、保留 30 份）
             ExternalLogStore.Append(
                 ExternalLogStore.TodayFilePath(_bridge.ChannelTag, DateTime.Now),
                 $"[{FormatHelper.NowTimeText()}] {text}");
 
-            // ② 回写成事件 —— 主控端轮询 status.json 后显示在「通道事件」列表里
-            Append(RdpEventKinds.ExternalLog, text, abnormal: line.Level == ExternalLogLevel.Error);
+            lock (_liveLogGate)
+            {
+                // Archive remains on disk; bound the retry queue when the bridge is unavailable.
+                if (_pendingLiveLogs.Count >= 4000)
+                {
+                    _pendingLiveLogs.RemoveRange(0, 256);
+                    _pendingLiveLogs.Add(new RdpLiveLog
+                    {
+                        CommandId = _command.Id, Seq = ++_liveLogSeq,
+                        Time = FormatHelper.NowTimeText(), TaskName = item.TaskName,
+                        Message = "实时日志传输积压，较早内容已从实时队列移除；请查看脚本原始日志。",
+                        Level = "warn",
+                    });
+                }
+                _pendingLiveLogs.Add(new RdpLiveLog
+                {
+                    CommandId = _command.Id,
+                    Seq = ++_liveLogSeq,
+                    Time = FormatHelper.NowTimeText(),
+                    TaskName = item.TaskName,
+                    Message = text,
+                    Level = line.Level.ToString().ToLowerInvariant(),
+                    IsAbnormal = line.Level == ExternalLogLevel.Error,
+                });
+            }
         }
         catch
         {
             // 日志落盘失败绝不影响任务执行
+        }
+    }
+
+    private void FlushLiveLogs()
+    {
+        lock (_liveLogFlushGate)
+        {
+            // Keep timer callbacks bounded even while scripts continuously append.
+            for (var i = 0; i < 20; i++)
+            {
+                List<RdpLiveLog> batch;
+                lock (_liveLogGate)
+                {
+                    if (_pendingLiveLogs.Count == 0) return;
+                    batch = _pendingLiveLogs.Take(256).ToList();
+                    _pendingLiveLogs.RemoveRange(0, batch.Count);
+                }
+                if (_bridge.AppendLiveLogBatch(_command.Id, batch))
+                {
+                    _liveLogWriteFailureReported = false;
+                    continue;
+                }
+                lock (_liveLogGate)
+                {
+                    _pendingLiveLogs.InsertRange(0, batch);
+                    if (_pendingLiveLogs.Count > 4000)
+                        _pendingLiveLogs.RemoveRange(0, _pendingLiveLogs.Count - 4000);
+                }
+                if (!_liveLogWriteFailureReported)
+                {
+                    _liveLogWriteFailureReported = true;
+                    Log($"实时日志流写入失败（不影响任务执行）：{_bridge.LastError}");
+                Update(status => status);
+                }
+                return;
+            }
         }
     }
 
@@ -400,6 +465,8 @@ public sealed class RdpAgentRunner
         {
             status.CommandId = _command.Id;
             status.AgentUser = Environment.UserName;
+            status.LiveLogProtocol = 1;
+            status.LiveLogError = _liveLogWriteFailureReported ? "实时日志回传暂时不可用，正在重试。" : string.Empty;
             return mutator(status);
         });
     }

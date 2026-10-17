@@ -1,6 +1,7 @@
 // -*- coding: utf-8 -*-
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -1125,6 +1126,7 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(ActiveSession));
         OnPropertyChanged(nameof(ActiveChannelName));
         OnPropertyChanged(nameof(RdpEvents));
+        OnPropertyChanged(nameof(RdpExternalLogs));
         RaiseSessionsChanged();
         MirrorActiveSession();
     }
@@ -1174,10 +1176,11 @@ public sealed class MainViewModel : ObservableObject
         _runner.ShutdownPrompt += OnRunnerShutdownPrompt;
         _runner.Finished += OnRunnerFinished;
 
-        // 外部脚本实时日志（本地执行路径）：远程通道那边由 RdpAgentRunner 直接回写成事件，
-        // 本地没有桥，所以在这里把行转成界面事件 + 落进独立日志文件。
+        // 外部脚本实时日志（本地执行路径）：远程通道那边由 RdpAgentRunner 写入独立 live-log 流，
+        // 本地没有桥，所以在这里直接写入独立日志集合 + 落进归档文件。
         // 同样是**全部保留**，滚动窗口由事件列表自己维护。
-        _runner.ExternalLogLineRead += (_, line) => OnExternalLogLine(line);
+        var logSession = LocalGroup;
+        _runner.TaskExternalLogLineRead += (_, item) => OnExternalLogLine(logSession, item);
 
         _runTask = _runner.RunAsync();
     }
@@ -2123,6 +2126,9 @@ public sealed class MainViewModel : ObservableObject
 
     /// <summary>无活跃通道时的空事件列表（保证绑定属性不返回 null）。</summary>
     private readonly ObservableCollection<RdpTaskEvent> _emptyEvents = new();
+
+    /// <summary>无活跃通道时的空实时日志列表（保证绑定属性不返回 null）。</summary>
+    private readonly ObservableCollection<RdpLiveLog> _emptyExternalLogs = new();
 
     /// <summary>本轮还剩几块没跑完：本地执行算一块，每条远程通道各算一块（归零即整轮结束）。</summary>
     private int _pendingRuns;
@@ -3851,6 +3857,9 @@ public sealed class MainViewModel : ObservableObject
     /// <summary>当前展示通道的事件列表（跟着 <see cref="ActiveSession"/> 走）。</summary>
     public ObservableCollection<RdpTaskEvent> RdpEvents => _activeSession?.Events ?? _emptyEvents;
 
+    /// <summary>当前展示通道的独立实时外部日志列表。</summary>
+    public ObservableCollection<RdpLiveLog> RdpExternalLogs => _activeSession?.ExternalLogs ?? _emptyExternalLogs;
+
     /// <summary>本轮执行涉及的全部通道会话（「本地执行」组在最前）。</summary>
     public IReadOnlyList<RdpChannelSession> Sessions => _sessions;
 
@@ -3905,6 +3914,7 @@ public sealed class MainViewModel : ObservableObject
             _activeSession = value;
             OnPropertyChanged();
             OnPropertyChanged(nameof(RdpEvents));
+            OnPropertyChanged(nameof(RdpExternalLogs));
             OnPropertyChanged(nameof(ActiveChannelName));
             MirrorActiveSession();
         }
@@ -4952,40 +4962,61 @@ public sealed class MainViewModel : ObservableObject
     /// 每秒遍历**全部通道**的桥。每条通道各自校验指令归属、各自判定完成 ——
     /// 这正是多通道并行与改造前"全局单例轮询"的根本差别。
     /// </summary>
-    private void PollRdpStatus()
+    private bool _rdpPollBusy;
+
+    private async void PollRdpStatus()
     {
         if (_sessions.Count == 0)
         {
             return;
         }
 
-        var now = DateTimeOffset.Now;
-
-        foreach (var session in _sessions.ToList())
+        if (_rdpPollBusy) return;
+        _rdpPollBusy = true;
+        try
         {
-            if (!session.IsRemote || !session.HasCommand)
+            foreach (var session in _sessions.ToList())
             {
-                continue;
+                if (!session.IsRemote || !session.HasCommand) continue;
+                var commandId = session.CommandId!;
+                ServiceStopRequest(session, DateTimeOffset.Now);
+                var offset = session.LiveLogByteOffset;
+                var snapshot = await Task.Run(() =>
+                {
+                    var ok = session.Bridge.TryReadLiveLogs(commandId, ref offset, out var logs);
+                    var status = session.Bridge.TryReadStatus();
+                    if (status?.CommandId == commandId && (status.Phase is "done" or "stopped" or "error" ||
+                        status.Events.Any(e => e.Kind == RdpEventKinds.Finished)))
+                    {
+                        // The agent flushes before Finished. Drain the remaining bounded backlog.
+                        for (var i = 0; i < 64; i++)
+                        {
+                            var before = offset;
+                            if (!session.Bridge.TryReadLiveLogs(commandId, ref offset, out var batch)) break;
+                            ok = true;
+                            logs.AddRange(batch);
+                            if (logs.Count > RdpChannelSession.MaxExternalLogLines)
+                                logs.RemoveRange(0, logs.Count - RdpChannelSession.MaxExternalLogLines);
+                            if (offset == before) break;
+                        }
+                    }
+                    return (Status: status, Logs: logs, Ok: ok);
+                });
+                await RunOnUiThreadAsync(() =>
+                {
+                    if (!_sessions.Contains(session) || session.CommandId != commandId) return;
+                    if (snapshot.Ok) session.ApplyLiveLogs(commandId, offset, snapshot.Logs);
+                    if (snapshot.Status is not null)
+                    {
+                        var tick = session.Tick(snapshot.Status, DateTimeOffset.Now, RdpSettings.ConnectTimeoutSeconds);
+                        ApplyChannelTick(session, tick);
+                    }
+                });
             }
-
-            // 停止请求可能没送达（代理刚好卡在清理里、或压根是旧版本），按间隔补发
-            ServiceStopRequest(session, now);
-
-            var status = session.Bridge.TryReadStatus();
-            if (status is null)
-            {
-                continue;
-            }
-
-            var tick = session.Tick(status, now, RdpSettings.ConnectTimeoutSeconds);
-            ApplyChannelTick(session, tick);
+            await RunOnUiThreadAsync(() => { if (_activeSession is not null) MirrorActiveSession(); });
         }
-
-        // 界面属性跟着"正在展示的通道"走
-        if (_activeSession is not null)
-        {
-            MirrorActiveSession();
-        }
+        catch (Exception ex) { AppendLog($"读取通道状态失败：{ex.Message}"); }
+        finally { _rdpPollBusy = false; }
     }
 
     /// <summary>
@@ -4993,31 +5024,38 @@ public sealed class MainViewModel : ObservableObject
     ///
     /// 做两件事，用途不同：
     ///   ① 落进 <c>external_logs/local/local-YYYY-MM-DD.log</c>（事后排障，一条不丢）；
-    ///   ② 追加到「本地执行」组的事件列表（界面实时看）。
+    ///   ② 追加到「本地执行」组的独立实时日志列表（界面实时看）。
     ///
     /// 不弹通知 —— 日志是高频流，一条一弹等于刷屏；通知只留给任务完成这类里程碑。
     /// </summary>
-    private void OnExternalLogLine(ExternalLogLine line)
+    private readonly ConcurrentQueue<(RdpChannelSession Session, TaskExternalLogLine Item)> _localLiveLogs = new();
+    private int _localLiveLogPostPending;
+
+    private void OnExternalLogLine(RdpChannelSession? session, TaskExternalLogLine item)
     {
-        if (line.Text.Length == 0)
-        {
-            return;
-        }
+        if (session is null || item.Line.Text.Length == 0) return;
+        var text = ExternalLogText(item.Line);
+        ExternalLogStore.Append(
+            ExternalLogStore.TodayFilePath(ExternalLogStore.LocalChannelTag, DateTime.Now),
+            $"[{FormatHelper.NowTimeText()}] [{item.TaskName}] {text}");
+        _localLiveLogs.Enqueue((session, item));
+        // The display queue is bounded independently from the archive.
+        while (_localLiveLogs.Count > 4000) _localLiveLogs.TryDequeue(out _);
+        if (Interlocked.Exchange(ref _localLiveLogPostPending, 1) == 0)
+            Post(DrainLocalLiveLogs);
+    }
 
-        try
+    private void DrainLocalLiveLogs()
+    {
+        for (var i = 0; i < 500 && _localLiveLogs.TryDequeue(out var entry); i++)
         {
-            var text = ExternalLogText(line);
-
-            ExternalLogStore.Append(
-                ExternalLogStore.TodayFilePath(ExternalLogStore.LocalChannelTag, DateTime.Now),
-                $"[{FormatHelper.NowTimeText()}] {text}");
-
-            LocalGroup?.AddExternalLogLine(text, line.Level == ExternalLogLevel.Error);
+            var line = entry.Item.Line;
+            entry.Session.AddExternalLogLine(ExternalLogText(line), line.Level == ExternalLogLevel.Error,
+                line.Level.ToString().ToLowerInvariant(), entry.Item.TaskName);
         }
-        catch
-        {
-            // 忽略
-        }
+        Interlocked.Exchange(ref _localLiveLogPostPending, 0);
+        if (!_localLiveLogs.IsEmpty && Interlocked.Exchange(ref _localLiveLogPostPending, 1) == 0)
+            _dispatcher.TryEnqueue(DrainLocalLiveLogs);
     }
 
     /// <summary>给日志行加级别前缀（错误 / 警告），其余原样。</summary>

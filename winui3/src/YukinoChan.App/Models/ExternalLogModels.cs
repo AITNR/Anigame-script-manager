@@ -25,11 +25,11 @@ public static class ExternalLogDefaults
     /// </summary>
     public const int KeepFiles = 30;
 
-    /// <summary>单行最大长度（超出截断），防止畸形日志把 status.json 撑爆。</summary>
+    /// <summary>单行最大长度（超出截断），限制界面单行文本长度。</summary>
     public const int MaxLineLength = 300;
 
     /// <summary>跟踪循环的默认节拍（毫秒）。</summary>
-    public const int PollIntervalMs = 1000;
+    public const int PollIntervalMs = 250;
     /// <summary>通道事件列表保留条数的**默认值**。</summary>
     public const int EventLineLimit = 200;
 
@@ -52,7 +52,7 @@ public static class ExternalLogDefaults
 /// <summary>外部日志文件的编码取值。</summary>
 public static class ExternalLogEncodings
 {
-    /// <summary>BOM 优先，其次 UTF-8 严格校验，最后系统 ANSI（中文 Windows 通常是 GBK）。</summary>
+    /// <summary>BOM 优先；无 BOM 时按完整行严格校验 UTF-8，失败后回退 GBK。</summary>
     public const string Auto = "auto";
 
     public const string Utf8 = "utf8";
@@ -97,6 +97,6 @@ public enum ExternalLogLevel
     Info,
     Warn,
 
-    /// <summary>错误 —— 必定进事件流。</summary>
+    /// <summary>错误日志。</summary>
     Error,
 }
