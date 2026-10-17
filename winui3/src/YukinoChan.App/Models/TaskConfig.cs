@@ -35,6 +35,15 @@ public sealed class TaskConfig : ObservableObject, ICloneable
     private string _mainProcess = string.Empty;
     private string _gameProcess = string.Empty;
     private int _scopeOrder;
+    // ---------- 外部脚本实时日志（可选） ----------
+
+    private bool _externalLogEnabled;
+    private string _externalLogPath = string.Empty;
+    private string _externalLogPattern = ExternalLogDefaults.Pattern;
+    private string _externalLogEncoding = ExternalLogEncodings.Auto;
+    private List<string> _externalLogKeywords = new();
+
+    private bool _externalLogFollowTail = ExternalLogDefaults.FollowTail;
 
     [JsonPropertyName("enabled")]
     public bool Enabled
@@ -191,6 +200,97 @@ public sealed class TaskConfig : ObservableObject, ICloneable
         set => SetProperty(ref _gameProcess, value);
     }
 
+
+    // ---------- 外部脚本实时日志（可选，默认关闭） ----------
+
+    /// <summary>
+    /// 是否跟踪外部脚本的实时日志文件，并把关键行送进运行事件。
+    /// 关闭（默认）时下面几个字段全部忽略，行为与改造前完全一致。
+    /// </summary>
+    [JsonPropertyName("external_log_enabled")]
+    public bool ExternalLogEnabled
+    {
+        get => _externalLogEnabled;
+        set => SetProperty(ref _externalLogEnabled, value);
+    }
+
+    /// <summary>
+    /// 日志文件路径，或**日志文件所在的目录**。支持环境变量（如 <c>%LOCALAPPDATA%</c>）。
+    /// 填目录时按 <see cref="ExternalLogPattern"/> 匹配，并自动挑最近修改的那一份 ——
+    /// 这样 BetterGI 按天滚动、MaaEnd 一份固定名 + 多份日期文件，都不用改配置。
+    /// </summary>
+    [JsonPropertyName("external_log_path")]
+    public string ExternalLogPath
+    {
+        get => _externalLogPath;
+        set => SetProperty(ref _externalLogPath, (value ?? string.Empty).Trim());
+    }
+
+    /// <summary><see cref="ExternalLogPath"/> 是目录时的文件名匹配模式，默认 <c>*.log</c>。</summary>
+    [JsonPropertyName("external_log_pattern")]
+    public string ExternalLogPattern
+    {
+        get => _externalLogPattern;
+        set => SetProperty(ref _externalLogPattern, ExternalLogDefaults.NormalizePattern(value));
+    }
+
+    /// <summary>
+    /// 日志文件编码：<c>auto</c>（默认）/ <c>utf8</c> / <c>gbk</c>。
+    /// auto 的顺序是：BOM → UTF-8 严格校验 → 系统 ANSI（中文 Windows 通常是 GBK）。
+    /// </summary>
+    [JsonPropertyName("external_log_encoding")]
+    public string ExternalLogEncoding
+    {
+        get => _externalLogEncoding;
+        set => SetProperty(ref _externalLogEncoding, ExternalLogEncodings.Normalize(value));
+    }
+
+    /// <summary>
+    /// 关键字：日志行里出现任意一个就<b>必定</b>进事件流（不受抽样限制）。
+    /// 用来盯住「失败 / 异常 / error」这类非看不可的行。
+    /// </summary>
+    [JsonPropertyName("external_log_keywords")]
+    public List<string> ExternalLogKeywords
+    {
+        get => _externalLogKeywords;
+        set => SetProperty(ref _externalLogKeywords, KeywordHelper.Normalize(value));
+    }
+
+    /// <summary>
+    /// 本任务最多往事件流里放几条日志（<c>0</c> = 用设置页里的默认值）。
+    /// 事件列表界面只留 200 行，不设上限的话日志会把「任务完成 / 全部结束」顶出去。
+    /// </summary>
+
+    /// <summary>
+    /// true（默认）= 从任务启动那一刻的文件末尾开始看，只关心本次运行产生的行；
+    /// false = 从文件开头读（想看历史时开）。
+    /// </summary>
+    [JsonPropertyName("external_log_follow_tail")]
+    public bool ExternalLogFollowTail
+    {
+        get => _externalLogFollowTail;
+        set => SetProperty(ref _externalLogFollowTail, value);
+    }
+
+    /// <summary>关键字的文本形态（分号分隔），专供 UI 两向绑定。</summary>
+    [JsonIgnore]
+    public string ExternalLogKeywordsText
+    {
+        get => KeywordHelper.ToText(_externalLogKeywords);
+        set
+        {
+            // 同 ProcessKeywordsText：这里是两向绑定的落点，
+            // 绝不能再补一次 ExternalLogKeywords 的通知（会与回写互相触发）。
+            SetProperty(ref _externalLogKeywords, KeywordHelper.Normalize(value));
+        }
+    }
+
+    /// <summary>本功能是否真的启用（开关开了 + 路径非空）。</summary>
+    [JsonIgnore]
+    public bool ExternalLogActive => _externalLogEnabled && !string.IsNullOrWhiteSpace(_externalLogPath);
+
+    /// <summary>生效的事件上限（任务级为 0 时回落设置页的默认值）。</summary>
+
     // ---------- 仅供 UI 绑定的文本代理 ----------
 
     [JsonIgnore]
@@ -258,6 +358,7 @@ public sealed class TaskConfig : ObservableObject, ICloneable
         var copy = (TaskConfig)MemberwiseClone();
         copy._processKeywords = new List<string>(_processKeywords);
         copy._windowKeywords = new List<string>(_windowKeywords);
+        copy._externalLogKeywords = new List<string>(_externalLogKeywords);
         return copy;
     }
 
@@ -276,5 +377,12 @@ public sealed class TaskConfig : ObservableObject, ICloneable
         ConcurrentGroup = (ConcurrentGroup ?? string.Empty).Trim();
         ProcessKeywords = KeywordHelper.Normalize(ProcessKeywords);
         WindowKeywords = KeywordHelper.Normalize(WindowKeywords);
+
+        // 外部日志：全部有默认值，老配置没有这些键时走默认值 = 功能关闭
+        ExternalLogPath = (ExternalLogPath ?? string.Empty).Trim();
+        ExternalLogPattern = ExternalLogDefaults.NormalizePattern(ExternalLogPattern);
+        ExternalLogEncoding = ExternalLogEncodings.Normalize(ExternalLogEncoding);
+        ExternalLogKeywords = KeywordHelper.Normalize(ExternalLogKeywords);
+
     }
 }

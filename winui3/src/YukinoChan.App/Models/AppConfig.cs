@@ -29,6 +29,8 @@ public sealed class AppConfig : ObservableObject
     private bool _windowsStartup;
     private bool _enableTimeoutScreenshot = true;
     private bool _developerMode;
+    private int _externalLogKeepFiles = ExternalLogDefaults.KeepFiles;
+    private int _eventLineLimit = ExternalLogDefaults.EventLineLimit;
     private string _updateChannel = UpdateChannels.Stable;
 
     public AppConfig()
@@ -104,6 +106,31 @@ public sealed class AppConfig : ObservableObject
     /// 只决定检查更新时比对哪一份发布，不改变程序本身的任何行为。
     /// 取值见 <see cref="UpdateChannels"/>，未知值在 <see cref="Sanitize"/> 里回落到正式版。
     /// </summary>
+    /// <summary>
+    /// 外部脚本日志保留多少份（**按通道各自计数**）。
+    ///
+    /// 例如 30 = 每条通道各留最近 30 天的日志，超出部分在启动时自动清理。
+    /// 默认值见 ExternalLogDefaults.KeepFiles。
+    /// </summary>
+    /// <summary>
+    /// 通道事件列表保留多少行（默认 <c>200</c>）。
+    ///
+    /// 这只是**界面滚动窗口**的大小 —— 外部日志一律完整写入独立文件，
+    /// 不会因为这里被顶掉而丢失。
+    /// </summary>
+    [JsonPropertyName("event_line_limit")]
+    public int EventLineLimit
+    {
+        get => _eventLineLimit;
+        set => SetProperty(ref _eventLineLimit, Math.Clamp(value, ExternalLogDefaults.MinEventLines, ExternalLogDefaults.MaxEventLinesLimit));
+    }
+
+    [JsonPropertyName("external_log_keep_files")]
+    public int ExternalLogKeepFiles
+    {
+        get => _externalLogKeepFiles;
+        set => SetProperty(ref _externalLogKeepFiles, Math.Max(1, value));
+    }
     [JsonPropertyName("update_channel")]
     public string UpdateChannel
     {
@@ -157,6 +184,8 @@ public sealed class AppConfig : ObservableObject
         Theme = allowed || LegacyThemes.Contains(theme) ? theme : "system";
         ShutdownDelaySeconds = Math.Max(0, ShutdownDelaySeconds);
         UpdateChannel = UpdateChannels.Normalize(UpdateChannel);
+        ExternalLogKeepFiles = Math.Max(1, ExternalLogKeepFiles);
+        EventLineLimit = ExternalLogDefaults.NormalizeEventLineLimit(EventLineLimit);
 
         Tasks ??= new List<TaskConfig>();
         Tasks.Sort((a, b) => a.Order.CompareTo(b.Order));
@@ -226,6 +255,8 @@ public sealed class AppConfig : ObservableObject
         EnableTimeoutScreenshot = EnableTimeoutScreenshot,
         DeveloperMode = DeveloperMode,
         UpdateChannel = UpdateChannel,
+        ExternalLogKeepFiles = ExternalLogKeepFiles,
+        EventLineLimit = EventLineLimit,
         Rdp = (RdpConfig)Rdp.Clone(),
         Window = (WindowConfig)Window.Clone(),
     };

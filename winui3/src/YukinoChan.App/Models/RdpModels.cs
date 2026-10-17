@@ -890,6 +890,7 @@ public sealed class RdpTaskEvent
         RdpEventKinds.TaskDone => $"已完成：{TaskName}",
         RdpEventKinds.TaskStarted => $"开始：{TaskName}",
         RdpEventKinds.Finished => "全部任务结束",
+        RdpEventKinds.ExternalLog => $"日志：{Message}",
         _ => Message,
     };
 }
@@ -899,7 +900,16 @@ public static class RdpEventKinds
     public const string TaskStarted = "task_started";
     public const string TaskDone = "task_done";
     public const string Finished = "finished";
+
+    /// <summary>内部结构化日志（保留给调度器自己用）。</summary>
     public const string Log = "log";
+
+    /// <summary>
+    /// 外部脚本实时日志的一行（BetterGI / March7thAssistant / MaaEnd 等）。
+    /// 与 <see cref="Log"/> 分开：Log 会被停止回执那套文本匹配消费，
+    /// 混在一起会污染既有判定。
+    /// </summary>
+    public const string ExternalLog = "ext_log";
 }
 
 /// <summary>Agent 的运行状态快照。</summary>

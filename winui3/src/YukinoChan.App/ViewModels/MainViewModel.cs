@@ -267,12 +267,40 @@ public sealed class MainViewModel : ObservableObject
 
     // ---------------- 启动 ----------------
 
+
+    /// <summary>
+    /// 启动时清理超期的外部日志文件 —— **按通道各自保留最近 KeepFiles 份**。
+    ///
+    /// 为什么放在启动而不是运行期：清理只在“天数变多”时才有意义，
+    /// 一天跑一次足够；运行期去动文件既没必要，还可能和正在写的脚本抢句柄。
+    ///
+    /// 全程静默：清理失败只是少清一点旧文件，绝不能因为它让启动失败。
+    /// </summary>
+    private void PruneExternalLogsQuietly()
+    {
+        try
+        {
+            var (deleted, freed) = ExternalLogStore.Prune(Config.ExternalLogKeepFiles);
+            if (deleted > 0)
+            {
+                AppendLog($"外部日志清理：已删除 {deleted} 份，释放 {ExternalLogStore.FormatBytes(freed)}。");
+            }
+        }
+        catch
+        {
+            // 静默：清理失败不影响启动
+        }
+    }
     public void Initialize()
     {
         AppendLog("程序启动。");
         AppendLog($"配置文件：{_configManager.ConfigPath}");
         AppendLog($"日志目录：{_logger.LogDir}");
         AppendLog($"资源目录：{AppPaths.AssetsDir}");
+
+        // 启动顺手清一次超期的外部日志（每通道各留最近 KeepFiles 份）。
+        // 只清文件、不碰任何运行状态；失败也只是少清一点，不影响启动。
+        PruneExternalLogsQuietly();
 
         SetMascotState(MascotStates.Idle, force: true);
         RefreshStats();
@@ -1079,6 +1107,7 @@ public sealed class MainViewModel : ObservableObject
         if (plan.LocalTasks.Count > 0)
         {
             var local = new RdpChannelSession(null, RdpBridge.ForChannel(null));
+            local.SetEventLineLimit(Config.EventLineLimit);
             local.BeginLocal(plan.LocalTasks.Count);
             _sessions.Add(local);
         }
@@ -1086,6 +1115,7 @@ public sealed class MainViewModel : ObservableObject
         foreach (var entry in plan.ToLaunch)
         {
             var session = new RdpChannelSession(entry.Channel, RdpBridge.ForChannel(entry.Channel));
+            session.SetEventLineLimit(Config.EventLineLimit);
             session.BeginLocal(entry.Tasks.Count);   // 归属性（CommandId）等真正下发时再记
             _sessions.Add(session);
         }
@@ -1143,6 +1173,11 @@ public sealed class MainViewModel : ObservableObject
         _runner.TaskError += OnRunnerTaskError;
         _runner.ShutdownPrompt += OnRunnerShutdownPrompt;
         _runner.Finished += OnRunnerFinished;
+
+        // 外部脚本实时日志（本地执行路径）：远程通道那边由 RdpAgentRunner 直接回写成事件，
+        // 本地没有桥，所以在这里把行转成界面事件 + 落进独立日志文件。
+        // 同样是**全部保留**，滚动窗口由事件列表自己维护。
+        _runner.ExternalLogLineRead += (_, line) => OnExternalLogLine(line);
 
         _runTask = _runner.RunAsync();
     }
@@ -4952,6 +4987,46 @@ public sealed class MainViewModel : ObservableObject
             MirrorActiveSession();
         }
     }
+
+    /// <summary>
+    /// 本地执行路径下读到的外部脚本日志行。
+    ///
+    /// 做两件事，用途不同：
+    ///   ① 落进 <c>external_logs/local/local-YYYY-MM-DD.log</c>（事后排障，一条不丢）；
+    ///   ② 追加到「本地执行」组的事件列表（界面实时看）。
+    ///
+    /// 不弹通知 —— 日志是高频流，一条一弹等于刷屏；通知只留给任务完成这类里程碑。
+    /// </summary>
+    private void OnExternalLogLine(ExternalLogLine line)
+    {
+        if (line.Text.Length == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var text = ExternalLogText(line);
+
+            ExternalLogStore.Append(
+                ExternalLogStore.TodayFilePath(ExternalLogStore.LocalChannelTag, DateTime.Now),
+                $"[{FormatHelper.NowTimeText()}] {text}");
+
+            LocalGroup?.AddExternalLogLine(text, line.Level == ExternalLogLevel.Error);
+        }
+        catch
+        {
+            // 忽略
+        }
+    }
+
+    /// <summary>给日志行加级别前缀（错误 / 警告），其余原样。</summary>
+    private static string ExternalLogText(ExternalLogLine line) => line.Level switch
+    {
+        ExternalLogLevel.Error => $"[错误] {line.Text}",
+        ExternalLogLevel.Warn => $"[警告] {line.Text}",
+        _ => line.Text,
+    };
 
     /// <summary>
     /// 把一次轮询结果落成用户可见的动作（日志 / 通知 / 看板娘 / 收尾）。

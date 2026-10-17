@@ -55,6 +55,7 @@ public sealed partial class SettingsPage : Page
         }
 
         RefreshVersionText();
+        RefreshExternalLogSection();
     }
 
     public MainViewModel VM => App.ViewModel;
@@ -206,6 +207,71 @@ public sealed partial class SettingsPage : Page
     private void OnOpenLogFolder(object sender, RoutedEventArgs e) => VM.OpenDirectory(AppPaths.LogDir);
 
     private void OnOpenStatsFolder(object sender, RoutedEventArgs e) => VM.OpenDirectory(AppPaths.StatsDir);
+
+    // ---------------- 外部脚本日志：占用 / 清理 ----------------
+
+    /// <summary>
+    /// 刷新「最多保留」输入框与占用概览。
+    ///
+    /// 每次进设置页都重算，不缓存 —— 日志文件是外部程序在写，
+    /// 缓存会在用户刚跑完一轮时给出过期数字。
+    /// </summary>
+    private void RefreshExternalLogSection()
+    {
+        _syncing = true;
+        try
+        {
+            ExternalLogKeepBox.Value = VM.Config.ExternalLogKeepFiles;
+        }
+        finally
+        {
+            _syncing = false;
+        }
+
+        var usage = ExternalLogStore.GetUsage();
+        ExternalLogInfoText.Text = usage.FileCount == 0
+            ? "还没有外部日志文件。任务跑起来、并且任务上配了外部日志路径之后，这里会显示占用。"
+            : $"共 {usage.FileCount} 份，占用 {usage.TotalText}。每通道每天一份，超出 {VM.Config.ExternalLogKeepFiles} 份的会在启动时自动清理。";
+    }
+
+    /// <summary>改「最多保留」—— 只落盘，清理交给启动流程或手动按钮。</summary>
+    private void OnExternalLogKeepChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    {
+        if (_syncing)
+        {
+            return;
+        }
+
+        var value = (int)Math.Round(double.IsNaN(args.NewValue) ? ExternalLogDefaults.KeepFiles : args.NewValue);
+        VM.Config.ExternalLogKeepFiles = value;
+        VM.SaveConfig();
+        RefreshExternalLogSection();
+    }
+
+    /// <summary>手动清理超出保留份数的外部日志。</summary>
+    private void OnExternalLogPrune(object sender, RoutedEventArgs e)
+    {
+        var (deleted, freed) = ExternalLogStore.Prune(VM.Config.ExternalLogKeepFiles);
+        VM.AppendLog(deleted == 0
+            ? "外部日志清理：没有超出保留份数的文件。"
+            : $"外部日志清理：已删除 {deleted} 份，释放 {ExternalLogStore.FormatBytes(freed)}。");
+        RefreshExternalLogSection();
+    }
+
+    /// <summary>刷新占用概览。</summary>
+    private void OnExternalLogUsage(object sender, RoutedEventArgs e)
+    {
+        var usage = ExternalLogStore.GetUsage();
+        VM.AppendLog(usage.FileCount == 0
+            ? "外部日志占用：暂无文件。"
+            : $"外部日志占用：共 {usage.FileCount} 份，{usage.TotalText}。");
+        RefreshExternalLogSection();
+    }
+
+    private void OnOpenExternalLogFolder(object sender, RoutedEventArgs e)
+    {
+        VM.OpenDirectory(ExternalLogStore.RootDir);
+    }
 
     // ---------------- 关于：版本号 + 检查更新 ----------------
 

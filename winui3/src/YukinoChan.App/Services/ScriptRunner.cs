@@ -104,6 +104,15 @@ public sealed class ScriptRunner
 
     private readonly List<AbnormalEvent> _abnormalEvents = new();
 
+    /// <summary>
+    /// 当前任务的外部日志跟踪器（任务运行时才存在，收尾即释放）。
+    ///
+    /// 为什么放在 runner 里：<c>ScriptRunner</c> 同时被主控端本地执行与
+    /// 远程代理（<see cref="RdpAgentRunner"/>）复用，挂在这里两条路都有，
+    /// 不用各写一遍。
+    /// </summary>
+    private ExternalLogTail? _externalLogTail;
+
     private volatile bool _stopRequested;
     /// <summary>
     /// 停止信号（<c>RequestStop</c> / <c>RequestEmergencyStop</c> 置位）。
@@ -131,6 +140,92 @@ public sealed class ScriptRunner
         AbnormalReportPath = Path.Combine(logger.LogDir, "last_abnormal_report.json");
     }
 
+    // ---------------- 外部脚本实时日志 ----------------
+
+    /// <summary>
+    /// 任务启动后开始跟它的日志文件。
+    ///
+    /// <para>只认"追加"：默认从当前文件末尾起读（<c>follow_tail</c>），
+    /// 所以一次运行只会看到它自己产生的行，不会翻出上一次的历史。</para>
+    ///
+    /// <para>**失败无害**：路径不存在、没权限、目录里没有匹配文件，
+    /// 都只写一行日志然后功能静默关闭，绝不影响任务本身。</para>
+    /// </summary>
+    private void StartExternalLogTail(TaskConfig task)
+    {
+        StopExternalLogTail();
+
+        if (!task.ExternalLogActive)
+        {
+            return;
+        }
+
+        try
+        {
+            var tail = new ExternalLogTail(
+                task.ExternalLogPath,
+                task.ExternalLogPattern,
+                task.ExternalLogEncoding,
+                task.ExternalLogFollowTail);
+
+            _externalLogTail = tail;
+            Log($"外部日志跟踪已启动：{task.ExternalLogPath}");
+        }
+        catch (Exception ex)
+        {
+            _externalLogTail = null;
+            Log($"外部日志跟踪启动失败（不影响任务执行）：{ex.Message}");
+        }
+    }
+
+    /// <summary>停掉跟踪并释放文件句柄（任务收尾 / 停止时调用）。</summary>
+    private void StopExternalLogTail()
+    {
+        var tail = _externalLogTail;
+        _externalLogTail = null;
+        if (tail is null)
+        {
+            return;
+        }
+
+        try
+        {
+            tail.Dispose();
+        }
+        catch
+        {
+            // 释放失败无所谓，句柄会随进程回收
+        }
+    }
+
+    /// <summary>
+    /// 抽一拍：把新增的日志行发成事件（**全部转发，不丢弃**）。
+    ///
+    /// 由任务主循环每拍调用一次；跟踪未启用或读不到内容时什么都不做。
+    /// 异常一律吞掉 —— 日志跟踪不是主流程。
+    /// </summary>
+    private void PumpExternalLog(TaskConfig task)
+    {
+        var tail = _externalLogTail;
+        if (tail is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var lines = tail.Poll(task.ExternalLogKeywords);
+            foreach (var line in lines)
+            {
+                ExternalLogLineRead?.Invoke(this, line);
+            }
+        }
+        catch
+        {
+            // 静默
+        }
+    }
+
     public string AbnormalReportPath { get; }
 
     public bool HadTaskError { get; private set; }
@@ -149,6 +244,12 @@ public sealed class ScriptRunner
     public event EventHandler<string>? TaskError;
     public event EventHandler<int>? ShutdownPrompt;
     public event EventHandler<bool>? Finished;
+
+    /// <summary>
+    /// 外部脚本实时日志的一行（**全部**行都会触发，不抽样、不丢弃）。
+    /// 订阅方自行决定怎么展示；跟踪失败不触发本事件。
+    /// </summary>
+    public event EventHandler<ExternalLogLine>? ExternalLogLineRead;
 
     // ---------------- 对外控制 ----------------
 
@@ -572,6 +673,11 @@ public sealed class ScriptRunner
         TrackProcess(process, processNames, task);
 
         Log($"任务「{name}」已启动，PID：{process.Pid}");
+
+        // 关键节点：进程已经起来了，此时日志文件才存在（脚本多半是启动后才建 / 追加），
+        // 过早启动跟踪会跟到一个还不存在或还是上一轮内容的文件上。
+        StartExternalLogTail(task);
+
         if (processNames.Count > 0)
         {
             Log($"已登记可强制结束的同名进程：{string.Join(", ", processNames)}");
@@ -636,6 +742,10 @@ public sealed class ScriptRunner
                 abnormal = true;
             }
 
+            // 最后一次抽水：脚本退出前的最后几行别漏掉
+            PumpExternalLog(task);
+            StopExternalLogTail();
+
             UntrackProcess(process);
             _stats.AddRecord(name, elapsedDone, status, task.WaitMode);
             RaiseTaskCompleted(name, index, total, elapsedDone, status, abnormal);
@@ -655,6 +765,7 @@ public sealed class ScriptRunner
                     : new List<TaskConfig> { task };
 
                 CleanupProcessesForTasks(scope, new List<IMonitoredProcess> { process }, "停止执行", includeWindowKeywords: true);
+                StopExternalLogTail();
                 UntrackProcess(process);
                 return RunOutcome.StopRequested;
             }
@@ -762,6 +873,8 @@ public sealed class ScriptRunner
                 RaiseTaskCompleted(name, index, total, elapsed, $"超时处理：{TimeoutActions.Label(task.TimeoutAction)}", abnormal: true);
                 return timeoutOutcome;
             }
+
+            PumpExternalLog(task);
 
             WaitPoll(250);
         }

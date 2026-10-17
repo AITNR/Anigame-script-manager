@@ -72,6 +72,29 @@ public sealed class RdpBridge
     /// <summary>最近一次写入失败的原因，用于界面提示与排障。</summary>
     public string LastError { get; private set; } = string.Empty;
 
+    /// <summary>
+    /// 本桥所属通道的标识，用于外部日志分目录。
+    ///
+    /// 取桥目录的最后一段 —— 它要么是按账户名派生的（<c>zdh</c>），
+    /// 要么是自定义桥目录的末段，两端算出同一个名字，天然一致。
+    /// 取不到就回落 <c>default</c>，保证路径拼接永远有值。
+    /// </summary>
+    public string ChannelTag
+    {
+        get
+        {
+            try
+            {
+                var name = new DirectoryInfo(BridgeDir).Name;
+                return string.IsNullOrWhiteSpace(name) ? "default" : name;
+            }
+            catch
+            {
+                return "default";
+            }
+        }
+    }
+
     public string CommandPath => Path.Combine(BridgeDir, "command.json");
 
     public string StatusPath => Path.Combine(BridgeDir, "status.json");

@@ -68,8 +68,8 @@ public sealed class RdpChannelTick
 /// </summary>
 public sealed class RdpChannelSession
 {
-    /// <summary>界面事件列表的保留条数（与改造前一致）。</summary>
-    public const int MaxEventLines = 200;
+    /// <summary>界面事件列表保留条数的默认值与范围，统一取自 <see cref="ExternalLogDefaults"/>。</summary>
+    public const int MaxEventLines = ExternalLogDefaults.EventLineLimit;
 
     /// <summary>
     /// 停止请求没收到回执时的重发间隔。
@@ -83,6 +83,7 @@ public sealed class RdpChannelSession
 
     private readonly RdpBridge _bridge;
     private long _lastEventSeq;
+    private int _eventLineLimit = MaxEventLines;
     private bool _staleReported;
     private bool _awaitingLogged;
     private bool _completionReported;
@@ -117,6 +118,21 @@ public sealed class RdpChannelSession
     public bool IsRemote => Channel is not null;
 
     // ---------------- 运行时状态 ----------------
+
+    /// <summary>当前生效的事件列表保留条数（默认 <c>MaxEventLines</c>，可在设置页改）。</summary>
+    public int EventLineLimit => _eventLineLimit;
+
+    /// <summary>
+    /// 改事件列表保留条数 —— 超了就把最老的先顶掉，保证列表不会超限。
+    /// </summary>
+    public void SetEventLineLimit(int value)
+    {
+        _eventLineLimit = ExternalLogDefaults.NormalizeEventLineLimit(value);
+        while (Events.Count > _eventLineLimit)
+        {
+            Events.RemoveAt(0);
+        }
+    }
 
     public ObservableCollection<RdpTaskEvent> Events { get; } = new();
 
@@ -288,6 +304,38 @@ public sealed class RdpChannelSession
     }
 
     /// <summary>
+    /// 本地执行路径下直接补一条外部日志事件。
+    ///
+    /// 为什么单独开一个入口：远程通道的事件是从 status.json 里按 Seq 去重收进来的，
+    /// 本地没有桥、没有代理回写的 Seq，只能由 VM 拿到行之后就地补一条。
+    /// 序号自己维护自增，保证与远程路径下"按 Seq 去重"的展示逻辑一致。
+    /// </summary>
+    public void AddExternalLogLine(string text, bool abnormal)
+    {
+        var seq = _lastEventSeq + 1;
+        _lastEventSeq = seq;
+
+        Events.Add(new RdpTaskEvent
+        {
+            Seq = seq,
+            Kind = RdpEventKinds.ExternalLog,
+            Time = DateTime.Now.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture),
+            TaskName = CurrentTask ?? string.Empty,
+            Message = text,
+            Index = Progress,
+            Total = Total,
+            ElapsedSeconds = ElapsedSeconds,
+            IsAbnormal = abnormal,
+        });
+
+        while (Events.Count > _eventLineLimit)
+        {
+            Events.RemoveAt(0);
+        }
+    }
+
+
+    /// <summary>
     /// 收尾完成：置幂等标志并清掉归属标记，
     /// 之后点「停止执行」不会再往桥里写一条无主的 stop.json。
     /// </summary>
@@ -365,7 +413,7 @@ public sealed class RdpChannelSession
 
             _lastEventSeq = ev.Seq;
             Events.Add(ev);
-            while (Events.Count > MaxEventLines)
+            while (Events.Count > _eventLineLimit)
             {
                 Events.RemoveAt(0);
             }

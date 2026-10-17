@@ -7,6 +7,7 @@
   "windows_startup": false,
   "enable_timeout_screenshot": true,
   "tasks": [],
+  "external_log_keep_files": 30,
   "rdp": {
     "enabled": true,
     "target_host": "",

@@ -137,6 +137,14 @@ public sealed class RdpAgentRunner
             }
         };
 
+        // 外部脚本实时日志：脚本进程跑起来后由 ScriptRunner 建跟踪器，
+        // 这里只负责把读到的行落进本通道当天的独立日志文件。
+        //
+        // ⚠️ **刻意不回写成事件**：事件列表界面只留 200 行滚动窗口，
+        // BetterGI 一天上千行日志灌进去会把「任务完成 / 全部结束」顶出屏幕 ——
+        // 那才是要看的信息。日志因此全部落独立文件，靠设置页查看 / 清理。
+        runner.ExternalLogLineRead += (_, line) => OnExternalLogLine(line);
+
         runner.StatusChanged += (_, text) => Update(status =>
         {
             status.StatusText = text;
@@ -296,6 +304,46 @@ public sealed class RdpAgentRunner
             Log($"耗时统计快照发布失败（不影响任务结果）：{ex.Message}");
         }
     }
+
+    /// <summary>
+    /// 处理外部脚本日志的一行：回写成事件（主控端可见）+ 落进独立日志文件。
+    ///
+    /// <para>两件事都做，是因为它们用途不同：事件给"现在正在看界面的人"，
+    /// 独立文件给"事后排障的人"。事件流会被 200 行滚动窗口淘汰，
+    /// 文件则按通道分目录、每天一份、保留最近 30 份。</para>
+    /// </summary>
+    private void OnExternalLogLine(ExternalLogLine line)
+    {
+        if (line.Text.Length == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var text = ExternalLogText(line);
+
+            // ① 落进本通道当天的独立日志文件（事后排障用，按通道分目录、每天一份、保留 30 份）
+            ExternalLogStore.Append(
+                ExternalLogStore.TodayFilePath(_bridge.ChannelTag, DateTime.Now),
+                $"[{FormatHelper.NowTimeText()}] {text}");
+
+            // ② 回写成事件 —— 主控端轮询 status.json 后显示在「通道事件」列表里
+            Append(RdpEventKinds.ExternalLog, text, abnormal: line.Level == ExternalLogLevel.Error);
+        }
+        catch
+        {
+            // 日志落盘失败绝不影响任务执行
+        }
+    }
+
+    /// <summary>给日志行加级别前缀（错误 / 警告），其余原样。</summary>
+    private static string ExternalLogText(ExternalLogLine line) => line.Level switch
+    {
+        ExternalLogLevel.Error => $"[错误] {line.Text}",
+        ExternalLogLevel.Warn => $"[警告] {line.Text}",
+        _ => line.Text,
+    };
 
     private void FinishSession(string phase, string summary)
     {

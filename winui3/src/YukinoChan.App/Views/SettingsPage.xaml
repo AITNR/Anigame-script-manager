@@ -99,6 +99,37 @@
                 </StackPanel>
             </Border>
 
+            <!-- 外部脚本日志：每个通道每天一个文件，超过份数自动清理 -->
+            <Border Padding="16" Style="{StaticResource YukinoCardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="外部脚本日志" FontWeight="SemiBold" />
+                    <TextBlock Text="脚本自己写出来的实时日志（BetterGI / March7thAssistant / MaaEnd 等），按通道分目录、每天一份文件保存。"
+                               TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Grid.Column="0" Text="最多保留（份）：" VerticalAlignment="Center" />
+                        <NumberBox x:Name="ExternalLogKeepBox" Grid.Column="1"
+                                   Minimum="1" Maximum="365"
+                                   SpinButtonPlacementMode="Compact"
+                                   ValueChanged="OnExternalLogKeepChanged" />
+                    </Grid>
+
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="查看占用" Click="OnExternalLogUsage" />
+                        <Button Content="清理超出的" Click="OnExternalLogPrune" />
+                        <Button Content="打开日志目录" Click="OnOpenExternalLogFolder" />
+                    </StackPanel>
+
+                    <TextBlock x:Name="ExternalLogInfoText"
+                               TextWrapping="Wrap" FontSize="12" Opacity="0.65" />
+                </StackPanel>
+            </Border>
+
             <!-- 目录 -->
             <Border Padding="16" Style="{StaticResource YukinoCardStyle}">
                 <StackPanel Spacing="12">
