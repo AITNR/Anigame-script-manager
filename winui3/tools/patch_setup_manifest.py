@@ -42,7 +42,10 @@ k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 k32.BeginUpdateResourceW.argtypes = [wintypes.LPCWSTR, wintypes.BOOL]
 k32.BeginUpdateResourceW.restype = wintypes.HANDLE
 k32.UpdateResourceW.argtypes = [
-    wintypes.HANDLE, wintypes.LPVOID, wintypes.LPCWSTR, wintypes.WORD,
+    # ⚠️ lpType / lpName 必须声明成 LPVOID 而不是 LPCWSTR：它们走的是 MAKEINTRESOURCE
+    #    （把整数 ID 塞进指针位），声明成 LPCWSTR 时 ctypes 会拒绝 c_void_p
+    #    （报 "argument 3: TypeError" —— 只在真正写盘时才触发，--expect-admin 查不出来）。
+    wintypes.HANDLE, wintypes.LPVOID, wintypes.LPVOID, wintypes.WORD,
     wintypes.LPVOID, wintypes.DWORD]
 k32.UpdateResourceW.restype = wintypes.BOOL
 k32.EndUpdateResourceW.argtypes = [wintypes.HANDLE, wintypes.BOOL]
@@ -196,16 +199,18 @@ def patch(path: str, dry_run: bool) -> bool:
         print(f"[!] {path}: EndUpdateResource 失败（error {ctypes.get_last_error()}）", file=sys.stderr)
         return False
 
-    # ── 自检：大小与追加数据必须原样 ────────────────────────────────────
+    # ── 自检：读回来必须真是 requireAdministrator，且仍然是「干净 PE」────────
+    # 注意别断言「文件大小一点没变」：UpdateResource 会重排资源段，模板文件长几十字节
+    # 是正常的；真正不能变的是「不能凭空长出追加数据」，以及清单得读得回来。
     after_size = os.path.getsize(path)
     problems = []
-    if after_size != before_size:
-        problems.append(f"文件大小变了：{before_size} → {after_size}")
+    if after_size < before_size:
+        problems.append(f"文件被截短：{before_size} → {after_size}")
     after_off = pe_overlay_offset(path)
-    if after_off != overlay_off:
-        problems.append(f"追加数据起点变了：{overlay_off} → {after_off}")
-    elif file_sha256(path, after_off) != overlay_hash:
-        problems.append("追加的安装数据内容被改动了 —— Inno 会报「安装数据损坏」")
+    if after_off != after_size:
+        problems.append(f"改完尾部多了 {after_size - after_off} 字节追加数据")
+    elif after_off != overlay_off or file_sha256(path, after_off) != overlay_hash:
+        problems.append("追加数据被改动了 —— Inno 会报「安装数据损坏」")
 
     lang2, data2 = read_manifest(path)
     if REQUIRE_ADMIN not in data2:
@@ -218,7 +223,8 @@ def patch(path: str, dry_run: bool) -> bool:
             print(f"[!] {path}: {p}", file=sys.stderr)
         return False
 
-    print(f"[ok] {path}: requireAdministrator 写入成功，文件大小与追加数据均未变")
+    print(f"[ok] {path}: requireAdministrator 写入成功（{before_size} → {after_size} 字节，"
+          f"无追加数据）")
     return True
 
 
