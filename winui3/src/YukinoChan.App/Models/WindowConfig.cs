@@ -17,11 +17,34 @@ namespace YukinoChan.Models;
 /// </summary>
 public sealed class WindowConfig : ObservableObject, ICloneable
 {
+    /// <summary>看板娘面板：完整显示（默认）。</summary>
+    public const string MascotPanelExpanded = "expanded";
+
+    /// <summary>看板娘面板：收起成窄条，只留状态 / 进度 / 耗时。</summary>
+    public const string MascotPanelCollapsed = "collapsed";
+
+    /// <summary>看板娘面板：整个关闭，右侧留一个把手可再打开。</summary>
+    public const string MascotPanelClosed = "closed";
+
+    /// <summary>关闭按钮：每次都问（默认）。</summary>
+    public const string CloseActionAsk = "ask";
+
+    /// <summary>关闭按钮：直接收进状态栏（不再问）。</summary>
+    public const string CloseActionTray = "tray";
+
+    /// <summary>关闭按钮：直接退出（不再问）。</summary>
+    public const string CloseActionExit = "exit";
+
+    /// <summary>关闭按钮：任务执行时隐藏到状态栏，空闲时退出。</summary>
+    public const string CloseActionAuto = "auto";
+
     private int? _x;
     private int? _y;
     private int _width;
     private int _height;
     private bool _maximized;
+    private string _mascotPanel = MascotPanelExpanded;
+    private string _closeAction = CloseActionAsk;
 
     /// <summary>窗口左上角 X（物理像素）。null = 未记录。</summary>
     [JsonPropertyName("x")]
@@ -63,9 +86,61 @@ public sealed class WindowConfig : ObservableObject, ICloneable
         set => SetProperty(ref _maximized, value);
     }
 
+    /// <summary>
+    /// 看板娘面板的版式：<c>expanded</c> / <c>collapsed</c> / <c>closed</c>。
+    ///
+    /// 放在 window 节点里，因为它和窗口几何是同一类东西 —— 纯界面偏好，
+    /// 关掉之后下次启动也该还是关掉的。取值一律经 <see cref="NormalizeMascotPanel"/> 收敛。
+    /// </summary>
+    [JsonPropertyName("mascot_panel")]
+    public string MascotPanel
+    {
+        get => _mascotPanel;
+        set => SetProperty(ref _mascotPanel, value);
+    }
+
+    /// <summary>把任意字符串收敛成三个合法值之一（未知/空 → 完整显示，老配置也就自然变成默认值）。</summary>
+    public static string NormalizeMascotPanel(string? value)
+    {
+        return (value ?? string.Empty).Trim().ToLowerInvariant() switch
+        {
+            MascotPanelCollapsed => MascotPanelCollapsed,
+            MascotPanelClosed => MascotPanelClosed,
+            _ => MascotPanelExpanded,
+        };
+    }
+
+    /// <summary>
+    /// 点关闭按钮时怎么处理窗口。<c>ask</c> / <c>tray</c> / <c>exit</c> / <c>auto</c>。
+    ///
+    /// <para>放在 window 节点里，理由同 <see cref="MascotPanel"/>：纯界面偏好，与窗口几何是一类东西。
+    /// 未知值一律回落 <c>ask</c> —— 老配置里没有这个键，行为就是"每次都问"，最安全。</para>
+    /// </summary>
+    [JsonPropertyName("close_action")]
+    public string CloseAction
+    {
+        get => _closeAction;
+        set => SetProperty(ref _closeAction, NormalizeCloseAction(value));
+    }
+
+    /// <summary>把任意字符串收敛成四个合法值之一（未知/空 → 每次询问）。</summary>
+    public static string NormalizeCloseAction(string? value)
+    {
+        return (value ?? string.Empty).Trim().ToLowerInvariant() switch
+        {
+            CloseActionTray => CloseActionTray,
+            CloseActionExit => CloseActionExit,
+            CloseActionAuto => CloseActionAuto,
+            _ => CloseActionAsk,
+        };
+    }
+
     /// <summary>把明显非法的数值收敛成"未记录"，真正的范围钳制交给 WindowPlacement。</summary>
     public void Sanitize()
     {
+        MascotPanel = NormalizeMascotPanel(MascotPanel);
+        CloseAction = NormalizeCloseAction(CloseAction);
+
         if (Width < 0)
         {
             Width = 0;

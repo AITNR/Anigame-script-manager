@@ -108,6 +108,28 @@ public sealed partial class RdpMultiViewPage : Page
     // ---------------- 画面网格 ----------------
 
     /// <summary>
+    /// 主窗口收进状态栏时暂停 1Hz 重排。
+    ///
+    /// <para>窗口隐藏期间各格位的实际尺寸可能变成 0，那一拍纯属白跑；更要紧的是
+    /// <see cref="LayoutSurfaces"/> 会去碰画面元素的尺寸与可见性 —— 隐藏时这些值不可信，
+    /// 属于"摸到失效对象"的高风险路径（见 MEMORY 里多画面页 1Hz 重排的崩溃记录）。
+    /// 只停不拆：会话与画面流都保留，恢复时接着用同一个 client。</para>
+    /// </summary>
+    public void SuspendRefresh() => _refreshTimer?.Stop();
+
+    /// <summary>主窗口恢复时重启重排，并立刻补一拍（否则要等最多 1 秒画面才对齐）。</summary>
+    public void ResumeRefresh()
+    {
+        if (!_pageAlive)
+        {
+            return;
+        }
+
+        LayoutSurfaces();
+        _refreshTimer?.Start();
+    }
+
+    /// <summary>
     /// 按当前页摆放格位、挂上各通道的内嵌画面，并刷新角标。
     /// 每拍调用是安全的：<see cref="RdpSurfaceCell.SetClient"/> 对同一实例会短路，不会把画面重挂成闪断。
     /// </summary>

@@ -206,6 +206,20 @@ public static class Program
         if (!isAgent)
         {
             ApplyAppUserModelId();
+
+            // 单实例：窗口能收进状态栏之后，程序"看不见但还在跑"，用户很容易再双击一次 exe。
+            // 没有这道闸门就是两个进程、两个托盘图标、两套任务（两条脚本可能抢同一个存档）。
+            // 必须放在创建窗口之前：已有实例时把它的窗口叫出来，本进程立刻退出。
+            if (!SingleInstance.TryClaim())
+            {
+                SingleInstance.SignalExisting();
+
+                // 这一轮什么活都没干，绝不能把自己的退出写成 clean-exit ——
+                // 那会把正在跑的那一份的"上次是否正常退出"证据覆盖掉（真正的崩溃会被误报成正常）。
+                // handoff 标记的语义正是"本进程只做了交接"，见 CrashLog.MarkCleanExit。
+                Services.CrashLog.MarkHandoff();
+                return;
+            }
         }
 
         try

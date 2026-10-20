@@ -62,6 +62,22 @@
                                Visibility="Collapsed"
                                TextWrapping="Wrap"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+                    <!-- 关闭按钮行为：与 window.close_action 一一对应。
+                         放在这里是为了让"记住我的选择"有回头路 —— 只在弹窗里记、没有地方改，
+                         用户勾了之后就永远改不回来了。 -->
+                    <ComboBox x:Name="CloseActionBox"
+                              Header="关闭按钮"
+                              MinWidth="220"
+                              ItemsSource="{x:Bind VM.CloseActionItems, Mode=OneWay}"
+                              DisplayMemberPath="Value"
+                              SelectedValuePath="Key"
+                              SelectionChanged="OnCloseActionChanged" />
+
+                    <TextBlock Text="收进状态栏后，双击托盘里的雪乃酱图标可以回到主界面。"
+                               TextWrapping="Wrap"
+                               Opacity="0.7"
+                               FontSize="12" />
                 </StackPanel>
             </Border>
 

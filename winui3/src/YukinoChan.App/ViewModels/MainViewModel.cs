@@ -526,6 +526,97 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// 记录看板娘的版式（展开 / 收起 / 关闭），下次启动沿用。
+    ///
+    /// 和 <see cref="SaveWindowPlacement"/> 一样是"随手发生"的界面动作：不写运行日志、不弹窗，
+    /// 值没变时连盘都不写。**它只改 Config.Window**，界面上尚未"保存配置"的任务改动不会被带走。
+    /// </summary>
+    public void SaveMascotPanelState(string state)
+    {
+        var normalized = Models.WindowConfig.NormalizeMascotPanel(state);
+
+        if (string.Equals(Config.Window.MascotPanel, normalized, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        Config.Window.MascotPanel = normalized;
+
+        try
+        {
+            _configManager.Save(Config);
+        }
+        catch
+        {
+            // 记不住看板娘版式不该影响用户操作
+        }
+    }
+
+    /// <summary>
+    /// 记录"点关闭按钮时的行为"（每次询问 / 收进状态栏 / 直接退出 / 按状态自动）。
+    ///
+    /// 与 <see cref="SaveWindowPlacement"/> / <see cref="SaveMascotPanelState"/> 同一类动作：
+    /// 随手发生、不写运行日志、不弹窗，值没变时连盘都不写；**只改 Config.Window**，
+    /// 界面上尚未"保存配置"的任务改动不会被顺带带走。
+    /// </summary>
+    public void SaveCloseAction(string action)
+    {
+        var normalized = Models.WindowConfig.NormalizeCloseAction(action);
+
+        if (string.Equals(Config.Window.CloseAction, normalized, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        Config.Window.CloseAction = normalized;
+
+        try
+        {
+            _configManager.Save(Config);
+        }
+        catch
+        {
+            // 记不住关闭行为不该影响用户关窗口
+        }
+    }
+
+    /// <summary>设置页「关闭按钮」下拉框的选项。</summary>
+    public IReadOnlyList<KeyValuePair<string, string>> CloseActionItems => Models.CloseDecision.Items;
+
+    /// <summary>
+    /// 关闭弹窗顶部那句"现在退掉会损失什么"。
+    ///
+    /// 必须区分本地与远程：本地任务会随主控端退出被清理，
+    /// 而远程通道的任务跑在被控机的代理里，主控端退出不影响它们 —— 这两件事写错一句，
+    /// 用户就会以为"点退出等于把挂机全停了"，或者反过来以为"退了它们还在跑"。
+    /// </summary>
+    public string DescribeRunningForClose()
+    {
+        if (!IsRunning)
+        {
+            return "当前没有任务在执行。";
+        }
+
+        var active = _sessions.Where(s => s.IsActive).ToList();
+        var remaining = active.Sum(s => Math.Max(1, s.Total - s.Progress + 1));
+
+        var text = remaining > 0 ? $"当前正在执行 {remaining} 个任务。" : "当前正在执行任务。";
+
+        if (active.Any(s => !s.IsRemote))
+        {
+            text += "本地执行的任务会随退出中止。";
+        }
+
+        var remote = active.Where(s => s.IsRemote).Select(s => s.DisplayName).Distinct().ToList();
+        if (remote.Count > 0)
+        {
+            text += $"通道「{string.Join("、", remote)}」的任务在被控机上继续跑。";
+        }
+
+        return text;
+    }
+
     public async Task ExportConfigAsync()
     {
         TaskScopePlanner.NormalizeOrdersByChannel(Tasks, Config.Rdp.Channels);
@@ -5421,7 +5512,11 @@ public sealed class MainViewModel : ObservableObject
             timer.Tick += (_, _) =>
             {
                 timer.Stop();
-                App.MainWindow?.Close();
+
+                // 必须走 RequestExit 而不是 Close()：装了关闭拦截之后，Close() 会被
+                // "关闭雪乃酱？"弹窗拦住 —— 开了自动退出的用户每次都会看到一个莫名其妙的确认框，
+                // 而且窗口若收在状态栏里，那个弹窗压根看不见，程序就永远退不掉了。
+                App.MainWindow?.RequestExit();
             };
             timer.Start();
         }

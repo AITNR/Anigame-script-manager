@@ -49,6 +49,38 @@
         <Setter Property="LineHeight" Value="20" />
     </Style>
 
+    <!-- 看板娘面板标题栏上的小图标按钮（收起 / 关闭）。
+         刻意不 BasedOn DefaultButtonStyle：那套样式是主题相关的，用 StaticResource 引用
+         会在切换明暗主题时抛 XamlParseException（WinUI 3 的已知坑）。不写 BasedOn
+         也一样拿到 Button 的默认模板，这里只把尺寸和背景压平。 -->
+    <Style x:Key="PanelIconButtonStyle" TargetType="Button">
+        <Setter Property="Width" Value="28" />
+        <Setter Property="Height" Value="28" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="CornerRadius" Value="6" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+
+    <!-- 看板娘收起态（窄条）里的字段名 / 数值：一行一列都窄，字号要压小、居中换行 -->
+    <Style x:Key="RailLabelStyle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="10" />
+        <Setter Property="Opacity" Value="0.6" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="TextAlignment" Value="Center" />
+    </Style>
+
+    <Style x:Key="RailValueStyle" TargetType="TextBlock">
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="HorizontalAlignment" Value="Center" />
+        <Setter Property="TextAlignment" Value="Center" />
+        <Setter Property="TextWrapping" Value="Wrap" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+    </Style>
+
     <!-- 状态条标签 / 数值 -->
     <Style x:Key="StatusLabelStyle" TargetType="TextBlock">
         <Setter Property="FontSize" Value="12" />

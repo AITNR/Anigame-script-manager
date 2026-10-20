@@ -82,7 +82,10 @@
                     </Grid.RowDefinitions>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="320" />
+                        <!-- 看板娘那一列是 Auto：宽度由 MascotHost 自己的 Width 决定，
+                             这样收起/展开可以给 Width 做补间动画，列宽跟着走。
+                             320 = 完整 / 72 = 收起成窄条 / 0 = 关闭 -->
+                        <ColumnDefinition x:Name="MascotColumn" Width="Auto" />
                     </Grid.ColumnDefinitions>
 
                     <!-- 运行控制栏 -->
@@ -119,12 +122,37 @@
                            Grid.Row="1" Grid.Column="0" />
 
                     <!-- ===== 看板娘面板 ===== -->
-                    <Border Grid.Row="0" Grid.RowSpan="2" Grid.Column="1"
+                    <!-- Width 由代码做动画；SizeChanged 里同步 Clip，防止变宽过程中
+                         内容溢出到左侧页面上去（表现为"抽屉被拉开"） -->
+                    <Border x:Name="MascotHost"
+                            Grid.Row="0" Grid.RowSpan="2" Grid.Column="1"
+                            Width="320"
+                            SizeChanged="OnMascotHostSizeChanged"
                             BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
                             BorderThickness="1,0,0,0"
                             Background="{ThemeResource LayerFillColorDefaultBrush}">
-                        <views:MascotPanel />
+                        <views:MascotPanel x:Name="MascotPanelControl" />
                     </Border>
+
+                    <!-- 关闭态留的把手：整列收成 0 宽之后，总得有个地方把它叫回来，
+                         所以把它挂在主内容列的最右边，垂直居中，和侧栏当年的位置重合。
+                         （曾经想过用 0 宽列里的浮出按钮 —— 槽位宽 0 时子元素既画不出来也点不到，作罢） -->
+                    <Button x:Name="MascotReopenButton"
+                            Grid.Row="0" Grid.RowSpan="2" Grid.Column="0"
+                            Width="18" Height="64"
+                            Padding="0"
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center"
+                            Visibility="Collapsed"
+                            CornerRadius="9,0,0,9"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1,1,0,1"
+                            Click="OnMascotReopenClicked"
+                            AutomationProperties.Name="显示看板娘"
+                            ToolTipService.ToolTip="显示看板娘">
+                        <FontIcon Glyph="&#xE76B;" FontSize="10" Opacity="0.8" />
+                    </Button>
                 </Grid>
             </NavigationView.Content>
         </NavigationView>

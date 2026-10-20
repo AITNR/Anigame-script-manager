@@ -40,6 +40,10 @@ public partial class App : Application
         NotificationService.Initialize(MainWindow.DispatcherQueue);
         ViewModel.Initialize();
 
+        // 单实例：用户又双击了一次 exe 时，第二个进程会把信号打到这条命名事件上。
+        // 窗口若收在状态栏里，这里负责把它叫回前台（否则用户会以为程序没反应，再点几次）。
+        SingleInstance.StartListener(MainWindow.DispatcherQueue, () => MainWindow?.RestoreFromTray());
+
         // UI 线程无响应看门狗：必须在窗口建好（拿得到 HWND）之后装。
         //
         // 为什么单独一个后台线程，而不是又一个 DispatcherQueueTimer：本应用原有的

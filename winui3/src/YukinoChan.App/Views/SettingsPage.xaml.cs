@@ -48,6 +48,7 @@ public sealed partial class SettingsPage : Page
 
             ThemeBox.SelectedIndex = found;
             UpdateChannelBox.SelectedIndex = IndexOfUpdateChannel(VM.Config.UpdateChannel);
+            CloseActionBox.SelectedIndex = IndexOfCloseAction(VM.Config.Window.CloseAction);
         }
         finally
         {
@@ -390,9 +391,43 @@ public sealed partial class SettingsPage : Page
         return 0;
     }
 
-    /// <summary>切更新渠道：落盘 + 收起上一次的结果（那份结果是按旧渠道查的，留着会误导）。</summary>
-    private void OnUpdateChannelChanged(object sender, SelectionChangedEventArgs e)
+    /// <summary>在「关闭按钮」下拉项里找当前配置对应的下标（找不到回到"每次询问"）。</summary>
+    private static int IndexOfCloseAction(string? action)
     {
+        var normalized = WindowConfig.NormalizeCloseAction(action);
+
+        for (var i = 0; i < CloseDecision.Items.Count; i++)
+        {
+            if (CloseDecision.Items[i].Key == normalized)
+            {
+                return i;
+            }
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// 改「关闭按钮」行为。只落盘、不弹对话框：
+    /// 这里改的是下次关窗口时的行为，当下没有任何可见效果，弹窗只会打断人。
+    /// </summary>
+    private void OnCloseActionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_syncing || CloseActionBox.SelectedItem is not KeyValuePair<string, string> item)
+        {
+            return;
+        }
+
+        if (VM.Config.Window.CloseAction == item.Key)
+        {
+            return;
+        }
+
+        VM.SaveCloseAction(item.Key);
+    }
+
+    /// <summary>切更新渠道：落盘 + 收起上一次的结果（那份结果是按旧渠道查的，留着会误导）。</summary>
+    private void OnUpdateChannelChanged(object sender, SelectionChangedEventArgs e)    {
         if (_syncing || UpdateChannelBox.SelectedItem is not KeyValuePair<string, string> item)
         {
             return;

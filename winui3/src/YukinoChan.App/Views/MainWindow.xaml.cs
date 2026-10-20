@@ -1,6 +1,8 @@
 // -*- coding: utf-8 -*-
 using System;
+using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using Microsoft.UI;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Windowing;
@@ -9,9 +11,13 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
+using Windows.Foundation;
 using Windows.Graphics;
+using YukinoChan.Helpers;
+using YukinoChan.Models;
 using YukinoChan.Services;
 using YukinoChan.ViewModels;
+using YukinoChan.Views;
 
 namespace YukinoChan;
 
@@ -23,7 +29,51 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private const int PlacementSaveDebounceMs = 800;
 
+    /// <summary>看板娘完整面板的宽度（与 MainWindow.xaml 里 MascotColumn 的初值一致）。</summary>
+    private const double MascotExpandedWidth = 320;
+
+    /// <summary>看板娘收起成窄条后的宽度：放「状态 / 进度 / 耗时」三组数字刚好（不放立绘）。</summary>
+    private const double MascotRailWidth = 72;
+
+    /// <summary>展开 / 收起 / 关闭的宽度补间时长。</summary>
+    private const int MascotPanelAnimationMs = 180;
+
     private readonly DispatcherQueueTimer _placementSaveTimer;
+
+    // ---------------- 关闭按钮 / 状态栏 ----------------
+
+    /// <summary>状态栏图标（首次隐藏时创建；从未收进托盘的用户不会多一个图标）。</summary>
+    private TrayIcon? _tray;
+
+    /// <summary>程序自己发起的退出（自动退出 / 托盘菜单退出）。为 true 时关闭拦截一律放行。</summary>
+    private bool _exiting;
+
+    /// <summary>收到 WM_QUERYENDSESSION：系统要关机/注销，必须放行，不能拦。</summary>
+    private bool _systemShuttingDown;
+
+    /// <summary>关闭确认弹窗已经开着（连点关闭时不重复弹）。</summary>
+    private bool _closeDialogOpen;
+
+    /// <summary>窗口当前是不是"收在状态栏里"（而不是被用户最小化到任务栏）。</summary>
+    private bool _hiddenToTray;
+
+    /// <summary>隐藏前是否最大化，恢复时照原样还原。</summary>
+    private bool _wasMaximizedBeforeHide;
+
+    /// <summary>"已收进状态栏"的提示只发一次（会话内），避免每次隐藏都弹一条。</summary>
+    private bool _trayHintShown;
+
+    /// <summary>"任务跑完自动退出"的延时器（智能模式）。</summary>
+    private DispatcherQueueTimer? _autoExitTimer;
+
+    /// <summary>窗口是否收在状态栏里（供外部判断，例如单实例激活时决定要不要 Show）。</summary>
+    public bool IsHiddenToTray => _hiddenToTray;
+
+    /// <summary>正在跑的宽度补间（连点两下时要先停掉上一条）。</summary>
+    private Storyboard? _mascotWidthBoard;
+
+    /// <summary>关闭前最后一档非关闭版式：点右侧把手时还原到这里，而不是一律摊成全宽。</summary>
+    private MascotPanelMode _mascotRestoreMode = MascotPanelMode.Expanded;
 
     public MainWindow()
     {
@@ -45,6 +95,10 @@ public sealed partial class MainWindow : Window
 
         AppWindow.Changed += OnAppWindowChanged;
 
+        // 关闭按钮不再等于退出：先按策略决定"收进状态栏"还是"真退"。
+        // 注意这是**同步**事件，处理器里不能 await —— 处理方式是先 Cancel 拦下来，再去问。
+        AppWindow.Closing += OnAppWindowClosing;
+
         try
         {
             var iconPath = System.IO.Path.Combine(Services.AppPaths.AssetsDir, "icon.ico");
@@ -60,6 +114,13 @@ public sealed partial class MainWindow : Window
 
         VM.ShutdownPromptRequested += OnShutdownPromptRequested;
         VM.RequestNavigation += (_, tag) => NavigateTo(tag);
+
+        // 看板娘面板：收起 / 展开 / 关闭三个动作只改列宽和可见性，状态记在 config.json 的
+        // window.mascot_panel 里（下次启动照旧），所以关掉之后重启不会又"自己弹回来"。
+        MascotPanelControl.CollapseRequested += (_, _) => ApplyMascotPanelMode(MascotPanelMode.Collapsed, persist: true);
+        MascotPanelControl.ExpandRequested += (_, _) => ApplyMascotPanelMode(MascotPanelMode.Expanded, persist: true);
+        MascotPanelControl.CloseRequested += (_, _) => ApplyMascotPanelMode(MascotPanelMode.Closed, persist: true);
+        ApplyMascotPanelMode(ParseMascotPanelMode(VM.Config.Window.MascotPanel), persist: false, animate: false);
 
         // 会话通道（M4 / 计划书 §8.1）：「会话通道」是**父项**，下面挂子菜单 ——
         //   父项本身        = 只负责展开/收起子菜单，点击**不导航**（否则和子项重复）；
@@ -78,6 +139,14 @@ public sealed partial class MainWindow : Window
             // 关窗时把最后一次几何同步写掉：防抖定时器很可能还来不及触发
             _placementSaveTimer.Stop();
             PersistWindowPlacement();
+
+            // 托盘图标必须在进程结束前摘掉：NIM_DELETE 没跑的话，
+            // 通知区域会留一个点不动的僵尸图标，直到用户把鼠标划过去才消失。
+            _autoExitTimer?.Stop();
+            _autoExitTimer = null;
+            _tray?.Dispose();
+            _tray = null;
+
             VM.DisposeEmbedClient();
         };
 
@@ -219,6 +288,578 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    // ---------------- 关闭按钮 / 状态栏 ----------------
+
+    /// <summary>
+    /// 关闭拦截。**先 Cancel，再去问** —— <see cref="AppWindow.Closing"/> 是同步事件，
+    /// 处理器里不能 await，所以顺序只能是"先拦下来，再异步决定"。
+    ///
+    /// <para>放行的只有两种情况：程序自己发起的退出（<see cref="_exiting"/>）、
+    /// 以及系统要关机/注销（<see cref="_systemShuttingDown"/>，由托盘窗口的
+    /// <c>WM_QUERYENDSESSION</c> 置位）。后者绝不能拦 —— 拦了 Windows 会判定
+    /// "此应用阻止关机"，用户看到的是关机卡住。</para>
+    /// </summary>
+    private void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
+    {
+        if (_exiting || _systemShuttingDown)
+        {
+            return;
+        }
+
+        args.Cancel = true;
+
+        // 弹窗已经开着时用户又点了一次关闭（或连点）：直接忽略这次，别再排一个
+        if (_closeDialogOpen)
+        {
+            return;
+        }
+
+        _closeDialogOpen = true;
+        _ = HandleCloseRequestAsync();
+    }
+
+    /// <summary>
+    /// 按 <c>window.close_action</c> 决定这次关闭怎么处理。
+    ///
+    /// <para>三种策略直接执行；<c>ask</c> 才弹窗。弹窗里的勾选决定"要不要记住"以及"记成什么"，
+    /// 具体规则全在 <see cref="CloseDecision"/>（纯函数，冒烟里覆盖）。</para>
+    /// </summary>
+    private async Task HandleCloseRequestAsync()
+    {
+        try
+        {
+            var action = WindowConfig.NormalizeCloseAction(VM.Config.Window.CloseAction);
+            var outcome = CloseDecision.Decide(action, VM.IsRunning);
+
+            if (outcome is CloseOutcome.Exit or CloseOutcome.HideToTray)
+            {
+                ApplyCloseOutcome(outcome);
+                return;
+            }
+
+            var dialog = new CloseConfirmDialog(() => VM.IsRunning, VM.DescribeRunningForClose());
+            var result = await DialogHelper.ShowAsync(dialog);
+
+            // 取消（右上角叉 / Esc / 点空白）：什么都不做，窗口留着
+            if (result == ContentDialogResult.None)
+            {
+                return;
+            }
+
+            var clicked = result == ContentDialogResult.Secondary ? CloseOutcome.Exit : CloseOutcome.HideToTray;
+
+            // 勾了智能模式时按钮上写的是"当前状态下会发生的事"，这里按**点下去那一刻**的状态
+            // 再算一次，避免弹窗开着时任务刚好结束导致动作和文案不一致。
+            var actual = dialog.SmartMode
+                ? CloseDecision.Decide(WindowConfig.CloseActionAuto, VM.IsRunning)
+                : clicked;
+
+            var persist = CloseDecision.PersistFor(clicked, dialog.RememberChoice, dialog.SmartMode);
+            if (persist is not null)
+            {
+                VM.SaveCloseAction(persist);
+            }
+
+            ApplyCloseOutcome(actual);
+        }
+        finally
+        {
+            _closeDialogOpen = false;
+        }
+    }
+
+    private void ApplyCloseOutcome(CloseOutcome outcome)
+    {
+        switch (outcome)
+        {
+            case CloseOutcome.Exit:
+                RequestExit();
+                break;
+            case CloseOutcome.HideToTray:
+                HideToTray();
+                break;
+        }
+    }
+
+    /// <summary>
+    /// 创建状态栏图标（幂等）。失败返回 false，调用方必须回退到"最小化到任务栏"，
+    /// **绝不能静默隐藏窗口** —— 那样用户会以为程序被关掉了，其实进程还在跑任务，再也找不回来。
+    /// </summary>
+    private bool EnsureTray()
+    {
+        if (_tray is { IsInstalled: true })
+        {
+            return true;
+        }
+
+        var iconPath = Path.Combine(AppPaths.AssetsDir, "icon.ico");
+        var tray = new TrayIcon(iconPath);
+
+        tray.ShowRequested += (_, _) => RestoreFromTray();
+        tray.ExitRequested += (_, _) => RequestExit();
+        tray.CloseBehaviorRequested += (_, _) =>
+        {
+            RestoreFromTray();
+            NavigateTo("settings");
+        };
+        tray.StartStopRequested += (_, _) => OnTrayStartStop();
+
+        // 系统关机/注销：这个标记必须由托盘窗口的 WM_QUERYENDSESSION 置位，
+        // 因为 WinUI 的窗口没有可挂钩的 WndProc。
+        tray.SystemSessionEnding += (_, _) => _systemShuttingDown = true;
+
+        _tray = tray;
+
+        if (tray.TryInstall())
+        {
+            UpdateTrayState();
+            return true;
+        }
+
+        var reason = tray.LastError;
+        tray.Dispose();
+        _tray = null;
+
+        VM.AppendLog($"⚠ 无法创建状态栏图标，本次改为最小化到任务栏：{reason}");
+        return false;
+    }
+
+    /// <summary>同步托盘图标的提示与菜单文案（运行状态变化时调用）。</summary>
+    private void UpdateTrayState()
+    {
+        if (_tray is not { IsInstalled: true })
+        {
+            return;
+        }
+
+        var running = VM.IsRunning;
+        _tray.SetStartStopLabel(running);
+        _tray.Tip = running ? "雪乃酱 — 正在执行任务" : "雪乃酱 — 空闲";
+    }
+
+    /// <summary>收进状态栏：窗口隐藏、进程继续跑。</summary>
+    public void HideToTray()
+    {
+        if (_hiddenToTray)
+        {
+            return;
+        }
+
+        if (!EnsureTray())
+        {
+            // 托盘不可用时的退路：最小化。至少用户还能从任务栏点回来。
+            if (AppWindow.Presenter is OverlappedPresenter presenter)
+            {
+                presenter.Minimize();
+            }
+
+            return;
+        }
+
+        // 隐藏前把几何写掉：隐藏后 AppWindow 的几何不一定还能读到可信值
+        PersistWindowPlacement();
+        _wasMaximizedBeforeHide = (AppWindow.Presenter as OverlappedPresenter)?.State == OverlappedPresenterState.Maximized;
+
+        // 窗口不可见期间不要再按 1Hz 重排画面（多画面页的 LayoutSurfaces）。
+        // 隐藏时 surface 尺寸可能为 0，那一拍纯属白跑，还可能摸到失效对象 ——
+        // 与本机头号未修问题同族，这里先把它停掉。
+        SuspendSurfaceRefresh();
+
+        AppWindow.Hide();
+        _hiddenToTray = true;
+
+        UpdateTrayState();
+
+        if (!_trayHintShown)
+        {
+            _trayHintShown = true;
+            NotificationService.Show("已收进状态栏", "任务仍在继续。双击状态栏里的雪乃酱图标可以回到主界面。");
+        }
+    }
+
+    /// <summary>
+    /// 从状态栏恢复窗口。单实例激活、托盘双击、托盘菜单都会调到这里。
+    /// 恢复后必须做三件事：还原最大化、把窗口钳回可见区域（防显示器拔掉后跑到屏幕外）、
+    /// 重启画面重排。
+    /// </summary>
+    public void RestoreFromTray()
+    {
+        _autoExitTimer?.Stop();
+        _autoExitTimer = null;
+
+        if (!_hiddenToTray)
+        {
+            ActivateWindow();
+            return;
+        }
+
+        _hiddenToTray = false;
+
+        AppWindow.Show();
+
+        if (_wasMaximizedBeforeHide && AppWindow.Presenter is OverlappedPresenter presenter)
+        {
+            presenter.Maximize();
+        }
+
+        ClampWindowIntoView();
+        ResumeSurfaceRefresh();
+        ActivateWindow();
+    }
+
+    private void ActivateWindow()
+    {
+        try
+        {
+            // 窗口可能只是被最小化（不是收进托盘）：先还原，否则 Activate 只会闪一下任务栏
+            if (AppWindow.Presenter is OverlappedPresenter presenter &&
+                presenter.State == OverlappedPresenterState.Minimized)
+            {
+                presenter.Restore();
+            }
+
+            var hwnd = WindowHelper.GetHwnd(this);
+            if (hwnd != IntPtr.Zero)
+            {
+                TrayNative.SetForegroundWindow(hwnd);
+            }
+
+            Activate();
+        }
+        catch
+        {
+            // 抢焦点失败无所谓
+        }
+    }
+
+    /// <summary>把窗口钳制回某个显示器的可见区域内（复用 WindowPlacement 的"标题栏至少露出"规则）。</summary>
+    private void ClampWindowIntoView()
+    {
+        try
+        {
+            var position = AppWindow.Position;
+            var size = AppWindow.Size;
+
+            var area = DisplayArea.GetFromPoint(
+                new PointInt32(position.X, position.Y),
+                DisplayAreaFallback.Primary);
+
+            var work = area?.WorkArea ?? default;
+            if (work.Width <= 0 || work.Height <= 0)
+            {
+                return;
+            }
+
+            var placement = WindowPlacement.Resolve(
+                position.X,
+                position.Y,
+                size.Width,
+                size.Height,
+                new WindowPlacement.Bounds(work.X, work.Y, work.Width, work.Height));
+
+            if (placement.X != position.X || placement.Y != position.Y ||
+                placement.Width != size.Width || placement.Height != size.Height)
+            {
+                AppWindow.MoveAndResize(new RectInt32(placement.X, placement.Y, placement.Width, placement.Height));
+            }
+        }
+        catch
+        {
+            // 几何修正失败不该阻断恢复窗口
+        }
+    }
+
+    private void SuspendSurfaceRefresh()
+    {
+        try
+        {
+            if (ContentFrame.Content is RdpMultiViewPage page)
+            {
+                page.SuspendRefresh();
+            }
+        }
+        catch
+        {
+            // 停不下重排也得继续隐藏窗口
+        }
+    }
+
+    private void ResumeSurfaceRefresh()
+    {
+        try
+        {
+            if (ContentFrame.Content is RdpMultiViewPage page)
+            {
+                page.ResumeRefresh();
+            }
+        }
+        catch
+        {
+            // 重排失败不该让"恢复窗口"这一步整个失败
+        }
+    }
+
+    /// <summary>
+    /// 程序发起退出的**唯一出口**。
+    ///
+    /// <para>为什么必须统一：关闭拦截装上之后，任何一处直接 <c>Close()</c> 都会被自己的弹窗挡住 ——
+    /// 典型受害者是"任务完成后自动退出"（否则用户每次都会看到一个莫名其妙的"关闭雪乃酱？"）。
+    /// 这里先置 <see cref="_exiting"/>，让 <see cref="OnAppWindowClosing"/> 直接放行。</para>
+    /// </summary>
+    public void RequestExit()
+    {
+        if (_exiting)
+        {
+            return;
+        }
+
+        _exiting = true;
+
+        _autoExitTimer?.Stop();
+        _autoExitTimer = null;
+
+        try
+        {
+            PersistWindowPlacement();
+        }
+        catch
+        {
+            // 几何记不住也得退
+        }
+
+        try
+        {
+            _tray?.Dispose();
+        }
+        catch
+        {
+            // 图标摘不掉也得退（进程结束时系统会清）
+        }
+
+        _tray = null;
+
+        try
+        {
+            Close();
+        }
+        catch
+        {
+            Environment.Exit(0);
+        }
+    }
+
+    /// <summary>托盘菜单里的「开始执行 / 停止执行」。开始时把窗口叫回来，免得用户在看不见界面时误以为没反应。</summary>
+    private void OnTrayStartStop()
+    {
+        var running = VM.IsRunning;
+
+        RestoreFromTray();
+
+        if (running)
+        {
+            VM.Stop();
+        }
+        else
+        {
+            VM.Start();
+        }
+
+        UpdateTrayState();
+    }
+
+    /// <summary>
+    /// 智能模式：任务跑完（<see cref="MainViewModel.IsRunning"/> 由 true→false）且窗口仍在状态栏里，
+    /// 延迟几秒后退出。延迟是为了让"本轮结束"的汇总通知先弹出来。
+    ///
+    /// <para>三个取消条件缺一不可：窗口已被叫回来（用户正在看）、又开始跑了、策略被改成别的。
+    /// 少一个都会出现"用户盯着界面，窗口自己关了"。</para>
+    /// </summary>
+    private void ScheduleAutoExit()
+    {
+        if (_autoExitTimer is not null)
+        {
+            return;
+        }
+
+        var timer = DispatcherQueue.CreateTimer();
+        timer.Interval = TimeSpan.FromSeconds(3);
+        timer.IsRepeating = false;
+
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            _autoExitTimer = null;
+
+            if (_exiting || !_hiddenToTray || VM.IsRunning)
+            {
+                return;
+            }
+
+            if (WindowConfig.NormalizeCloseAction(VM.Config.Window.CloseAction) != WindowConfig.CloseActionAuto)
+            {
+                return;
+            }
+
+            NotificationService.Show("雪乃酱", "任务已结束，程序即将退出。");
+            RequestExit();
+        };
+
+        _autoExitTimer = timer;
+        timer.Start();
+    }
+
+    // ---------------- 看板娘面板：展开 / 收起 / 关闭 ----------------
+
+    private static MascotPanelMode ParseMascotPanelMode(string? value)
+        => WindowConfig.NormalizeMascotPanel(value) switch
+        {
+            WindowConfig.MascotPanelCollapsed => MascotPanelMode.Collapsed,
+            WindowConfig.MascotPanelClosed => MascotPanelMode.Closed,
+            _ => MascotPanelMode.Expanded,
+        };
+
+    private static string ToMascotPanelConfig(MascotPanelMode mode) => mode switch
+    {
+        MascotPanelMode.Collapsed => WindowConfig.MascotPanelCollapsed,
+        MascotPanelMode.Closed => WindowConfig.MascotPanelClosed,
+        _ => WindowConfig.MascotPanelExpanded,
+    };
+
+    /// <summary>
+    /// 切换看板娘版式：320（完整）/ 72（窄条）/ 0（关闭）。
+    ///
+    /// <para>动画是「MascotHost.Width 补间 + Auto 列宽跟随」。宽度属于布局属性，所以是依赖动画
+    /// （每帧重排），但重排的只有面板自己和内容区的列宽 —— 内嵌 RDP 画面的交换链是按**远端分辨率**
+    /// 建的（见 `RdpD3DRenderer` / `OnDesktopResized`），XAML 变宽只是重新摆位置，不重建缓冲区，
+    /// 所以这条动画不会去碰原生渲染那套资源。</para>
+    ///
+    /// <para>内容一律在动画**开始前**就切到目标版式，再靠 `SizeChanged` 里同步的 Clip 裁成
+    /// 「抽屉拉开」的样子；否则展开时那套按 320 宽排版的内容会先溢出到左边的页面上。</para>
+    /// </summary>
+    private void ApplyMascotPanelMode(MascotPanelMode mode, bool persist, bool animate = true)
+    {
+        if (mode != MascotPanelMode.Closed)
+        {
+            _mascotRestoreMode = mode;
+        }
+
+        var target = mode switch
+        {
+            MascotPanelMode.Expanded => MascotExpandedWidth,
+            MascotPanelMode.Collapsed => MascotRailWidth,
+            _ => 0d,
+        };
+
+        // 内容先切：展开时是「320 的版式被窄窗口裁着慢慢露出来」，收起时是「窄条在宽面板里居中」，
+        // 两个方向都不会出现"先按旧宽度排版、再跳一下"的观感。
+        MascotPanelControl.ApplyMode(mode);
+        MascotReopenButton.Visibility = Visibility.Collapsed;
+
+        if (mode == MascotPanelMode.Closed)
+        {
+            // 关闭：先滑到 0，滑完再把 Border 抽掉、露出右侧把手
+            AnimateMascotWidth(target, animate, () =>
+            {
+                MascotHost.Visibility = Visibility.Collapsed;
+                MascotReopenButton.Visibility = Visibility.Visible;
+            });
+        }
+        else
+        {
+            // 从关闭态回来时 Border 是 Collapsed，先摆成 0 宽再长出来
+            if (MascotHost.Visibility != Visibility.Visible)
+            {
+                MascotHost.Width = 0;
+                MascotHost.Visibility = Visibility.Visible;
+            }
+
+            AnimateMascotWidth(target, animate);
+        }
+
+        if (persist)
+        {
+            VM.SaveMascotPanelState(ToMascotPanelConfig(mode));
+        }
+    }
+
+    /// <summary>
+    /// 把 <see cref="MascotHost"/> 的宽度补间到 <paramref name="to"/>。
+    ///
+    /// <para>`From` 取的是 **ActualWidth**（当前视觉宽度）而不是 <c>Width</c>（基准值）：
+    /// 连续点两下时，上一次动画可能正跑在中途，用基准值会看到"先跳回去、再走一遍"。</para>
+    /// </summary>
+    private void AnimateMascotWidth(double to, bool animate, Action? onCompleted = null)
+    {
+        _mascotWidthBoard?.Stop();
+        _mascotWidthBoard = null;
+
+        // 构造期（还没进可视树）或明确不要动画：直接落位
+        if (!animate || !MascotHost.IsLoaded)
+        {
+            MascotHost.Width = to;
+            onCompleted?.Invoke();
+            return;
+        }
+
+        var from = MascotHost.ActualWidth;
+        if (Math.Abs(from - to) < 0.5)
+        {
+            MascotHost.Width = to;
+            onCompleted?.Invoke();
+            return;
+        }
+
+        var anim = new DoubleAnimation
+        {
+            From = from,
+            To = to,
+            Duration = new Duration(TimeSpan.FromMilliseconds(MascotPanelAnimationMs)),
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+
+            // 宽度是布局属性：不打开这个开关，整段动画会被静默跳过
+            EnableDependentAnimation = true,
+        };
+
+        Storyboard.SetTarget(anim, MascotHost);
+        Storyboard.SetTargetProperty(anim, "Width");
+
+        var board = new Storyboard();
+        board.Children.Add(anim);
+
+        // HoldEnd 会把动画值钉在 Width 上（基准值仍是旧的），之后谁再设 Width 都不生效 ——
+        // 收尾先 Stop 再把基准值落成目标值
+        board.Completed += (_, _) =>
+        {
+            board.Stop();
+            MascotHost.Width = to;
+
+            if (ReferenceEquals(_mascotWidthBoard, board))
+            {
+                _mascotWidthBoard = null;
+            }
+
+            onCompleted?.Invoke();
+        };
+
+        _mascotWidthBoard = board;
+        board.Begin();
+    }
+
+    /// <summary>
+    /// 宽度每变一帧就同步一次裁剪区。
+    /// 动画途中面板的宽度和"列宽该有的样子"并不一致，不裁的话里面那套版式会画到旁边的页面上。
+    /// </summary>
+    private void OnMascotHostSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        MascotHost.Clip = new RectangleGeometry
+        {
+            Rect = new Rect(0, 0, e.NewSize.Width, e.NewSize.Height),
+        };
+    }
+
+    private void OnMascotReopenClicked(object sender, RoutedEventArgs e)
+        => ApplyMascotPanelMode(_mascotRestoreMode, persist: true);
+
     private string _currentTag = string.Empty;
 
     /// <summary>左侧菜单里各条通道项用的 tag 前缀（M4）。</summary>
@@ -249,6 +890,28 @@ public sealed partial class MainWindow : Window
         if (e.PropertyName == nameof(MainViewModel.Channels))
         {
             RebuildChannelMenuItems();
+            return;
+        }
+
+        if (e.PropertyName == nameof(MainViewModel.IsRunning))
+        {
+            // IsRunning 理论上由 UI 线程改，但这条链上还接着托盘图标与计时器，
+            // 一旦将来有人从后台线程改它，碰控件/建计时器都会立刻炸 —— 先回 UI 线程再说。
+            if (!DispatcherQueue.HasThreadAccess)
+            {
+                DispatcherQueue.TryEnqueue(() => OnViewModelPropertyChanged(sender, e));
+                return;
+            }
+
+            UpdateTrayState();
+
+            // 智能模式：躲进状态栏之后任务跑完了 → 到点自动退出。
+            // 只有"仍然躲着"才算数；用户中途把窗口叫回来就不再自动关（见 ScheduleAutoExit）。
+            if (_hiddenToTray && !VM.IsRunning &&
+                WindowConfig.NormalizeCloseAction(VM.Config.Window.CloseAction) == WindowConfig.CloseActionAuto)
+            {
+                ScheduleAutoExit();
+            }
         }
     }
 
@@ -576,6 +1239,10 @@ public sealed partial class MainWindow : Window
 
     private async void OnShutdownPromptRequested(object? sender, int delaySeconds)
     {
+        // 窗口收在状态栏里时，这个倒计时对话框是**看不见**的（XamlRoot 还在，但窗口不可见），
+        // 用户只会看到机器到点直接关机。所以先把窗口叫回来。
+        RestoreFromTray();
+
         var dialog = new Views.ShutdownCountdownDialog(delaySeconds)
         {
             XamlRoot = Content.XamlRoot,

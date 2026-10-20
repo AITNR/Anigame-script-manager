@@ -6,76 +6,156 @@
     xmlns:vm="using:YukinoChan.ViewModels"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">
 
-    <Grid Padding="16,14">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
-        </Grid.RowDefinitions>
-
-        <!-- 当前状态 -->
-        <Grid Grid.Row="0" Margin="0,0,0,12">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="52" />
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="52" />
-                <ColumnDefinition Width="*" />
-            </Grid.ColumnDefinitions>
+    <!--
+        两套版式叠在同一格子里，由 MascotPanel.ApplyMode() 切换可见性：
+          · ExpandedRoot = 完整面板（状态 / 气泡 / 立绘）
+          · RailRoot     = 收起后的窄条，只留关键数字（状态 / 进度 / 耗时）+ 小立绘
+        列宽由 MainWindow 负责（320 / 72 / 0），本控件只切内容，不管自己的外宽。
+    -->
+    <Grid>
+        <!-- ===================== 展开态 ===================== -->
+        <Grid x:Name="ExpandedRoot" Padding="16,10,10,14">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 
-            <TextBlock Grid.Row="0" Grid.Column="0" Text="状态" Style="{StaticResource StatusLabelStyle}" />
-            <TextBlock Grid.Row="0" Grid.Column="1" Text="{x:Bind VM.PanelStatusText, Mode=OneWay}" Style="{StaticResource StatusValueStyle}" />
-            <TextBlock Grid.Row="0" Grid.Column="2" Text="耗时" Style="{StaticResource StatusLabelStyle}" />
-            <TextBlock Grid.Row="0" Grid.Column="3" Text="{x:Bind VM.PanelElapsedText, Mode=OneWay}" Style="{StaticResource StatusValueStyle}" />
+            <!-- 标题行：右侧两个小按钮 —— 「»」收成窄条、「✕」整个关掉 -->
+            <Grid Grid.Row="0" Margin="0,0,0,12">
+                <TextBlock Text="看板娘"
+                           FontSize="12"
+                           Opacity="0.6"
+                           VerticalAlignment="Center" />
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="2">
+                    <Button Style="{StaticResource PanelIconButtonStyle}"
+                            Click="OnCollapseClicked"
+                            AutomationProperties.Name="收起看板娘"
+                            ToolTipService.ToolTip="收起到侧栏（只留关键信息）">
+                        <FontIcon Glyph="&#xE76C;" FontSize="12" />
+                    </Button>
+                    <Button Style="{StaticResource PanelIconButtonStyle}"
+                            Click="OnCloseClicked"
+                            AutomationProperties.Name="关闭看板娘"
+                            ToolTipService.ToolTip="关闭看板娘（右侧留一个把手可再打开）">
+                        <FontIcon Glyph="&#xE711;" FontSize="11" />
+                    </Button>
+                </StackPanel>
+            </Grid>
 
-            <TextBlock Grid.Row="1" Grid.Column="0" Text="当前" Style="{StaticResource StatusLabelStyle}" />
-            <TextBlock Grid.Row="1" Grid.Column="1" Margin="0,4,0,0" Text="{x:Bind VM.PanelCurrentTask, Mode=OneWay}" Style="{StaticResource StatusValueStyle}" />
-            <TextBlock Grid.Row="1" Grid.Column="2" Text="进度" Style="{StaticResource StatusLabelStyle}" />
-            <TextBlock Grid.Row="1" Grid.Column="3" Margin="0,4,0,0" Text="{x:Bind VM.PanelProgressText, Mode=OneWay}" Style="{StaticResource StatusValueStyle}" />
+            <!-- 当前状态 -->
+            <Grid Grid.Row="1" Margin="0,0,6,12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="52" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="52" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="状态" Style="{StaticResource StatusLabelStyle}" />
+                <TextBlock Grid.Row="0" Grid.Column="1" Text="{x:Bind VM.PanelStatusText, Mode=OneWay}" Style="{StaticResource StatusValueStyle}" />
+                <TextBlock Grid.Row="0" Grid.Column="2" Text="耗时" Style="{StaticResource StatusLabelStyle}" />
+                <TextBlock Grid.Row="0" Grid.Column="3" Text="{x:Bind VM.PanelElapsedText, Mode=OneWay}" Style="{StaticResource StatusValueStyle}" />
+
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="当前" Style="{StaticResource StatusLabelStyle}" />
+                <TextBlock Grid.Row="1" Grid.Column="1" Margin="0,4,0,0" Text="{x:Bind VM.PanelCurrentTask, Mode=OneWay}" Style="{StaticResource StatusValueStyle}" />
+                <TextBlock Grid.Row="1" Grid.Column="2" Text="进度" Style="{StaticResource StatusLabelStyle}" />
+                <TextBlock Grid.Row="1" Grid.Column="3" Margin="0,4,0,0" Text="{x:Bind VM.PanelProgressText, Mode=OneWay}" Style="{StaticResource StatusValueStyle}" />
+            </Grid>
+
+            <!-- 发言气泡（引导态可点击切换下一条） -->
+            <Button Grid.Row="2"
+                    Padding="0"
+                    Margin="0,0,6,0"
+                    HorizontalAlignment="Stretch"
+                    HorizontalContentAlignment="Stretch"
+                    Background="Transparent"
+                    BorderThickness="0"
+                    Click="OnBubbleClicked">
+                <Border Style="{StaticResource SpeechBubbleStyle}"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}">
+                    <TextBlock Text="{x:Bind VM.BubbleText, Mode=OneWay}"
+                               Style="{StaticResource SpeechBubbleTextStyle}" />
+                </Border>
+            </Button>
+
+            <!-- 看板娘立绘 -->
+            <Grid Grid.Row="3" Margin="0,16,6,0">
+                <Image Source="{x:Bind VM.MascotImage, Mode=OneWay}"
+                       Stretch="Uniform"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Bottom" />
+
+                <!-- 无素材时的占位提示（与 Python 版一致） -->
+                <Border x:Name="MascotPlaceholder"
+                        Padding="12"
+                        CornerRadius="10"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                    <TextBlock TextWrapping="Wrap" FontSize="12" Opacity="0.75" TextAlignment="Center">
+                        看板娘素材预留
+                        <LineBreak />
+                        assets/mascot/
+                        <LineBreak /><LineBreak />
+                        推荐：idle×3 / rest×3 / error×2 / work×2
+                        <LineBreak />
+                        例如 assets/mascot/idle/idle_01.png
+                    </TextBlock>
+                </Border>
+            </Grid>
         </Grid>
 
-        <!-- 发言气泡（引导态可点击切换下一条） -->
-        <Button Grid.Row="1"
-                Padding="0"
-                HorizontalAlignment="Stretch"
-                HorizontalContentAlignment="Stretch"
-                Background="Transparent"
-                BorderThickness="0"
-                Click="OnBubbleClicked">
-            <Border Style="{StaticResource SpeechBubbleStyle}"
-                    Background="{ThemeResource AccentFillColorDefaultBrush}">
-                <TextBlock Text="{x:Bind VM.BubbleText, Mode=OneWay}"
-                           Style="{StaticResource SpeechBubbleTextStyle}" />
-            </Border>
-        </Button>
+        <!-- ===================== 收起态（窄条） ===================== -->
+        <!-- 只留关键数字：立绘、气泡一概不放（用户明确：收起后不要再看板娘本体） -->
+        <Grid x:Name="RailRoot" Visibility="Collapsed">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
 
-        <!-- 看板娘立绘 -->
-        <Grid Grid.Row="2" Margin="0,16,0,0">
-            <Image Source="{x:Bind VM.MascotImage, Mode=OneWay}"
-                   Stretch="Uniform"
-                   HorizontalAlignment="Center"
-                   VerticalAlignment="Bottom" />
+            <StackPanel Grid.Row="0" Margin="0,8,0,0" Spacing="2" HorizontalAlignment="Center">
+                <Button Style="{StaticResource PanelIconButtonStyle}"
+                        Click="OnExpandClicked"
+                        AutomationProperties.Name="展开看板娘"
+                        ToolTipService.ToolTip="展开看板娘">
+                    <FontIcon Glyph="&#xE76B;" FontSize="12" />
+                </Button>
+                <Button Style="{StaticResource PanelIconButtonStyle}"
+                        Click="OnCloseClicked"
+                        AutomationProperties.Name="关闭看板娘"
+                        ToolTipService.ToolTip="关闭看板娘（右侧留一个把手可再打开）">
+                    <FontIcon Glyph="&#xE711;" FontSize="11" />
+                </Button>
+            </StackPanel>
 
-            <!-- 无素材时的占位提示（与 Python 版一致） -->
-            <Border x:Name="MascotPlaceholder"
-                    Padding="12"
-                    CornerRadius="10"
-                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                    BorderThickness="1"
-                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-                <TextBlock TextWrapping="Wrap" FontSize="12" Opacity="0.75" TextAlignment="Center">
-                    看板娘素材预留
-                    <LineBreak />
-                    assets/mascot/
-                    <LineBreak /><LineBreak />
-                    推荐：idle×3 / rest×3 / error×2 / work×2
-                    <LineBreak />
-                    例如 assets/mascot/idle/idle_01.png
-                </TextBlock>
-            </Border>
+            <!-- 关键信息：只留三组数字。字数多的（「执行中（3 块并行）」/「⚠ 代理已失联…」）
+                 由 MaxLines + 省略号兜住，不会把窄条撑高。 -->
+            <StackPanel Grid.Row="1" Margin="4,16,4,0" Spacing="14">
+                <StackPanel Spacing="2">
+                    <TextBlock Text="状态" Style="{StaticResource RailLabelStyle}" />
+                    <TextBlock Text="{x:Bind VM.PanelStatusText, Mode=OneWay}"
+                               Style="{StaticResource RailValueStyle}"
+                               MaxLines="3" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="进度" Style="{StaticResource RailLabelStyle}" />
+                    <TextBlock Text="{x:Bind VM.PanelProgressText, Mode=OneWay}"
+                               Style="{StaticResource RailValueStyle}"
+                               MaxLines="2" />
+                </StackPanel>
+                <StackPanel Spacing="2">
+                    <TextBlock Text="耗时" Style="{StaticResource RailLabelStyle}" />
+                    <TextBlock Text="{x:Bind VM.PanelElapsedText, Mode=OneWay}"
+                               Style="{StaticResource RailValueStyle}"
+                               MaxLines="1" />
+                </StackPanel>
+            </StackPanel>
         </Grid>
     </Grid>
 </UserControl>
