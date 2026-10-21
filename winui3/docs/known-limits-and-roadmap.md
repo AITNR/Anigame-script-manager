@@ -5,6 +5,13 @@
 
 ## 已知限制
 
+- **家庭版检测是硬阻断，与设计意图不符**：`RdpSessionService.DescribeEdition()` 把「检测到家庭版」写进 `Readiness.Problems`，
+  而 `CanConnect` 要求 `Problems.Count == 0` → 预检直接判不可连，连「连接」按钮都过不去。
+  方法上方的注释写的是「给出提示而不是硬阻断」，两者矛盾。
+  影响：已经用 RDP Wrapper 一类工具给家庭版开好多会话的用户，也会被这一条拦住（2026-10-21 发现）。
+  建议修法：家庭版降级为独立的 `Warnings` 集合（不参与 `CanConnect`），真正的判据改成**探测 3389 是否在监听**
+  （`GetExtendedTcpTable` 或连一次 `127.0.0.1:3389`）—— 装了 Wrapper 的家庭版会监听，没开远程桌面的专业版不会，比读 SKU 可靠。
+
 - **真机 GUI 验证尚未全覆盖**：构建环境在沙箱中无法启动 GUI，自动化部分靠 `dotnet build` + `_smoke` 源码级冒烟（770+ 项断言）；
   多通道并行、内嵌画面、多画面同屏等交互需要在真机上逐项验收（清单见计划书 §10）。
 - **无 MSIX 打包**：unpackaged 模式直接跑 exe，如果需要商店分发要另建打包工程。
@@ -28,7 +35,9 @@
 
 1. **真机验收多会话通道**：按计划书 §10 的清单逐项过（并行、停止、失联隔离、多画面、并发上限），
    重点是「系统是否支持多会话」与「多通道能否真正同时推进」。
-2. 补齐 `docs/images/` 下 WinUI 3 版截图（尤其是会话通道页与多画面网格）。
+2. ~~补齐 `docs/images/` 下 WinUI 3 版截图（尤其是会话通道页与多画面网格）。~~
+   2026-10-21 已补：`screenshot-multiview.jpg` / `screenshot-channels.jpg` / `screenshot-tasks.png`，
+   并在仓库根 `README.md` 中按「通道管理 → 任务执行 → 多画面」串成主线。
 3. 视情况加 MSIX 打包工程（`WindowsPackageType=MSIX`）。
 4. 待办清理：桥的 `command.json` / `status.json` 改 snake_case；设置页主题切换重复弹对话框的异常；
    设置页加「重置窗口位置」；无人使用的 P/Invoke 清理。
