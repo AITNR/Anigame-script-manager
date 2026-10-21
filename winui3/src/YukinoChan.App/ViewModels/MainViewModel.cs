@@ -1915,7 +1915,7 @@ public sealed class MainViewModel : ObservableObject
             "logs" => "运行记录会放在这里，出问题时再慢慢看就好。",
             // 「会话通道」父项（= 多画面）与其子项「多画面」：tag 分别是 channels / multiview。
             // 多画面从通道页搬到了独立页面（docs/channel-menu-multiview-plan.md）。
-            "channels" or "multiview" => "这里能一次看到全部通道的画面，双击某一格还能把它弹成独立窗口。",
+            "channels" or "multiview" => "这里能一次看到全部通道的画面，每一格都能单独弹成独立窗口。",
             // 「通道管理…」子项（配置 / 凭据 / 部署代理 / 预检）；旧键 "rdp" 留着兼容。
             "channel-mgmt" or "rdp" => "每条通道就是一个目标账户的专属跑道，在这里配好就能并行跑任务了。",
             "channel" => "这条通道的画面和进度都在这里，直接点画面就能操作远端。",

@@ -21,7 +21,7 @@ namespace YukinoChan.Views;
 /// <item>网格 2×2、每页最多 4 格（4 路同时渲染是有意的上限），>4 分页；</item>
 /// <item>列出的通道 = 配置里启用中的 + 本轮在跑的（见 <see cref="MainViewModel.SurfaceGridChannelIds"/>），
 ///       没连接的格子会给「连接到这条通道」，所以不跑任务时也能先看画面；</item>
-/// <item>每格可「弹出窗口」到独立窗口，双击画面同样是弹窗；</item>
+/// <item>每格可「弹出窗口」到独立窗口，画面里按 F11 同样是弹窗；</item>
 /// <item><b>本页不给全屏</b>：全屏会盖掉别的路 —— 要放大某一路请进它自己的通道页。</item>
 /// </list>
 /// </summary>
@@ -50,7 +50,7 @@ public sealed partial class RdpMultiViewPage : Page
             // 同通道页：把画面诊断日志接进运行日志，否则多画面下看不出渲染路径
             cell.View.DiagnosticLog = App.ViewModel.AppendLog;
             cell.PopOutRequested += OnCellPopOut;
-            // 双击 / F11 = 弹成独立窗口（多画面下没有全屏这一说）
+            // F11 = 弹成独立窗口（多画面下没有全屏这一说）
             cell.FullScreenRequested += OnCellPopOut;
             cell.DisconnectRequested += OnCellDisconnect;
             cell.ConnectRequested += OnCellConnect;
@@ -187,7 +187,7 @@ public sealed partial class RdpMultiViewPage : Page
         }
 
         MultiViewHintText.Text = VM.IsEmbeddedMode
-            ? "这里并列显示全部通道的画面；双击某一格可把它弹成独立窗口，想单独放大请看左侧菜单里它自己的那一项。"
+            ? "这里并列显示全部通道的画面；每格右上角可把它弹成独立窗口，想单独放大请看左侧菜单里它自己的那一项。"
             : "当前客户端模式是「独立窗口（mstsc）」，画面在系统自带的远程桌面窗口里；要在这里并排看画面，请到「通道管理…」把连接方式改成「内嵌」。";
     }
 

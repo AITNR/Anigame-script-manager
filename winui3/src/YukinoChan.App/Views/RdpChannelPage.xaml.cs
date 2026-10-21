@@ -115,7 +115,7 @@ public sealed partial class RdpChannelPage : Page, System.ComponentModel.INotify
         // 出撕裂时根本分不清走的是 D3D 还是软渲染回退。
         Cell0.View.DiagnosticLog = App.ViewModel.AppendLog;
 
-        // 画面上的双击 / F11 也走同一条全屏路径（浮层按钮只是显式入口）
+        // 画面上的 F11 也走同一条全屏路径（浮层按钮只是显式入口）
         _fullScreen = new RdpFullScreenCoordinator(Cell0.View, App.ViewModel.AppendLog, OnFullScreenStateChanged);
 
         // 本页只有一格，全屏按钮常开
@@ -301,7 +301,7 @@ public sealed partial class RdpChannelPage : Page, System.ComponentModel.INotify
         RaiseAllChanged();
     }
 
-    /// <summary>「全屏」：新窗口接管本通道的内嵌连接（键盘一并接管，F11 / 双击画面退出）。</summary>
+    /// <summary>「全屏」：新窗口接管本通道的内嵌连接（键盘一并接管，F11 退出）。</summary>
     private void OnCellFullScreen(object? sender, string channelId) => _fullScreen?.Toggle();
 
     /// <summary>「弹出窗口」：把这路画面交到一个普通独立窗口，用户自己摆放。</summary>

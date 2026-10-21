@@ -117,7 +117,7 @@
                             Click="OnFullScreenClicked"
                             Width="34" Height="30"
                             Padding="0"
-                            ToolTipService.ToolTip="全屏显示这一路画面（键盘一并接管；F11 或双击画面退出）">
+                            ToolTipService.ToolTip="全屏显示这一路画面（键盘一并接管；F11 退出）">
                         <Grid>
                             <!-- 未全屏（初值可见）：放大箭头 -->
                             <FontIcon x:Name="FullScreenIconEnter"

@@ -173,7 +173,7 @@ namespace YukinoChan.Views
         /// <summary>会话断开（含原生 reason 与详情）。</summary>
         public event EventHandler<(int Session, int Reason, string Detail)>? SessionDisconnected;
 
-        /// <summary>全屏切换请求（双击画面或 F11）。由页面/宿主决定是否进入全屏。</summary>
+        /// <summary>全屏切换请求（F11）。由页面/宿主决定是否进入全屏。</summary>
         public event EventHandler? FullScreenToggleRequested;
 
         /// <summary>诊断日志出口（页面注入 VM.AppendLog）。</summary>
@@ -200,8 +200,8 @@ namespace YukinoChan.Views
             KeyDown += OnKeyDown;
             KeyUp += OnKeyUp;
 
-            // ---- 全屏（M3）：双击画面触发 ----
-            DoubleTapped += (_, _) => FullScreenToggleRequested?.Invoke(this, EventArgs.Empty);
+            // 画面上的双击**不做**任何本地动作：双击要原样转投远端（双击图标、选中文字），
+            // 全屏只留「F11 + 全屏按钮」两个显式入口。
         }
 
         /// <summary>连接目标。返回 false 表示发起失败（错误经状态文本显示）。</summary>

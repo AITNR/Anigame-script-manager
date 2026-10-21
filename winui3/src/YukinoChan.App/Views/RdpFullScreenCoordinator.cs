@@ -10,7 +10,7 @@ namespace YukinoChan.Views;
 ///
 /// 抽成独立类的原因：这段逻辑**与画面控件挂在哪个页面无关**，只依赖一个 <see cref="RdpView"/> 宿主。
 /// 实际有两处在用 —— 通道页（正常路径）与管理页（<c>--embed-vm</c> 自检路径）。
-/// 原先它内联在管理页里，导致正常模式下用户在通道页点不到全屏（双击/VK_F11 都无处响应）。
+/// 原先它内联在管理页里，导致正常模式下用户在通道页点不到全屏（VK_F11 无处响应）。
 ///
 /// 纪律（沿用原 RdpPage 在真机上验证过的做法）：
 /// <list type="bullet">
@@ -129,7 +129,7 @@ internal sealed class RdpFullScreenCoordinator : IDisposable
 
         IsFullScreen = true;
         _onStateChanged?.Invoke(true);
-        _log("内嵌画面进入全屏，键盘接管已启用（F11 退出，双击画面亦可切换）");
+        _log("内嵌画面进入全屏，键盘接管已启用（F11 退出）");
     }
 
     public void Exit()
@@ -159,7 +159,7 @@ internal sealed class RdpFullScreenCoordinator : IDisposable
 
     private void OnHostToggleRequested(object? sender, EventArgs e) => Toggle();
 
-    /// <summary>全屏窗口里的画面也支持双击 / F11 切换 —— 一律以"退出全屏"处理。</summary>
+    /// <summary>全屏窗口里的画面按 F11 收掉 —— 一律以"退出全屏"处理。</summary>
     private void OnFullScreenViewToggleRequested(object? sender, EventArgs e) => Exit();
 
     /// <summary>

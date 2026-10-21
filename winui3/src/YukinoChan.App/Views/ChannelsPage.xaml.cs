@@ -37,7 +37,7 @@ public sealed partial class ChannelsPage : Page
         // 画面控件诊断直接进运行日志（便于无人值守验收）
         EmbedView.DiagnosticLog = VM.AppendLog;
 
-        // 画面上的双击 / 快捷键请求全屏。全屏编排收在共用类里 ——
+        // 画面上的 F11 请求全屏。全屏编排收在共用类里 ——
         // 通道页用的是同一份（正常模式下画面在那边，全屏也必须从那边进得去）。
         _fullScreen = new RdpFullScreenCoordinator(EmbedView, VM.AppendLog, OnFullScreenStateChanged);
 
@@ -381,7 +381,7 @@ public sealed partial class ChannelsPage : Page
     {
         EmbedFullScreenButton.Content = active ? "退出全屏" : "全屏";
         EmbedStatusText.Text = active
-            ? "全屏中：键盘全部转投远端（F11 或双击画面退出）"
+            ? "全屏中：键盘全部转投远端（F11 退出）"
             : "已退出全屏。";
     }
 }

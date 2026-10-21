@@ -24,7 +24,7 @@ public sealed partial class RdpSurfaceCell : UserControl
     {
         InitializeComponent();
 
-        // 画面上的双击 / F11 全屏请求 —— 带上本格通道 id，页面才知道该全屏哪一路
+        // 画面上的 F11 全屏请求 —— 带上本格通道 id，页面才知道该全屏哪一路
         SurfaceView.FullScreenToggleRequested += (_, _) => FullScreenRequested?.Invoke(this, _channelId);
 
         // 锁定状态由画面控件自己维护（它才知道有没有卡住的键要放）；
@@ -44,7 +44,7 @@ public sealed partial class RdpSurfaceCell : UserControl
     /// <summary>「弹出独立窗口」被点击。</summary>
     public event EventHandler<string>? PopOutRequested;
 
-    /// <summary>全屏被请求（浮层按钮 / 双击画面 / F11）。</summary>
+    /// <summary>全屏被请求（浮层按钮 / F11）。</summary>
     public event EventHandler<string>? FullScreenRequested;
 
     /// <summary>「断开」被点击。</summary>
@@ -69,8 +69,8 @@ public sealed partial class RdpSurfaceCell : UserControl
         ToolTipService.SetToolTip(
             FullScreenButton,
             active
-                ? "退出全屏：回到页面里的这一格（F11 或双击画面亦可退出）"
-                : "全屏显示这一路画面（键盘一并接管；F11 或双击画面退出）");
+                ? "退出全屏：回到页面里的这一格（F11 亦可退出）"
+                : "全屏显示这一路画面（键盘一并接管；F11 退出）");
     }
 
     private static MainViewModel VM => App.ViewModel;
