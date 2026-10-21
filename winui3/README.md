@@ -100,6 +100,16 @@ cmake --build winui3/src/YukinoChan.RdpNative/build --config Release
 > 开发时对着的是 **FreeRDP 3.32.0**（对应 vcpkg 提交 `10541e31`）。CI 钉的就是这个提交；
 > 换版本要重新真机验收内嵌画面。
 
+**换 vcpkg / 换 FreeRDP 版本后，还要重跑一次许可证冻结**：
+
+```bash
+python winui3/tools/gen_third_party_notices.py --export-licenses
+```
+
+`winui3/third_party/licenses/` 里的许可证原文与 `sources.json` 里的版本号都取自这次导出的 vcpkg。
+不重跑的话，发布包里声明的仍是旧版本 —— 正文本身不会变（Apache-2.0 / zlib / MIT 的条款是固定的），
+但版本号会滞后。CI 原生层命中缓存时机器上没有 vcpkg，正是靠这份冻结副本出包，所以它不能缺。
+
 ### GitHub Actions：自动编译 / 测试版 / 正式版
 
 `.github/workflows/` 下四个工作流：
@@ -212,7 +222,9 @@ dotnet build winui3/src/YukinoChan.App/YukinoChan.App.csproj -c Release -p:Platf
 dotnet publish winui3/src/YukinoChan.App/YukinoChan.App.csproj -c Release -p:Platform=x64 \
   -r win-x64 --self-contained true -o ci-publish
 
-# 3) 打包 + 自检（缺 .pri / XBF / FreeRDP 运行库会直接报错退出）
+# 3) 打包 + 自检（缺 .pri / XBF / FreeRDP 运行库 / 第三方许可声明会直接报错退出）
+#    这一步还会生成 THIRD-PARTY-NOTICES.txt：原生组件的许可证原文取自 vcpkg
+#    （默认 <仓库>/../_tools/vcpkg，CI 里用 --vcpkg-inst 指到 .vcpkg/installed/x64-windows）
 python winui3/tools/package_release.py --build-dir ci-build --publish-dir ci-publish \
   --assets assets --out dist --name YukinoChan-winui3-2.1.0-x64 --version 2.1.0
 
@@ -250,7 +262,11 @@ python winui3/tools/patch_setup_manifest.py dist/YukinoChan-2.1.0-setup.exe --ex
 winui3/
 ├─ YukinoChan.sln                   # 只包含 YukinoChan.App
 ├─ docs/                            # 设计文档（内嵌 RDP / 多会话通道 / 菜单重构计划书）
+├─ third_party/
+│  ├─ components.json               # 第三方组件清单（唯一数据源：界面与打包脚本共用）
+│  └─ licenses/*.txt                # 各组件许可证原文副本（CI 拿不到 vcpkg 时的回退）
 ├─ tools/package_release.py         # 发布打包：合并 build+publish 输出、补素材、关键文件自检
+├─ tools/gen_third_party_notices.py # 生成 THIRD-PARTY-NOTICES.txt（第三方组件清单 + 许可证原文）
 ├─ tools/installer.iss              # 安装程序脚本（Inno Setup 6）
 ├─ tools/patch_setup_manifest.py    # 把 Inno 模板 SetupLdr 的清单改成 requireAdministrator
 ├─ src/YukinoChan.RdpNative/        # 原生 FreeRDP 封装（ycn_rdp.c / .h + CMakeLists.txt）

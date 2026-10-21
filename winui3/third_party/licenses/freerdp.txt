@@ -1,0 +1,1540 @@
+LICENSE:
+
+
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
+
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+   APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "[]"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright [yyyy] [name of copyright owner]
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+
+
+opensl_io.c:
+
+/*
+opensl_io.c:
+Android OpenSL input/output module
+Copyright (c) 2012, Victor Lazzarini
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+    * Neither the name of the <organization> nor the
+      names of its contributors may be used to endorse or promote products
+      derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL <COPYRIGHT HOLDER> BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+#include <winpr/assert.h>
+
+#include "audin_main.h"
+#include "opensl_io.h"
+#define CONV16BIT 32768
+#define CONVMYFLT (1. / 32768.)
+
+typedef struct
+{
+	size_t size;
+	void* data;
+} queue_element;
+
+struct opensl_stream
+{
+	// engine interfaces
+	SLObjectItf engineObject;
+	SLEngineItf engineEngine;
+
+	// device interfaces
+	SLDeviceVolumeItf deviceVolume;
+
+	// recorder interfaces
+	SLObjectItf recorderObject;
+	SLRecordItf recorderRecord;
+	SLAndroidSimpleBufferQueueItf recorderBufferQueue;
+
+	size_t inchannels;
+	size_t sr;
+	size_t buffersize;
+	size_t bits_per_sample;
+
+	queue_element* prep;
+	queue_element* next;
+
+	void* context;
+	opensl_receive_t receive;
+};
+
+static void bqRecorderCallback(SLAndroidSimpleBufferQueueItf bq, void* context);
+
+// creates the OpenSL ES audio engine
+static SLresult openSLCreateEngine(OPENSL_STREAM* p)
+{
+	SLresult result;
+	// create engine
+	result = slCreateEngine(&(p->engineObject), 0, nullptr, 0, nullptr, nullptr);
+
+	if (result != SL_RESULT_SUCCESS)
+		goto engine_end;
+
+	// realize the engine
+	result = (*p->engineObject)->Realize(p->engineObject, SL_BOOLEAN_FALSE);
+
+	if (result != SL_RESULT_SUCCESS)
+		goto engine_end;
+
+	// get the engine interface, which is needed in order to create other objects
+	result = (*p->engineObject)->GetInterface(p->engineObject, SL_IID_ENGINE, &(p->engineEngine));
+
+	if (result != SL_RESULT_SUCCESS)
+		goto engine_end;
+
+	// get the volume interface - important, this is optional!
+	result =
+	    (*p->engineObject)->GetInterface(p->engineObject, SL_IID_DEVICEVOLUME, &(p->deviceVolume));
+
+	if (result != SL_RESULT_SUCCESS)
+	{
+		p->deviceVolume = nullptr;
+		result = SL_RESULT_SUCCESS;
+	}
+
+engine_end:
+	return result;
+}
+
+// Open the OpenSL ES device for input
+static SLresult openSLRecOpen(OPENSL_STREAM* p)
+{
+	SLresult result;
+	SLuint32 sr = WINPR_ASSERTING_INT_CAST(SLuint32, p->sr);
+	SLuint32 channels = WINPR_ASSERTING_INT_CAST(SLuint32, p->inchannels);
+	WINPR_ASSERT(!p->recorderObject);
+
+	if (channels)
+	{
+		switch (sr)
+		{
+			case 8000:
+				sr = SL_SAMPLINGRATE_8;
+				break;
+
+			case 11025:
+				sr = SL_SAMPLINGRATE_11_025;
+				break;
+
+			case 16000:
+				sr = SL_SAMPLINGRATE_16;
+				break;
+
+			case 22050:
+				sr = SL_SAMPLINGRATE_22_05;
+				break;
+
+			case 24000:
+				sr = SL_SAMPLINGRATE_24;
+				break;
+
+			case 32000:
+				sr = SL_SAMPLINGRATE_32;
+				break;
+
+			case 44100:
+				sr = SL_SAMPLINGRATE_44_1;
+				break;
+
+			case 48000:
+				sr = SL_SAMPLINGRATE_48;
+				break;
+
+			case 64000:
+				sr = SL_SAMPLINGRATE_64;
+				break;
+
+			case 88200:
+				sr = SL_SAMPLINGRATE_88_2;
+				break;
+
+			case 96000:
+				sr = SL_SAMPLINGRATE_96;
+				break;
+
+			case 192000:
+				sr = SL_SAMPLINGRATE_192;
+				break;
+
+			default:
+				WLog_ERR(TAG, "Sample rate %" PRIu32 " unsupported", sr);
+				return -1;
+		}
+
+		// configure audio source
+		SLDataLocator_IODevice loc_dev = { SL_DATALOCATOR_IODEVICE, SL_IODEVICE_AUDIOINPUT,
+			                               SL_DEFAULTDEVICEID_AUDIOINPUT, nullptr };
+		SLDataSource audioSrc = { &loc_dev, nullptr };
+		// configure audio sink
+		int speakers;
+
+		if (channels > 1)
+			speakers = SL_SPEAKER_FRONT_LEFT | SL_SPEAKER_FRONT_RIGHT;
+		else
+			speakers = SL_SPEAKER_FRONT_CENTER;
+
+		SLDataLocator_AndroidSimpleBufferQueue loc_bq = { SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE,
+			                                              2 };
+		SLDataFormat_PCM format_pcm = WINPR_C_ARRAY_INIT;
+		format_pcm.formatType = SL_DATAFORMAT_PCM;
+		format_pcm.numChannels = channels;
+		format_pcm.samplesPerSec = sr;
+		format_pcm.channelMask = speakers;
+		format_pcm.endianness = SL_BYTEORDER_LITTLEENDIAN;
+
+		if (16 == p->bits_per_sample)
+		{
+			format_pcm.bitsPerSample = SL_PCMSAMPLEFORMAT_FIXED_16;
+			format_pcm.containerSize = 16;
+		}
+		else if (8 == p->bits_per_sample)
+		{
+			format_pcm.bitsPerSample = SL_PCMSAMPLEFORMAT_FIXED_8;
+			format_pcm.containerSize = 8;
+		}
+		else
+		{
+			WLog_ERR(TAG, "bits_per_sample=%" PRIuz, p->bits_per_sample);
+			return -1;
+		}
+
+		SLDataSink audioSnk = { &loc_bq, &format_pcm };
+		// create audio recorder
+		// (requires the RECORD_AUDIO permission)
+		const SLInterfaceID id[] = { SL_IID_ANDROIDSIMPLEBUFFERQUEUE };
+		const SLboolean req[] = { SL_BOOLEAN_TRUE };
+		result = (*p->engineEngine)
+		             ->CreateAudioRecorder(p->engineEngine, &(p->recorderObject), &audioSrc,
+		                                   &audioSnk, 1, id, req);
+		if (SL_RESULT_SUCCESS != result)
+		{
+			WLog_ERR(TAG, "CreateAudioRecorder failed with %d", result);
+			goto end_recopen;
+		}
+
+		// realize the audio recorder
+		result = (*p->recorderObject)->Realize(p->recorderObject, SL_BOOLEAN_FALSE);
+		if (SL_RESULT_SUCCESS != result)
+		{
+			WLog_ERR(TAG, "recorderObject failed with %d", result);
+			goto end_recopen;
+		}
+
+		// get the record interface
+		result = (*p->recorderObject)
+		             ->GetInterface(p->recorderObject, SL_IID_RECORD, &(p->recorderRecord));
+		if (SL_RESULT_SUCCESS != result)
+		{
+			WLog_ERR(TAG, "GetInterface(SL_IID_RECORD) failed with %d", result);
+			goto end_recopen;
+		}
+
+		// get the buffer queue interface
+		result = (*p->recorderObject)
+		             ->GetInterface(p->recorderObject, SL_IID_ANDROIDSIMPLEBUFFERQUEUE,
+		                            &(p->recorderBufferQueue));
+		if (SL_RESULT_SUCCESS != result)
+		{
+			WLog_ERR(TAG, "GetInterface(SL_IID_ANDROIDSIMPLEBUFFERQUEUE) failed with %d", result);
+			goto end_recopen;
+		}
+
+		// register callback on the buffer queue
+		result = (*p->recorderBufferQueue)
+		             ->RegisterCallback(p->recorderBufferQueue, bqRecorderCallback, p);
+		if (SL_RESULT_SUCCESS != result)
+		{
+			WLog_ERR(TAG, "RegisterCallback failed with %d", result);
+			goto end_recopen;
+		}
+
+	end_recopen:
+		return result;
+	}
+	else
+		return SL_RESULT_SUCCESS;
+}
+
+// close the OpenSL IO and destroy the audio engine
+static void openSLDestroyEngine(OPENSL_STREAM* p)
+{
+	// destroy audio recorder object, and invalidate all associated interfaces
+	if (p->recorderObject != nullptr)
+	{
+		(*p->recorderObject)->Destroy(p->recorderObject);
+		p->recorderObject = nullptr;
+		p->recorderRecord = nullptr;
+		p->recorderBufferQueue = nullptr;
+	}
+
+	// destroy engine object, and invalidate all associated interfaces
+	if (p->engineObject != nullptr)
+	{
+		(*p->engineObject)->Destroy(p->engineObject);
+		p->engineObject = nullptr;
+		p->engineEngine = nullptr;
+	}
+}
+
+static queue_element* opensles_queue_element_new(size_t size)
+{
+	queue_element* q = calloc(1, sizeof(queue_element));
+
+	if (!q)
+		goto fail;
+
+	q->size = size;
+	q->data = malloc(size);
+
+	if (!q->data)
+		goto fail;
+
+	return q;
+fail:
+	free(q);
+	return nullptr;
+}
+
+static void opensles_queue_element_free(void* obj)
+{
+	queue_element* e = (queue_element*)obj;
+
+	if (e)
+		free(e->data);
+
+	free(e);
+}
+
+// open the android audio device for input
+OPENSL_STREAM* android_OpenRecDevice(void* context, opensl_receive_t receive, size_t sr,
+                                     size_t inchannels, size_t bufferframes, size_t bits_per_sample)
+{
+	if (!context || !receive)
+		return nullptr;
+
+	OPENSL_STREAM* p = (OPENSL_STREAM*)calloc(1, sizeof(OPENSL_STREAM));
+
+	if (!p)
+		return nullptr;
+
+	p->context = context;
+	p->receive = receive;
+	if (inchannels > INT32_MAX)
+		goto fail;
+	p->inchannels = inchannels;
+
+	if (sr > INT32_MAX)
+		goto fail;
+	p->sr = sr;
+
+	if (bufferframes > SIZE_MAX / 2)
+		goto fail;
+	p->buffersize = bufferframes;
+
+	p->bits_per_sample = bits_per_sample;
+
+	if ((p->bits_per_sample != 8) && (p->bits_per_sample != 16))
+		goto fail;
+
+	if (openSLCreateEngine(p) != SL_RESULT_SUCCESS)
+		goto fail;
+
+	if (openSLRecOpen(p) != SL_RESULT_SUCCESS)
+		goto fail;
+
+	const size_t bytesPerSample = p->bits_per_sample / 8ull;
+	if (p->buffersize >= SIZE_MAX / bytesPerSample)
+		goto fail;
+
+	const size_t queuesize = p->buffersize * bytesPerSample;
+	/* Create receive buffers, prepare them and start recording */
+	p->prep = opensles_queue_element_new(queuesize);
+	p->next = opensles_queue_element_new(queuesize);
+
+	if (!p->prep || !p->next)
+		goto fail;
+
+	(*p->recorderBufferQueue)->Enqueue(p->recorderBufferQueue, p->next->data, p->next->size);
+	(*p->recorderBufferQueue)->Enqueue(p->recorderBufferQueue, p->prep->data, p->prep->size);
+	(*p->recorderRecord)->SetRecordState(p->recorderRecord, SL_RECORDSTATE_RECORDING);
+	return p;
+fail:
+	android_CloseRecDevice(p);
+	return nullptr;
+}
+
+// close the android audio device
+void android_CloseRecDevice(OPENSL_STREAM* p)
+{
+	if (p == nullptr)
+		return;
+
+	opensles_queue_element_free(p->next);
+	opensles_queue_element_free(p->prep);
+	openSLDestroyEngine(p);
+	free(p);
+}
+
+// this callback handler is called every time a buffer finishes recording
+static void bqRecorderCallback(SLAndroidSimpleBufferQueueItf bq, void* context)
+{
+	OPENSL_STREAM* p = (OPENSL_STREAM*)context;
+	queue_element* e;
+
+	if (!p)
+		return;
+
+	e = p->next;
+
+	if (!e)
+		return;
+
+	if (!p->context || !p->receive)
+		WLog_WARN(TAG, "Missing receive callback=%p, context=%p", p->receive, p->context);
+	else
+		p->receive(p->context, e->data, e->size);
+
+	p->next = p->prep;
+	p->prep = e;
+	(*p->recorderBufferQueue)->Enqueue(p->recorderBufferQueue, e->data, e->size);
+}
+
+
+md4.c:
+
+/*
+ * This is an OpenSSL-compatible implementation of the RSA Data Security, Inc.
+ * MD4 Message-Digest Algorithm (RFC 1320).
+ *
+ * Homepage:
+ * http://openwall.info/wiki/people/solar/software/public-domain-source-code/md4
+ *
+ * Author:
+ * Alexander Peslyak, better known as Solar Designer <solar at openwall.com>
+ *
+ * This software was written by Alexander Peslyak in 2001.  No copyright is
+ * claimed, and the software is hereby placed in the public domain.
+ * In case this attempt to disclaim copyright and place the software in the
+ * public domain is deemed null and void, then the software is
+ * Copyright (c) 2001 Alexander Peslyak and it is hereby released to the
+ * general public under the following terms:
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted.
+ *
+ * There's ABSOLUTELY NO WARRANTY, express or implied.
+ *
+ * (This is a heavily cut-down "BSD license".)
+ *
+ * This differs from Colin Plumb's older public domain implementation in that
+ * no exactly 32-bit integer data type is required (any 32-bit or wider
+ * unsigned integer data type will do), there's no compile-time endianness
+ * configuration, and the function prototypes match OpenSSL's.  No code from
+ * Colin Plumb's implementation has been reused; this comment merely compares
+ * the properties of the two independent implementations.
+ *
+ * The primary goals of this implementation are portability and ease of use.
+ * It is meant to be fast, but not as fast as possible.  Some known
+ * optimizations are not included to reduce source code size and avoid
+ * compile-time configuration.
+ */
+
+#include <string.h>
+
+#include <winpr/cast.h>
+
+#include "md4.h"
+
+/*
+ * The basic MD4 functions.
+ *
+ * F and G are optimized compared to their RFC 1320 definitions, with the
+ * optimization for F borrowed from Colin Plumb's MD5 implementation.
+ */
+static inline winpr_MD4_u32plus F(winpr_MD4_u32plus x, winpr_MD4_u32plus y, winpr_MD4_u32plus z)
+{
+	return ((z) ^ ((x) & ((y) ^ (z))));
+}
+static inline winpr_MD4_u32plus G(winpr_MD4_u32plus x, winpr_MD4_u32plus y, winpr_MD4_u32plus z)
+{
+	return (((x) & ((y) | (z))) | ((y) & (z)));
+}
+static inline winpr_MD4_u32plus H(winpr_MD4_u32plus x, winpr_MD4_u32plus y, winpr_MD4_u32plus z)
+{
+	return ((x) ^ (y) ^ (z));
+}
+
+/*
+ * The MD4 transformation for all three rounds.
+ */
+#define STEP(f, a, b, c, d, x, s)  \
+	(a) += f((b), (c), (d)) + (x); \
+	(a) = (((a) << (s)) | (((a)&0xffffffff) >> (32 - (s))));
+
+/*
+ * SET reads 4 input bytes in little-endian byte order and stores them in a
+ * properly aligned word in host byte order.
+ *
+ * The check for little-endian architectures that tolerate unaligned memory
+ * accesses is just an optimization.  Nothing will break if it fails to detect
+ * a suitable architecture.
+ *
+ * Unfortunately, this optimization may be a C strict aliasing rules violation
+ * if the caller's data buffer has effective type that cannot be aliased by
+ * winpr_MD4_u32plus.  In practice, this problem may occur if these MD4 routines are
+ * inlined into a calling function, or with future and dangerously advanced
+ * link-time optimizations.  For the time being, keeping these MD4 routines in
+ * their own translation unit avoids the problem.
+ */
+#if defined(WINPR_ARCH_SUPPORTED)
+#define SET(n) (*(WINPR_PACKED_ALIGN_CAST(const winpr_MD4_u32plus*, &ptr[4ULL * (n)])))
+#define GET(n) SET(n)
+#else
+#define SET(n)                                                          \
+	(ctx->block[(n)] = (winpr_MD4_u32plus)ptr[4ULL * (n)] |             \
+	                   ((winpr_MD4_u32plus)ptr[4ULL * (n) + 1] << 8) |  \
+	                   ((winpr_MD4_u32plus)ptr[4ULL * (n) + 2] << 16) | \
+	                   ((winpr_MD4_u32plus)ptr[4ULL * (n) + 3] << 24))
+#define GET(n) (ctx->block[(n)])
+#endif
+
+/*
+ * This processes one or more 64-byte data blocks, but does NOT update the bit
+ * counters.  There are no alignment requirements.
+ */
+static const void* body(WINPR_MD4_CTX* ctx, const void* data, size_t size)
+{
+	const winpr_MD4_u32plus ac1 = 0x5a827999;
+	const winpr_MD4_u32plus ac2 = 0x6ed9eba1;
+
+	const unsigned char* ptr = (const unsigned char*)data;
+
+	winpr_MD4_u32plus a = ctx->a;
+	winpr_MD4_u32plus b = ctx->b;
+	winpr_MD4_u32plus c = ctx->c;
+	winpr_MD4_u32plus d = ctx->d;
+
+	do
+	{
+		const winpr_MD4_u32plus saved_a = a;
+		const winpr_MD4_u32plus saved_b = b;
+		const winpr_MD4_u32plus saved_c = c;
+		const winpr_MD4_u32plus saved_d = d;
+
+		/* Round 1 */
+		STEP(F, a, b, c, d, SET(0), 3)
+		STEP(F, d, a, b, c, SET(1), 7)
+		STEP(F, c, d, a, b, SET(2), 11)
+		STEP(F, b, c, d, a, SET(3), 19)
+		STEP(F, a, b, c, d, SET(4), 3)
+		STEP(F, d, a, b, c, SET(5), 7)
+		STEP(F, c, d, a, b, SET(6), 11)
+		STEP(F, b, c, d, a, SET(7), 19)
+		STEP(F, a, b, c, d, SET(8), 3)
+		STEP(F, d, a, b, c, SET(9), 7)
+		STEP(F, c, d, a, b, SET(10), 11)
+		STEP(F, b, c, d, a, SET(11), 19)
+		STEP(F, a, b, c, d, SET(12), 3)
+		STEP(F, d, a, b, c, SET(13), 7)
+		STEP(F, c, d, a, b, SET(14), 11)
+		STEP(F, b, c, d, a, SET(15), 19)
+
+		/* Round 2 */
+		STEP(G, a, b, c, d, GET(0) + ac1, 3)
+		STEP(G, d, a, b, c, GET(4) + ac1, 5)
+		STEP(G, c, d, a, b, GET(8) + ac1, 9)
+		STEP(G, b, c, d, a, GET(12) + ac1, 13)
+		STEP(G, a, b, c, d, GET(1) + ac1, 3)
+		STEP(G, d, a, b, c, GET(5) + ac1, 5)
+		STEP(G, c, d, a, b, GET(9) + ac1, 9)
+		STEP(G, b, c, d, a, GET(13) + ac1, 13)
+		STEP(G, a, b, c, d, GET(2) + ac1, 3)
+		STEP(G, d, a, b, c, GET(6) + ac1, 5)
+		STEP(G, c, d, a, b, GET(10) + ac1, 9)
+		STEP(G, b, c, d, a, GET(14) + ac1, 13)
+		STEP(G, a, b, c, d, GET(3) + ac1, 3)
+		STEP(G, d, a, b, c, GET(7) + ac1, 5)
+		STEP(G, c, d, a, b, GET(11) + ac1, 9)
+		STEP(G, b, c, d, a, GET(15) + ac1, 13)
+
+		/* Round 3 */
+		STEP(H, a, b, c, d, GET(0) + ac2, 3)
+		STEP(H, d, a, b, c, GET(8) + ac2, 9)
+		STEP(H, c, d, a, b, GET(4) + ac2, 11)
+		STEP(H, b, c, d, a, GET(12) + ac2, 15)
+		STEP(H, a, b, c, d, GET(2) + ac2, 3)
+		STEP(H, d, a, b, c, GET(10) + ac2, 9)
+		STEP(H, c, d, a, b, GET(6) + ac2, 11)
+		STEP(H, b, c, d, a, GET(14) + ac2, 15)
+		STEP(H, a, b, c, d, GET(1) + ac2, 3)
+		STEP(H, d, a, b, c, GET(9) + ac2, 9)
+		STEP(H, c, d, a, b, GET(5) + ac2, 11)
+		STEP(H, b, c, d, a, GET(13) + ac2, 15)
+		STEP(H, a, b, c, d, GET(3) + ac2, 3)
+		STEP(H, d, a, b, c, GET(11) + ac2, 9)
+		STEP(H, c, d, a, b, GET(7) + ac2, 11)
+		STEP(H, b, c, d, a, GET(15) + ac2, 15)
+
+		a += saved_a;
+		b += saved_b;
+		c += saved_c;
+		d += saved_d;
+
+		ptr += 64;
+	} while (size -= 64);
+
+	ctx->a = a;
+	ctx->b = b;
+	ctx->c = c;
+	ctx->d = d;
+
+	return ptr;
+}
+
+void winpr_MD4_Init(WINPR_MD4_CTX* ctx)
+{
+	ctx->a = 0x67452301;
+	ctx->b = 0xefcdab89;
+	ctx->c = 0x98badcfe;
+	ctx->d = 0x10325476;
+
+	ctx->lo = 0;
+	ctx->hi = 0;
+}
+
+void winpr_MD4_Update(WINPR_MD4_CTX* ctx, const void* data, size_t size)
+{
+	winpr_MD4_u32plus saved_lo = ctx->lo;
+	if ((ctx->lo = (saved_lo + size) & 0x1fffffff) < saved_lo)
+		ctx->hi++;
+	ctx->hi += (winpr_MD4_u32plus)((size >> 29) & 0xffffffff);
+
+	size_t used = saved_lo & 0x3f;
+
+	if (used)
+	{
+		size_t available = 64 - used;
+
+		if (size < available)
+		{
+			memcpy(&ctx->buffer[used], data, size);
+			return;
+		}
+
+		memcpy(&ctx->buffer[used], data, available);
+		data = (const unsigned char*)data + available;
+		size -= available;
+		body(ctx, ctx->buffer, 64);
+	}
+
+	if (size >= 64)
+	{
+		data = body(ctx, data, size & ~(size_t)0x3f);
+		size &= 0x3f;
+	}
+
+	memcpy(ctx->buffer, data, size);
+}
+
+static inline void mdOUT(unsigned char* dst, winpr_MD4_u32plus src)
+{
+	(dst)[0] = (unsigned char)(src);
+	(dst)[1] = (unsigned char)((src) >> 8);
+	(dst)[2] = (unsigned char)((src) >> 16);
+	(dst)[3] = (unsigned char)((src) >> 24);
+}
+
+void winpr_MD4_Final(unsigned char* result, WINPR_MD4_CTX* ctx)
+{
+	size_t used = ctx->lo & 0x3f;
+
+	ctx->buffer[used++] = 0x80;
+
+	size_t available = 64 - used;
+
+	if (available < 8)
+	{
+		memset(&ctx->buffer[used], 0, available);
+		body(ctx, ctx->buffer, 64);
+		used = 0;
+		available = 64;
+	}
+
+	memset(&ctx->buffer[used], 0, available - 8);
+
+	ctx->lo <<= 3;
+	mdOUT(&ctx->buffer[56], ctx->lo);
+	mdOUT(&ctx->buffer[60], ctx->hi);
+
+	body(ctx, ctx->buffer, 64);
+
+	mdOUT(&result[0], ctx->a);
+	mdOUT(&result[4], ctx->b);
+	mdOUT(&result[8], ctx->c);
+	mdOUT(&result[12], ctx->d);
+
+	memset(ctx, 0, sizeof(*ctx));
+}
+
+
+md5.c:
+
+/*
+ * This is an OpenSSL-compatible implementation of the RSA Data Security, Inc.
+ * MD5 Message-Digest Algorithm (RFC 1321).
+ *
+ * Homepage:
+ * http://openwall.info/wiki/people/solar/software/public-domain-source-code/md5
+ *
+ * Author:
+ * Alexander Peslyak, better known as Solar Designer <solar at openwall.com>
+ *
+ * This software was written by Alexander Peslyak in 2001.  No copyright is
+ * claimed, and the software is hereby placed in the public domain.
+ * In case this attempt to disclaim copyright and place the software in the
+ * public domain is deemed null and void, then the software is
+ * Copyright (c) 2001 Alexander Peslyak and it is hereby released to the
+ * general public under the following terms:
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted.
+ *
+ * There's ABSOLUTELY NO WARRANTY, express or implied.
+ *
+ * (This is a heavily cut-down "BSD license".)
+ *
+ * This differs from Colin Plumb's older public domain implementation in that
+ * no exactly 32-bit integer data type is required (any 32-bit or wider
+ * unsigned integer data type will do), there's no compile-time endianness
+ * configuration, and the function prototypes match OpenSSL's.  No code from
+ * Colin Plumb's implementation has been reused; this comment merely compares
+ * the properties of the two independent implementations.
+ *
+ * The primary goals of this implementation are portability and ease of use.
+ * It is meant to be fast, but not as fast as possible.  Some known
+ * optimizations are not included to reduce source code size and avoid
+ * compile-time configuration.
+ */
+
+#include <string.h>
+
+#include <winpr/cast.h>
+
+#include "md5.h"
+
+/*
+ * The basic MD5 functions.
+ *
+ * F and G are optimized compared to their RFC 1321 definitions for
+ * architectures that lack an AND-NOT instruction, just like in Colin Plumb's
+ * implementation.
+ */
+static inline winpr_MD5_u32plus F(winpr_MD5_u32plus x, winpr_MD5_u32plus y, winpr_MD5_u32plus z)
+{
+	return ((z) ^ ((x) & ((y) ^ (z))));
+}
+static inline winpr_MD5_u32plus G(winpr_MD5_u32plus x, winpr_MD5_u32plus y, winpr_MD5_u32plus z)
+{
+	return ((y) ^ ((z) & ((x) ^ (y))));
+}
+static inline winpr_MD5_u32plus H(winpr_MD5_u32plus x, winpr_MD5_u32plus y, winpr_MD5_u32plus z)
+{
+	return (((x) ^ (y)) ^ (z));
+}
+static inline winpr_MD5_u32plus H2(winpr_MD5_u32plus x, winpr_MD5_u32plus y, winpr_MD5_u32plus z)
+{
+	return ((x) ^ ((y) ^ (z)));
+}
+static inline winpr_MD5_u32plus I(winpr_MD5_u32plus x, winpr_MD5_u32plus y, winpr_MD5_u32plus z)
+{
+	return ((y) ^ ((x) | ~(z)));
+}
+
+/*
+ * The MD5 transformation for all four rounds.
+ */
+#define STEP(f, a, b, c, d, x, t, s)                         \
+	(a) += f((b), (c), (d)) + (x) + (t);                     \
+	(a) = (((a) << (s)) | (((a)&0xffffffff) >> (32 - (s)))); \
+	(a) += (b);
+
+/*
+ * SET reads 4 input bytes in little-endian byte order and stores them in a
+ * properly aligned word in host byte order.
+ *
+ * The check for little-endian architectures that tolerate unaligned memory
+ * accesses is just an optimization.  Nothing will break if it fails to detect
+ * a suitable architecture.
+ *
+ * Unfortunately, this optimization may be a C strict aliasing rules violation
+ * if the caller's data buffer has effective type that cannot be aliased by
+ * MD5_u32plus.  In practice, this problem may occur if these MD5 routines are
+ * inlined into a calling function, or with future and dangerously advanced
+ * link-time optimizations.  For the time being, keeping these MD5 routines in
+ * their own translation unit avoids the problem.
+ */
+#if defined(WINPR_ARCH_SUPPORTED)
+#define SET(n) (*(WINPR_PACKED_ALIGN_CAST(const winpr_MD5_u32plus*, &ptr[4ULL * (n)])))
+#define GET(n) SET(n)
+#else
+#define SET(n)                                                          \
+	(ctx->block[(n)] = (winpr_MD5_u32plus)ptr[4ULL * (n)] |             \
+	                   ((winpr_MD5_u32plus)ptr[4ULL * (n) + 1] << 8) |  \
+	                   ((winpr_MD5_u32plus)ptr[4ULL * (n) + 2] << 16) | \
+	                   ((winpr_MD5_u32plus)ptr[4ULL * (n) + 3] << 24))
+#define GET(n) (ctx->block[(n)])
+#endif
+
+/*
+ * This processes one or more 64-byte data blocks, but does NOT update the bit
+ * counters.  There are no alignment requirements.
+ */
+static const void* body(WINPR_MD5_CTX* ctx, const void* data, size_t size)
+{
+	const unsigned char* ptr = (const unsigned char*)data;
+
+	winpr_MD5_u32plus a = ctx->a;
+	winpr_MD5_u32plus b = ctx->b;
+	winpr_MD5_u32plus c = ctx->c;
+	winpr_MD5_u32plus d = ctx->d;
+
+	do
+	{
+		const winpr_MD5_u32plus saved_a = a;
+		const winpr_MD5_u32plus saved_b = b;
+		const winpr_MD5_u32plus saved_c = c;
+		const winpr_MD5_u32plus saved_d = d;
+
+		/* Round 1 */
+		STEP(F, a, b, c, d, SET(0), 0xd76aa478, 7)
+		STEP(F, d, a, b, c, SET(1), 0xe8c7b756, 12)
+		STEP(F, c, d, a, b, SET(2), 0x242070db, 17)
+		STEP(F, b, c, d, a, SET(3), 0xc1bdceee, 22)
+		STEP(F, a, b, c, d, SET(4), 0xf57c0faf, 7)
+		STEP(F, d, a, b, c, SET(5), 0x4787c62a, 12)
+		STEP(F, c, d, a, b, SET(6), 0xa8304613, 17)
+		STEP(F, b, c, d, a, SET(7), 0xfd469501, 22)
+		STEP(F, a, b, c, d, SET(8), 0x698098d8, 7)
+		STEP(F, d, a, b, c, SET(9), 0x8b44f7af, 12)
+		STEP(F, c, d, a, b, SET(10), 0xffff5bb1, 17)
+		STEP(F, b, c, d, a, SET(11), 0x895cd7be, 22)
+		STEP(F, a, b, c, d, SET(12), 0x6b901122, 7)
+		STEP(F, d, a, b, c, SET(13), 0xfd987193, 12)
+		STEP(F, c, d, a, b, SET(14), 0xa679438e, 17)
+		STEP(F, b, c, d, a, SET(15), 0x49b40821, 22)
+
+		/* Round 2 */
+		STEP(G, a, b, c, d, GET(1), 0xf61e2562, 5)
+		STEP(G, d, a, b, c, GET(6), 0xc040b340, 9)
+		STEP(G, c, d, a, b, GET(11), 0x265e5a51, 14)
+		STEP(G, b, c, d, a, GET(0), 0xe9b6c7aa, 20)
+		STEP(G, a, b, c, d, GET(5), 0xd62f105d, 5)
+		STEP(G, d, a, b, c, GET(10), 0x02441453, 9)
+		STEP(G, c, d, a, b, GET(15), 0xd8a1e681, 14)
+		STEP(G, b, c, d, a, GET(4), 0xe7d3fbc8, 20)
+		STEP(G, a, b, c, d, GET(9), 0x21e1cde6, 5)
+		STEP(G, d, a, b, c, GET(14), 0xc33707d6, 9)
+		STEP(G, c, d, a, b, GET(3), 0xf4d50d87, 14)
+		STEP(G, b, c, d, a, GET(8), 0x455a14ed, 20)
+		STEP(G, a, b, c, d, GET(13), 0xa9e3e905, 5)
+		STEP(G, d, a, b, c, GET(2), 0xfcefa3f8, 9)
+		STEP(G, c, d, a, b, GET(7), 0x676f02d9, 14)
+		STEP(G, b, c, d, a, GET(12), 0x8d2a4c8a, 20)
+
+		/* Round 3 */
+		STEP(H, a, b, c, d, GET(5), 0xfffa3942, 4)
+		STEP(H2, d, a, b, c, GET(8), 0x8771f681, 11)
+		STEP(H, c, d, a, b, GET(11), 0x6d9d6122, 16)
+		STEP(H2, b, c, d, a, GET(14), 0xfde5380c, 23)
+		STEP(H, a, b, c, d, GET(1), 0xa4beea44, 4)
+		STEP(H2, d, a, b, c, GET(4), 0x4bdecfa9, 11)
+		STEP(H, c, d, a, b, GET(7), 0xf6bb4b60, 16)
+		STEP(H2, b, c, d, a, GET(10), 0xbebfbc70, 23)
+		STEP(H, a, b, c, d, GET(13), 0x289b7ec6, 4)
+		STEP(H2, d, a, b, c, GET(0), 0xeaa127fa, 11)
+		STEP(H, c, d, a, b, GET(3), 0xd4ef3085, 16)
+		STEP(H2, b, c, d, a, GET(6), 0x04881d05, 23)
+		STEP(H, a, b, c, d, GET(9), 0xd9d4d039, 4)
+		STEP(H2, d, a, b, c, GET(12), 0xe6db99e5, 11)
+		STEP(H, c, d, a, b, GET(15), 0x1fa27cf8, 16)
+		STEP(H2, b, c, d, a, GET(2), 0xc4ac5665, 23)
+
+		/* Round 4 */
+		STEP(I, a, b, c, d, GET(0), 0xf4292244, 6)
+		STEP(I, d, a, b, c, GET(7), 0x432aff97, 10)
+		STEP(I, c, d, a, b, GET(14), 0xab9423a7, 15)
+		STEP(I, b, c, d, a, GET(5), 0xfc93a039, 21)
+		STEP(I, a, b, c, d, GET(12), 0x655b59c3, 6)
+		STEP(I, d, a, b, c, GET(3), 0x8f0ccc92, 10)
+		STEP(I, c, d, a, b, GET(10), 0xffeff47d, 15)
+		STEP(I, b, c, d, a, GET(1), 0x85845dd1, 21)
+		STEP(I, a, b, c, d, GET(8), 0x6fa87e4f, 6)
+		STEP(I, d, a, b, c, GET(15), 0xfe2ce6e0, 10)
+		STEP(I, c, d, a, b, GET(6), 0xa3014314, 15)
+		STEP(I, b, c, d, a, GET(13), 0x4e0811a1, 21)
+		STEP(I, a, b, c, d, GET(4), 0xf7537e82, 6)
+		STEP(I, d, a, b, c, GET(11), 0xbd3af235, 10)
+		STEP(I, c, d, a, b, GET(2), 0x2ad7d2bb, 15)
+		STEP(I, b, c, d, a, GET(9), 0xeb86d391, 21)
+
+		a += saved_a;
+		b += saved_b;
+		c += saved_c;
+		d += saved_d;
+
+		ptr += 64;
+	} while (size -= 64);
+
+	ctx->a = a;
+	ctx->b = b;
+	ctx->c = c;
+	ctx->d = d;
+
+	return ptr;
+}
+
+void winpr_MD5_Init(WINPR_MD5_CTX* ctx)
+{
+	ctx->a = 0x67452301;
+	ctx->b = 0xefcdab89;
+	ctx->c = 0x98badcfe;
+	ctx->d = 0x10325476;
+
+	ctx->lo = 0;
+	ctx->hi = 0;
+}
+
+void winpr_MD5_Update(WINPR_MD5_CTX* ctx, const void* data, size_t size)
+{
+	winpr_MD5_u32plus saved_lo = ctx->lo;
+	if ((ctx->lo = (saved_lo + size) & 0x1fffffff) < saved_lo)
+		ctx->hi++;
+	ctx->hi += (winpr_MD5_u32plus)((size >> 29) & 0xffffffff);
+
+	size_t used = saved_lo & 0x3f;
+
+	if (used)
+	{
+		size_t available = 64 - used;
+
+		if (size < available)
+		{
+			memcpy(&ctx->buffer[used], data, size);
+			return;
+		}
+
+		memcpy(&ctx->buffer[used], data, available);
+		data = (const unsigned char*)data + available;
+		size -= available;
+		body(ctx, ctx->buffer, 64);
+	}
+
+	if (size >= 64)
+	{
+		data = body(ctx, data, size & ~(size_t)0x3f);
+		size &= 0x3f;
+	}
+
+	memcpy(ctx->buffer, data, size);
+}
+
+static inline void mdOUT(unsigned char* dst, winpr_MD5_u32plus src)
+{
+	(dst)[0] = (unsigned char)(src);
+	(dst)[1] = (unsigned char)((src) >> 8);
+	(dst)[2] = (unsigned char)((src) >> 16);
+	(dst)[3] = (unsigned char)((src) >> 24);
+}
+
+void winpr_MD5_Final(unsigned char* result, WINPR_MD5_CTX* ctx)
+{
+	size_t used = ctx->lo & 0x3f;
+
+	ctx->buffer[used++] = 0x80;
+
+	size_t available = 64 - used;
+
+	if (available < 8)
+	{
+		memset(&ctx->buffer[used], 0, available);
+		body(ctx, ctx->buffer, 64);
+		used = 0;
+		available = 64;
+	}
+
+	memset(&ctx->buffer[used], 0, available - 8);
+
+	ctx->lo <<= 3;
+	mdOUT(&ctx->buffer[56], ctx->lo);
+	mdOUT(&ctx->buffer[60], ctx->hi);
+
+	body(ctx, ctx->buffer, 64);
+
+	mdOUT(&result[0], ctx->a);
+	mdOUT(&result[4], ctx->b);
+	mdOUT(&result[8], ctx->c);
+	mdOUT(&result[12], ctx->d);
+
+	memset(ctx, 0, sizeof(*ctx));
+}
+
+
+NOTICE:
+
+Copyright (C) 2016 The Android Open Source Project
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+
+cpu-features.h:
+
+/*
+ * Copyright (C) 2010 The Android Open Source Project
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *  * Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ *  * Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in
+ *    the documentation and/or other materials provided with the
+ *    distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+ * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
+ * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
+ * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ */
+#ifndef CPU_FEATURES_H
+#define CPU_FEATURES_H
+
+#include <sys/cdefs.h>
+#include <stdint.h>
+
+__BEGIN_DECLS
+
+/* A list of valid values returned by android_getCpuFamily().
+ * They describe the CPU Architecture of the current process.
+ */
+typedef enum
+{
+	ANDROID_CPU_FAMILY_UNKNOWN = 0,
+	ANDROID_CPU_FAMILY_ARM,
+	ANDROID_CPU_FAMILY_X86,
+	ANDROID_CPU_FAMILY_MIPS,
+	ANDROID_CPU_FAMILY_ARM64,
+	ANDROID_CPU_FAMILY_X86_64,
+	ANDROID_CPU_FAMILY_MIPS64,
+
+	ANDROID_CPU_FAMILY_MAX /* do not remove */
+
+} AndroidCpuFamily;
+
+/* Return the CPU family of the current process.
+ *
+ * Note that this matches the bitness of the current process. I.e. when
+ * running a 32-bit binary on a 64-bit capable CPU, this will return the
+ * 32-bit CPU family value.
+ */
+extern AndroidCpuFamily android_getCpuFamily(void);
+
+/* Return a bitmap describing a set of optional CPU features that are
+ * supported by the current device's CPU. The exact bit-flags returned
+ * depend on the value returned by android_getCpuFamily(). See the
+ * documentation for the ANDROID_CPU_*_FEATURE_* flags below for details.
+ */
+extern uint64_t android_getCpuFeatures(void);
+
+/* The list of feature flags for ANDROID_CPU_FAMILY_ARM that can be
+ * recognized by the library (see note below for 64-bit ARM). Value details
+ * are:
+ *
+ *   VFPv2:
+ *     CPU supports the VFPv2 instruction set. Many, but not all, ARMv6 CPUs
+ *     support these instructions. VFPv2 is a subset of VFPv3 so this will
+ *     be set whenever VFPv3 is set too.
+ *
+ *   ARMv7:
+ *     CPU supports the ARMv7-A basic instruction set.
+ *     This feature is mandated by the 'armeabi-v7a' ABI.
+ *
+ *   VFPv3:
+ *     CPU supports the VFPv3-D16 instruction set, providing hardware FPU
+ *     support for single and double precision floating point registers.
+ *     Note that only 16 FPU registers are available by default, unless
+ *     the D32 bit is set too. This feature is also mandated by the
+ *     'armeabi-v7a' ABI.
+ *
+ *   VFP_D32:
+ *     CPU VFP optional extension that provides 32 FPU registers,
+ *     instead of 16. Note that ARM mandates this feature is the 'NEON'
+ *     feature is implemented by the CPU.
+ *
+ *   NEON:
+ *     CPU FPU supports "ARM Advanced SIMD" instructions, also known as
+ *     NEON. Note that this mandates the VFP_D32 feature as well, per the
+ *     ARM Architecture specification.
+ *
+ *   VFP_FP16:
+ *     Half-width floating precision VFP extension. If set, the CPU
+ *     supports instructions to perform floating-point operations on
+ *     16-bit registers. This is part of the VFPv4 specification, but
+ *     not mandated by any Android ABI.
+ *
+ *   VFP_FMA:
+ *     Fused multiply-accumulate VFP instructions extension. Also part of
+ *     the VFPv4 specification, but not mandated by any Android ABI.
+ *
+ *   NEON_FMA:
+ *     Fused multiply-accumulate NEON instructions extension. Optional
+ *     extension from the VFPv4 specification, but not mandated by any
+ *     Android ABI.
+ *
+ *   IDIV_ARM:
+ *     Integer division available in ARM mode. Only available
+ *     on recent CPUs (e.g. Cortex-A15).
+ *
+ *   IDIV_THUMB2:
+ *     Integer division available in Thumb-2 mode. Only available
+ *     on recent CPUs (e.g. Cortex-A15).
+ *
+ *   iWMMXt:
+ *     Optional extension that adds MMX registers and operations to an
+ *     ARM CPU. This is only available on a few XScale-based CPU designs
+ *     sold by Marvell. Pretty rare in practice.
+ *
+ *   AES:
+ *     CPU supports AES instructions. These instructions are only
+ *     available for 32-bit applications running on ARMv8 CPU.
+ *
+ *   CRC32:
+ *     CPU supports CRC32 instructions. These instructions are only
+ *     available for 32-bit applications running on ARMv8 CPU.
+ *
+ *   SHA2:
+ *     CPU supports SHA2 instructions. These instructions are only
+ *     available for 32-bit applications running on ARMv8 CPU.
+ *
+ *   SHA1:
+ *     CPU supports SHA1 instructions. These instructions are only
+ *     available for 32-bit applications running on ARMv8 CPU.
+ *
+ *   PMULL:
+ *     CPU supports 64-bit PMULL and PMULL2 instructions. These
+ *     instructions are only available for 32-bit applications
+ *     running on ARMv8 CPU.
+ *
+ * If you want to tell the compiler to generate code that targets one of
+ * the feature set above, you should probably use one of the following
+ * flags (for more details, see technical note at the end of this file):
+ *
+ *   -mfpu=vfp
+ *   -mfpu=vfpv2
+ *     These are equivalent and tell GCC to use VFPv2 instructions for
+ *     floating-point operations. Use this if you want your code to
+ *     run on *some* ARMv6 devices, and any ARMv7-A device supported
+ *     by Android.
+ *
+ *     Generated code requires VFPv2 feature.
+ *
+ *   -mfpu=vfpv3-d16
+ *     Tell GCC to use VFPv3 instructions (using only 16 FPU registers).
+ *     This should be generic code that runs on any CPU that supports the
+ *     'armeabi-v7a' Android ABI. Note that no ARMv6 CPU supports this.
+ *
+ *     Generated code requires VFPv3 feature.
+ *
+ *   -mfpu=vfpv3
+ *     Tell GCC to use VFPv3 instructions with 32 FPU registers.
+ *     Generated code requires VFPv3|VFP_D32 features.
+ *
+ *   -mfpu=neon
+ *     Tell GCC to use VFPv3 instructions with 32 FPU registers, and
+ *     also support NEON intrinsics (see <arm_neon.h>).
+ *     Generated code requires VFPv3|VFP_D32|NEON features.
+ *
+ *   -mfpu=vfpv4-d16
+ *     Generated code requires VFPv3|VFP_FP16|VFP_FMA features.
+ *
+ *   -mfpu=vfpv4
+ *     Generated code requires VFPv3|VFP_FP16|VFP_FMA|VFP_D32 features.
+ *
+ *   -mfpu=neon-vfpv4
+ *     Generated code requires VFPv3|VFP_FP16|VFP_FMA|VFP_D32|NEON|NEON_FMA
+ *     features.
+ *
+ *   -mcpu=cortex-a7
+ *   -mcpu=cortex-a15
+ *     Generated code requires VFPv3|VFP_FP16|VFP_FMA|VFP_D32|
+ *                             NEON|NEON_FMA|IDIV_ARM|IDIV_THUMB2
+ *     This flag implies -mfpu=neon-vfpv4.
+ *
+ *   -mcpu=iwmmxt
+ *     Allows the use of iWMMXt intrinsics with GCC.
+ *
+ * IMPORTANT NOTE: These flags should only be tested when
+ * android_getCpuFamily() returns ANDROID_CPU_FAMILY_ARM, i.e. this is a
+ * 32-bit process.
+ *
+ * When running a 64-bit ARM process on an ARMv8 CPU,
+ * android_getCpuFeatures() will return a different set of bitflags
+ */
+enum
+{
+	ANDROID_CPU_ARM_FEATURE_ARMv7 = (1 << 0),
+	ANDROID_CPU_ARM_FEATURE_VFPv3 = (1 << 1),
+	ANDROID_CPU_ARM_FEATURE_NEON = (1 << 2),
+	ANDROID_CPU_ARM_FEATURE_LDREX_STREX = (1 << 3),
+	ANDROID_CPU_ARM_FEATURE_VFPv2 = (1 << 4),
+	ANDROID_CPU_ARM_FEATURE_VFP_D32 = (1 << 5),
+	ANDROID_CPU_ARM_FEATURE_VFP_FP16 = (1 << 6),
+	ANDROID_CPU_ARM_FEATURE_VFP_FMA = (1 << 7),
+	ANDROID_CPU_ARM_FEATURE_NEON_FMA = (1 << 8),
+	ANDROID_CPU_ARM_FEATURE_IDIV_ARM = (1 << 9),
+	ANDROID_CPU_ARM_FEATURE_IDIV_THUMB2 = (1 << 10),
+	ANDROID_CPU_ARM_FEATURE_iWMMXt = (1 << 11),
+	ANDROID_CPU_ARM_FEATURE_AES = (1 << 12),
+	ANDROID_CPU_ARM_FEATURE_PMULL = (1 << 13),
+	ANDROID_CPU_ARM_FEATURE_SHA1 = (1 << 14),
+	ANDROID_CPU_ARM_FEATURE_SHA2 = (1 << 15),
+	ANDROID_CPU_ARM_FEATURE_CRC32 = (1 << 16),
+};
+
+/* The bit flags corresponding to the output of android_getCpuFeatures()
+ * when android_getCpuFamily() returns ANDROID_CPU_FAMILY_ARM64. Value details
+ * are:
+ *
+ *   FP:
+ *     CPU has Floating-point unit.
+ *
+ *   ASIMD:
+ *     CPU has Advanced SIMD unit.
+ *
+ *   AES:
+ *     CPU supports AES instructions.
+ *
+ *   CRC32:
+ *     CPU supports CRC32 instructions.
+ *
+ *   SHA2:
+ *     CPU supports SHA2 instructions.
+ *
+ *   SHA1:
+ *     CPU supports SHA1 instructions.
+ *
+ *   PMULL:
+ *     CPU supports 64-bit PMULL and PMULL2 instructions.
+ */
+enum
+{
+	ANDROID_CPU_ARM64_FEATURE_FP = (1 << 0),
+	ANDROID_CPU_ARM64_FEATURE_ASIMD = (1 << 1),
+	ANDROID_CPU_ARM64_FEATURE_AES = (1 << 2),
+	ANDROID_CPU_ARM64_FEATURE_PMULL = (1 << 3),
+	ANDROID_CPU_ARM64_FEATURE_SHA1 = (1 << 4),
+	ANDROID_CPU_ARM64_FEATURE_SHA2 = (1 << 5),
+	ANDROID_CPU_ARM64_FEATURE_CRC32 = (1 << 6),
+};
+
+/* The bit flags corresponding to the output of android_getCpuFeatures()
+ * when android_getCpuFamily() returns ANDROID_CPU_FAMILY_X86 or
+ * ANDROID_CPU_FAMILY_X86_64.
+ */
+enum
+{
+	ANDROID_CPU_X86_FEATURE_SSSE3 = (1 << 0),
+	ANDROID_CPU_X86_FEATURE_POPCNT = (1 << 1),
+	ANDROID_CPU_X86_FEATURE_MOVBE = (1 << 2),
+	ANDROID_CPU_X86_FEATURE_SSE4_1 = (1 << 3),
+	ANDROID_CPU_X86_FEATURE_SSE4_2 = (1 << 4),
+	ANDROID_CPU_X86_FEATURE_AES_NI = (1 << 5),
+	ANDROID_CPU_X86_FEATURE_AVX = (1 << 6),
+	ANDROID_CPU_X86_FEATURE_RDRAND = (1 << 7),
+	ANDROID_CPU_X86_FEATURE_AVX2 = (1 << 8),
+	ANDROID_CPU_X86_FEATURE_SHA_NI = (1 << 9),
+};
+
+/* The bit flags corresponding to the output of android_getCpuFeatures()
+ * when android_getCpuFamily() returns ANDROID_CPU_FAMILY_MIPS
+ * or ANDROID_CPU_FAMILY_MIPS64.  Values are:
+ *
+ *   R6:
+ *     CPU executes MIPS Release 6 instructions natively, and
+ *     supports obsoleted R1..R5 instructions only via kernel traps.
+ *
+ *   MSA:
+ *     CPU supports Mips SIMD Architecture instructions.
+ */
+enum
+{
+	ANDROID_CPU_MIPS_FEATURE_R6 = (1 << 0),
+	ANDROID_CPU_MIPS_FEATURE_MSA = (1 << 1),
+};
+
+/* Return the number of CPU cores detected on this device. */
+extern int android_getCpuCount(void);
+
+/* The following is used to force the CPU count and features
+ * mask in sandboxed processes. Under 4.1 and higher, these processes
+ * cannot access /proc, which is the only way to get information from
+ * the kernel about the current hardware (at least on ARM).
+ *
+ * It _must_ be called only once, and before any android_getCpuXXX
+ * function, any other case will fail.
+ *
+ * This function return 1 on success, and 0 on failure.
+ */
+extern int android_setCpu(int cpu_count, uint64_t cpu_features);
+
+#ifdef __arm__
+/* Retrieve the ARM 32-bit CPUID value from the kernel.
+ * Note that this cannot work on sandboxed processes under 4.1 and
+ * higher, unless you called android_setCpuArm() before.
+ */
+extern uint32_t android_getCpuIdArm(void);
+
+/* An ARM-specific variant of android_setCpu() that also allows you
+ * to set the ARM CPUID field.
+ */
+extern int android_setCpuArm(int cpu_count, uint64_t cpu_features, uint32_t cpu_id);
+#endif
+
+__END_DECLS
+
+#endif /* CPU_FEATURES_H */

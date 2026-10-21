@@ -57,6 +57,17 @@
     </None>
   </ItemGroup>
 
+  <!-- 第三方组件清单（「设置 → 关于 → 开源许可」的数据源）。
+       ⚠️ 这份 JSON 是**单一数据源**：打包脚本 tools/gen_third_party_notices.py 读同一个文件
+          生成 THIRD-PARTY-NOTICES.txt。改依赖只改它，别在 C# 或脚本里另抄一份清单。
+       ⚠️ LogicalName 被 Services/ThirdPartyNotices.cs 硬引用（ResourceName 常量），
+          改名必须两边一起改，否则界面会静默显示"清单读取失败"。 -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\third_party\components.json"
+                      Link="ThirdParty\components.json"
+                      LogicalName="YukinoChan.ThirdParty.components.json" />
+  </ItemGroup>
+
   <!-- RdpNative：ycn_rdp.dll + FreeRDP 运行时（仅 x64；构建前置 = 先 build YukinoChan.RdpNative） -->
   <ItemGroup Condition="'$(Platform)'=='x64'">
     <None Include="..\YukinoChan.RdpNative\build\Release\ycn_rdp.dll" Link="ycn_rdp.dll" CopyToOutputDirectory="PreserveNewest" Visible="false" />

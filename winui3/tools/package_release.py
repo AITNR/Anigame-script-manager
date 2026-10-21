@@ -12,6 +12,11 @@
    （目标账户名、桥目录等）。程序首次运行会自己生成默认配置。
 3. 看板娘素材在**仓库根** `assets/`，必须与 exe 同级落地 ——
    `AppPaths.ResolveBaseDir()` 就是靠"同级有 assets/ 或 config.json"回溯定位程序根目录的。
+4. **第三方组件的许可证副本必须随包发**。包里实际分发着 FreeRDP / WinPR / OpenSSL 的
+   DLL，这三者都是 Apache-2.0，该许可证 §4 要求分发时附上许可证副本 —— 所以打包末尾会
+   调 `gen_third_party_notices.py` 生成 `THIRD-PARTY-NOTICES.txt`，并把它列入自检。
+   许可证原文优先取构建现场的 vcpkg（版本最准）；CI 原生层命中缓存时机器上根本没有
+   `.vcpkg/`，退回仓库里冻结的副本（`third_party/licenses/`）。
 
 用法：
 
@@ -161,6 +166,9 @@ def _verify(app_dir: Path, *, require_dotnet_runtime: bool) -> None:
     need("libssl-3-x64.dll", "OpenSSL libssl（FreeRDP 依赖）")
     need("libcrypto-3-x64.dll", "OpenSSL libcrypto（FreeRDP 依赖）")
     need("assets/mascot", "看板娘素材（也是程序根目录的定位标记）")
+    # 第三方组件与许可声明。FreeRDP / WinPR / OpenSSL 都是 Apache-2.0，§4 要求分发时
+    # 随附许可证副本 —— 这个文件缺了就是不合规的包，按硬性缺失处理（与"跑不起来"同级）。
+    need("THIRD-PARTY-NOTICES.txt", "第三方组件与许可声明（Apache-2.0 要求随包分发）")
 
     # 外置 UI 看门狗（可选但强烈建议带上）：独立进程，主控端整窗假死时它不受影响，
     # 负责记录现场 + 抓 dump。进程内看门狗会被同一个冻结拖住，这就是要它的理由。
@@ -267,6 +275,39 @@ def _write_help(app_dir: Path, version: str, package_kind: str, built_at: str) -
     )
 
 
+def _write_third_party_notices(app_dir: Path, version: str, vcpkg_inst: str | None) -> None:
+    """生成 THIRD-PARTY-NOTICES.txt 落到包根目录。
+
+    为什么不提交一份"现成的"声明文件进仓库：里面的版本号必须与**这次实际分发的 DLL**
+    对应，而手抄的那份在升级 vcpkg 之后就悄悄过期了。所以每次打包都重新生成 ——
+    优先现场读 vcpkg，读不到就退回仓库里冻结的许可证副本（正文是固定文本，版本另记）。
+    两种来源都会在文件里如实标注，不假装是现场读的。
+
+    直接 import 同目录的生成器（而不是 subprocess）：错误信息与退出码都能就地传播，
+    失败就是打包失败，不存在"生成器挂了但包照样发出去"。
+    """
+    import sys as _sys
+    _here = str(Path(__file__).resolve().parent)
+    if _here not in _sys.path:
+        # 以 `python winui3/tools/package_release.py` 方式运行时 sys.path[0] 已经是它，
+        # 但被别的脚本 import 进来时不是 —— 显式补一次，别让生成器找不到。
+        _sys.path.insert(0, _here)
+
+    import gen_third_party_notices
+
+    argv = ["--out", str(app_dir / "THIRD-PARTY-NOTICES.txt"), "--version", version]
+    if vcpkg_inst:
+        argv += ["--vcpkg-inst", vcpkg_inst]
+
+    code = gen_third_party_notices.main(argv)
+    if code != 0:
+        raise SystemExit(
+            "第三方声明生成失败 —— 拒绝产出一个缺少许可证副本的发布包。\n"
+            "  本机：确认 vcpkg 在 <仓库>/../_tools/vcpkg，或用 --vcpkg-inst 指定。\n"
+            "  CI：传 --vcpkg-inst .vcpkg/installed/x64-windows。"
+        )
+
+
 # ---------------------------------------------------------------- 主流程
 
 def main(argv: list[str] | None = None) -> int:
@@ -281,6 +322,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--version", default="0.0.0", help="写进说明文件的版本号")
     parser.add_argument("--keep-pdb", action="store_true", help="保留 pdb 符号（排查崩溃用）")
     parser.add_argument("--no-zip", action="store_true", help="只铺目录，不压缩（本地调试用）")
+    parser.add_argument(
+        "--vcpkg-inst",
+        default=None,
+        help="vcpkg 的 installed/x64-windows 目录（读第三方组件许可证原文用；"
+        "不给则按 gen_third_party_notices.py 的默认规则找 <仓库>/../_tools/vcpkg）",
+    )
     args = parser.parse_args(argv)
 
     build_dir = Path(args.build_dir).resolve()
@@ -336,6 +383,7 @@ def main(argv: list[str] | None = None) -> int:
         else "框架依赖包 —— 需要目标机器已安装 .NET 8 运行时（Desktop Runtime 或 SDK 均可）。"
     )
     _write_help(app_dir, args.version, package_kind, built_at)
+    _write_third_party_notices(app_dir, args.version, args.vcpkg_inst)
 
     _verify(app_dir, require_dotnet_runtime=publish_dir is not None)
 

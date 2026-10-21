@@ -192,6 +192,15 @@
                         <Button Content="☕ 赞赏支持" Click="OnSponsor" />
                     </StackPanel>
 
+                    <!-- 第三方组件与许可证。不是装饰：包里带着 FreeRDP / WinPR / OpenSSL
+                         （均为 Apache-2.0），该许可证要求分发时让拿到程序的人能查到用了什么、
+                         什么许可。清单与打包脚本共用 third_party/components.json。 -->
+                    <HyperlinkButton x:Name="OpenSourceNoticesButton"
+                                     Content="开源许可（使用的第三方组件）"
+                                     Click="OnOpenThirdPartyNotices"
+                                     Padding="0"
+                                     HorizontalAlignment="Left" />
+
                     <!-- 版本号 + 检查更新。版本号从程序集信息版本里取（CI 传 -p:Version=），
                          不是写死的字面量 —— 见 SettingsPage.xaml.cs 的 RefreshVersionText -->
                     <TextBlock x:Name="VersionText"

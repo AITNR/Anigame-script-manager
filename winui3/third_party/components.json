@@ -1,0 +1,119 @@
+{
+  "_comment": "第三方组件的单一数据源。Python 侧（tools/gen_third_party_notices.py）用它生成 THIRD-PARTY-NOTICES.txt；C# 侧（Views/ThirdPartyNoticesDialog.cs）把它作为嵌入资源读进来渲染「关于 → 开源许可」。改这里的任何一项，两处会同时生效 —— 别在代码里另抄一份。",
+
+  "_fieldNotes": {
+    "native": "随安装包分发的 C/C++ 运行库。key = vcpkg 的 share 目录名；copyrightFrom = 原文与版本借用哪个 key（WinPR 是 FreeRDP 仓库的一部分，vcpkg 不给它单独的 copyright）；mustContain = 许可证原文必须包含的特征串，抓空时靠它报错。",
+    "managed": "NuGet 包与 .NET 运行时。package 为空表示不是 NuGet 包；version 给了就写死（用于 .NET 运行时这种不来自 csproj 的项），否则读 csproj 的 PackageReference；buildOnly = 构建期工具，不随包分发。"
+  },
+
+  "native": [
+    {
+      "key": "freerdp",
+      "name": "FreeRDP",
+      "license": "Apache License 2.0",
+      "files": ["freerdp3.dll", "freerdp-client3.dll"],
+      "purpose": "内嵌远程桌面（RDP）协议实现，用于多会话通道的画面与控制通道",
+      "homepage": "https://github.com/FreeRDP/FreeRDP",
+      "mustContain": ["Apache License", "Version 2.0"]
+    },
+    {
+      "key": "winpr3",
+      "name": "WinPR",
+      "license": "Apache License 2.0",
+      "files": ["winpr3.dll"],
+      "purpose": "FreeRDP 的 Windows 平台抽象层（线程、同步、凭据、注册表封装）",
+      "homepage": "https://github.com/FreeRDP/FreeRDP",
+      "mustContain": ["Apache License", "Version 2.0"],
+      "copyrightFrom": "freerdp",
+      "versionFrom": "freerdp"
+    },
+    {
+      "key": "openssl",
+      "name": "OpenSSL",
+      "license": "Apache License 2.0",
+      "files": ["libssl-3-x64.dll", "libcrypto-3-x64.dll"],
+      "purpose": "TLS / 密码学基础库，由 FreeRDP 在建立连接时调用",
+      "homepage": "https://github.com/openssl/openssl",
+      "mustContain": ["Apache License", "Version 2.0"]
+    },
+    {
+      "key": "zlib",
+      "name": "zlib",
+      "license": "zlib License",
+      "files": ["z.dll"],
+      "purpose": "DEFLATE 压缩，由 FreeRDP 用于位图与数据流压缩",
+      "homepage": "https://github.com/madler/zlib",
+      "mustContain": ["Jean-loup Gailly", "Mark Adler"]
+    },
+    {
+      "key": "cjson",
+      "name": "cJSON",
+      "license": "MIT License",
+      "files": ["cjson.dll"],
+      "purpose": "轻量 JSON 解析，用于 FreeRDP 桥接层的参数与状态交换",
+      "homepage": "https://github.com/DaveGamble/cJSON",
+      "mustContain": ["Permission is hereby granted"]
+    }
+  ],
+
+  "managed": [
+    {
+      "package": "Microsoft.WindowsAppSDK",
+      "name": "Windows App SDK / WinUI 3",
+      "license": "MIT License",
+      "copyright": "Copyright (c) Microsoft Corporation",
+      "purpose": "应用框架与窗口、控件、主题（本项目界面全部基于它）",
+      "homepage": "https://github.com/microsoft/WindowsAppSDK"
+    },
+    {
+      "package": "Vortice.Direct3D11",
+      "name": "Vortice.Direct3D11",
+      "license": "MIT License",
+      "copyright": "Copyright (c) Amer Koleci and Vortice contributors",
+      "purpose": "D3D11 互操作，用于把内嵌 RDP 画面送进 SwapChainPanel",
+      "homepage": "https://github.com/amerkoleci/Vortice.Windows"
+    },
+    {
+      "package": "Vortice.DXGI",
+      "name": "Vortice.DXGI",
+      "license": "MIT License",
+      "copyright": "Copyright (c) Amer Koleci and Vortice contributors",
+      "purpose": "DXGI 交换链与适配器枚举（同上，画面呈现链路）",
+      "homepage": "https://github.com/amerkoleci/Vortice.Windows"
+    },
+    {
+      "package": "System.Drawing.Common",
+      "name": "System.Drawing.Common",
+      "license": "MIT License",
+      "copyright": "Copyright (c) .NET Foundation and Contributors",
+      "purpose": "超时现场的全屏截图（仅崩溃取证用）",
+      "homepage": "https://github.com/dotnet/runtime"
+    },
+    {
+      "package": "System.Text.Encoding.CodePages",
+      "name": "System.Text.Encoding.CodePages",
+      "license": "MIT License",
+      "copyright": "Copyright (c) .NET Foundation and Contributors",
+      "purpose": "GBK(936) 等代码页支持，用于正确读取 netsh / cmdkey 的本地输出",
+      "homepage": "https://github.com/dotnet/runtime"
+    },
+    {
+      "package": "",
+      "name": ".NET Runtime",
+      "version": "8.0（自包含包内随附）",
+      "license": "MIT License",
+      "copyright": "Copyright (c) .NET Foundation and Contributors",
+      "purpose": "程序运行时（自包含包中直接分发）",
+      "homepage": "https://github.com/dotnet/runtime"
+    },
+    {
+      "package": "Microsoft.Windows.SDK.BuildTools",
+      "name": "Microsoft.Windows.SDK.BuildTools",
+      "license": "MIT License",
+      "copyright": "Copyright (c) Microsoft Corporation",
+      "purpose": "构建期工具链（不进发布包，仅列出以便溯源）",
+      "homepage": "https://aka.ms/windowssdk",
+      "buildOnly": true
+    }
+  ]
+}

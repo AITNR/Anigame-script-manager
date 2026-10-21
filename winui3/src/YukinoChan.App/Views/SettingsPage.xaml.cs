@@ -585,4 +585,19 @@ public sealed partial class SettingsPage : Page
             "赞赏支持",
             "感谢喜欢雪乃酱～\n\n如果它确实帮你省下了时间，可以在 Bilibili 主页找到支持入口，或者到 GitHub 点个 Star、提个 Issue。\n\n每一份反馈都会变成下一个版本的动力。");
     }
+
+    /// <summary>
+    /// 列出随包分发的第三方组件与各自许可证。
+    ///
+    /// 这不是"顺手加的致谢"：包里带着 FreeRDP / WinPR / OpenSSL 的 DLL，三者都是
+    /// Apache-2.0，该许可证 §4 要求分发时附上许可证副本 —— 用户得能在程序里查到用了什么。
+    /// 完整原文在发布包的 THIRD-PARTY-NOTICES.txt（由 tools/gen_third_party_notices.py 生成）。
+    ///
+    /// 必须走 DialogHelper 的全局闸门：同一时刻只允许一个 ContentDialog，直接 ShowAsync
+    /// 会抛 COMException，而这是 async void —— 异常没人接就是掀进程。
+    /// </summary>
+    private async void OnOpenThirdPartyNotices(object sender, RoutedEventArgs e)
+    {
+        await DialogHelper.ShowAsync(new ThirdPartyNoticesDialog());
+    }
 }

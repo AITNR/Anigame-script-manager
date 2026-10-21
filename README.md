@@ -216,4 +216,10 @@ docs/         文档截图
 
 ## 12. 许可证
 
-[MIT](LICENSE)
+本程序以 [MIT](LICENSE) 许可证发布。
+
+程序在分发时包含下列第三方组件：FreeRDP、WinPR（FreeRDP 的 Windows 平台抽象层）、OpenSSL（以上均为 Apache License 2.0），以及 zlib、cJSON（zlib License / MIT）；托管层为 .NET 8 运行时、Windows App SDK 与若干 NuGet 包（均为 MIT）。
+
+各组件的完整版权与许可条款见安装目录或发布包内的 `THIRD-PARTY-NOTICES.txt`，也可在程序内「设置 → 关于 → 开源许可」查看清单。
+
+组件清单维护于 `winui3/third_party/components.json`，是程序界面与打包脚本共用的唯一数据源；`THIRD-PARTY-NOTICES.txt` 由 `winui3/tools/gen_third_party_notices.py` 在打包时依据该清单与构建所用 vcpkg 的许可证原文生成，不随仓库静态维护。

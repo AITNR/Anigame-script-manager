@@ -1,0 +1,22 @@
+{
+  "cjson": {
+    "license": "MIT License",
+    "name": "cJSON",
+    "version": "1.7.19"
+  },
+  "freerdp": {
+    "license": "Apache License 2.0",
+    "name": "FreeRDP（含 WinPR）",
+    "version": "3.32.0"
+  },
+  "openssl": {
+    "license": "Apache License 2.0",
+    "name": "OpenSSL",
+    "version": "3.6.4"
+  },
+  "zlib": {
+    "license": "zlib License",
+    "name": "zlib",
+    "version": "1.3.2"
+  }
+}
