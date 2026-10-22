@@ -3645,8 +3645,9 @@ public sealed class MainViewModel : ObservableObject
         client.Disconnected += conn.OnDisconnected;
         conn.Client = client;
         _embedActiveKey = key;
-        // 静音状态需要在会话建立前就写入原生标志：rdpsnd 可能随后才起 DVC，
-        // 原生钩子会按当前标志接管音量，避免刚连上的一瞬间漏出一帧声音。
+        // 静音状态在这里就下发（早于 Connect）：原生会话尚未建立，这次调用只会被记成
+        // 「意图」并由 RdpEmbeddedClient 在 Connected 时补发 —— 别指望它当场生效。
+        // 这样做的好处是 rdpsnd 起 DVC 之前标志就已经到位，不会在连上的一瞬间漏出一帧声音。
         if (conn.LocalMuted)
         {
             client.SetMuted(true);

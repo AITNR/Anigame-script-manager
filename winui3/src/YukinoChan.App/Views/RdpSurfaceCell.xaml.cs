@@ -106,7 +106,8 @@ public sealed partial class RdpSurfaceCell : UserControl
             // 锁定是纯本机输入闸门，连接一建立就按通道配置恢复，避免重连/重启后失效。
             SurfaceView.IsInputLocked = VM.IsSurfaceInputLocked(_channelId);
 
-            // 静音状态由 VM 在发起连接时已经下发到原生会话；这里只把状态同步到新画面。
+            // 静音状态按通道记忆，VM 在发起连接时已下发过一次；这里再下发一次是幂等的。
+            // 注意会话此刻通常还没 RUNNING：SetMuted 只会记下意图，由客户端在 Connected 补发。
             if (VM.IsSurfaceMuted(_channelId))
             {
                 client.SetMuted(true);

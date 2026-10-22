@@ -54,6 +54,11 @@ namespace YukinoChan.Services
         private RdpClientState _state = RdpClientState.Idle;
         private int _session;
         private bool _disconnectRequested;
+        // 最近一次「静音意图」。原生 ycn_rdp_set_muted 在会话不是 RUNNING 时**直接拒绝**，
+        // 而调用方普遍在 Connect() 之前就下发（见 MainViewModel.TryStartEmbeddedConnect /
+        // RdpSurfaceCell.SetClient）——那一刻 session 还是 0，必然被拒。
+        // 不把意图记住，就会出现「按钮亮着已静音、实际还有声音」，只能靠用户手动关一次再开。
+        private volatile bool _requestedMuted;
         // Native callbacks must remain rooted even if asynchronous disposal times out.
         private System.Runtime.InteropServices.GCHandle _callbackRoot;
         private System.Threading.Tasks.TaskCompletionSource _completion = CompletedSource();
@@ -115,7 +120,40 @@ namespace YukinoChan.Services
 
             _onConnected = (user, session, w, h) =>
             {
-                lock (_gate) { _state = RdpClientStateMachine.Transition(_state, RdpClientEvent.NativeConnected); }
+                lock (_gate)
+                {
+                    _session = session;
+                    _state = RdpClientStateMachine.Transition(_state, RdpClientEvent.NativeConnected);
+                }
+
+                // 补发「建连之前」就记下的静音意图。
+                //
+                // 为什么必须有这一步（2026-10-22 用户报「首次启动任务时按钮显示已静音、实际仍有声，
+                // 必须关一次再开」的根因）：
+                //   ycn_rdp_set_muted 要求 state == YCN_STATE_RUNNING，否则返回 NOT_CONNECTED
+                //   且**不改** s->muted；而 UI 侧三处调用（VM 发起连接前、画面 SetClient、
+                //   按钮在 CONNECTING 期间被点）全都可能发生在 RUNNING 之前 → 全部静默失败。
+                //   UI 只认自己的 VM 标志（IsSurfaceMuted）去画图标，于是图标说静音、原生说没静音。
+                //   用户手动关一次（此时已 RUNNING，成功写 0）再开一次（成功写 1）才对上。
+                //
+                // 交给线程池而不是在原生回调线程里直接调：这里正处在 FreeRDP 的 PostConnect 里，
+                // 就地抢 g_lock 并调设备 SetVolume 属于在别人回调里做副作用；
+                // 线程池只多一跳（微秒级），而此时音频通道通常还没开始送数据。
+                // 任务体里重新读 _requestedMuted：以「最新意图」为准，避免补发把用户刚做的取消静音盖回去。
+                if (_requestedMuted)
+                {
+                    _ = System.Threading.Tasks.Task.Run(() =>
+                    {
+                        // 只对「本实例现在这条会话」补发：会话号存在复用可能，
+                        // 补发跑晚了就宁可不动，也绝不能把静音送到别的通道上去。
+                        if (_session != session)
+                        {
+                            return;
+                        }
+                        RdpNativeInterop.ycn_rdp_set_muted(session, _requestedMuted ? 1 : 0);
+                    });
+                }
+
                 Connected?.Invoke(this, (session, w, h));
             };
             _onFrameReady = (user, session, w, h, stride) =>
@@ -330,15 +368,42 @@ namespace YukinoChan.Services
         /// 静音态下服务器下发的音量 PDU 也盖不掉。只影响**本会话**，不波及其他通道。
         /// rdpsnd 通道还没连上时也安全（连上后原生侧会自动装钩子）。
         /// </summary>
+        /// <remarks>
+        /// ⚠️ 语义是「**意图已被接受**」，不是「已经生效」：会话还没建立（session == 0）时
+        /// 原生必然拒绝，这里把意图记进 <see cref="_requestedMuted"/>，等 Connected 补发。
+        /// 调用方不要拿返回值当成"现在真的静音了"。
+        /// </remarks>
         public bool SetMuted(bool muted)
-            => RdpNativeInterop.ycn_rdp_set_muted(_session, muted ? 1 : 0) == 0;
+        {
+            _requestedMuted = muted;
 
-        /// <summary>当前静音标志（原生侧为准）。会话不存在时返回 false。</summary>
+            var session = _session;
+            if (session <= 0)
+            {
+                return true; // 会话还没建立：记下意图，连上后补发（见 _onConnected）
+            }
+
+            return RdpNativeInterop.ycn_rdp_set_muted(session, muted ? 1 : 0) == 0;
+        }
+
+        /// <summary>
+        /// 最近一次下发的静音意图（含**尚未生效**的，例如建连前设的那次）。
+        /// 诊断/自检用：与 <see cref="IsMuted"/>（原生真实标志）不一致就说明存在漏发。
+        /// </summary>
+        public bool RequestedMuted => _requestedMuted;
+
+        /// <summary>原生侧当前静音标志。会话尚未建立时返回最近一次下发的意图。</summary>
         public bool IsMuted
         {
             get
             {
-                var rc = RdpNativeInterop.ycn_rdp_get_muted(_session);
+                var session = _session;
+                if (session <= 0)
+                {
+                    return _requestedMuted;
+                }
+
+                var rc = RdpNativeInterop.ycn_rdp_get_muted(session);
                 return rc == 1;
             }
         }
