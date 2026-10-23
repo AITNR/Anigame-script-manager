@@ -52,6 +52,25 @@ namespace Yomori.Views
         /// </summary>
         private int _renderGeneration;
 
+        /// <summary>
+        /// 「还没呈现过第一帧」标记（2026-10-23 修「切页回来黑屏」）。
+        ///
+        /// 原生侧只在 end_paint（服务器真的画了东西）时回调 FrameArrived，
+        /// **远端桌面完全静止时一帧都不来**。而 D3D 渲染器与首次呈现都挂在「新帧到达」上，
+        /// 于是：页面切走 → 解挂并 Dispose 渲染器；切回来 → 远端静止 → 没有新帧 →
+        /// 渲染器永远不建、画面永远空着，只有断开重连（重连必有一次全屏重绘）才恢复。
+        ///
+        /// 原生侧始终保留最后一帧（<c>s-&gt;frame</c> + <c>frame_valid</c>），
+        /// 所以这里只要允许节拍器在「没有新帧」时也主动抓一次即可恢复画面。
+        /// </summary>
+        private bool _pendingFirstFrame;
+
+        /// <summary><see cref="_pendingFirstFrame"/> 的重试次数（抓帧失败时的退避上限）。</summary>
+        private int _pendingFirstFrameTries;
+
+        /// <summary>首帧重试上限：约 10 秒（16ms 一拍）。超过就停手，避免会话已断时空转 P/Invoke。</summary>
+        private const int PendingFirstFrameMaxTries = 600;
+
         /// <summary>本实例当前在飞（已发出、尚未结束）的渲染任务数；仅供诊断。</summary>
         private int _renderInFlight;
 
@@ -220,6 +239,7 @@ namespace Yomori.Views
             _dispatcher = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
             _client = new RdpEmbeddedClient();
             HookClient(_client);
+            MarkPendingFirstFrame();
             StartPresentTimer();
 
             ShowOverlay("连接中…", progress: true);
@@ -249,6 +269,9 @@ namespace Yomori.Views
             HookClient(_client);
 
             _dispatcher = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
+            // 切页回来 / 全屏接管：远端可能自始至终没画过任何东西（静止桌面），
+            // FrameArrived 一次都不会来，必须允许节拍器主动抓一次原生缓存的最后一帧。
+            MarkPendingFirstFrame();
             StartPresentTimer();
             ShowOverlay("全屏会话", progress: false, hide: true);
             UpdatePanelLayout();
@@ -316,6 +339,8 @@ namespace Yomori.Views
             RetireSoftRenderState();
             _presentTimer?.Stop();
             _presentTimer = null;
+            _pendingFirstFrame = false;
+            _pendingFirstFrameTries = 0;
             _lastFrameArrivedTick = 0;
             _frameSeq = 0;
             _presentedSeq = 0;
@@ -354,6 +379,8 @@ namespace Yomori.Views
             RetireSoftRenderState();
             _presentTimer?.Stop();
             _presentTimer = null;
+            _pendingFirstFrame = false;
+            _pendingFirstFrameTries = 0;
             _lastFrameArrivedTick = 0;
             _frameSeq = 0;
             _presentedSeq = 0;
@@ -379,6 +406,67 @@ namespace Yomori.Views
             var state = _softRenderState;
             _softRenderState = null;
             state?.Retire();
+        }
+
+        /// <summary>
+        /// 标记「本实例还没呈现过画面」——节拍器会因此在没有新帧的情况下也主动抓一帧。
+        /// 接管一条已经连上的会话（切页回来 / 全屏接管）时必须调，否则远端静止就永远黑着。
+        /// </summary>
+        private void MarkPendingFirstFrame()
+        {
+            _pendingFirstFrame = true;
+            _pendingFirstFrameTries = 0;
+        }
+
+        /// <summary>
+        /// 用给定帧尺寸建 D3D 渲染器并挂到面板上；已建好则直接返回 true。
+        ///
+        /// ⚠️ <b>必须在 UI 线程调用</b>（<see cref="RdpD3DRenderer.Initialize"/> 内部要 SetSwapChain 碰 XAML 面板）。
+        /// ⚠️ <b>幂等</b>：OnFrameArrived 的排队体和呈现节拍器两条路都可能走到这里。
+        /// </summary>
+        private bool EnsureRendererOnUi(uint width, uint height)
+        {
+            if (_renderer is { Initialized: true })
+            {
+                return true;
+            }
+
+            if (_d3dFailed || Yomori.Services.RdpD3DRenderer.ShouldUseSoftware)
+            {
+                return false;
+            }
+
+            _renderer = new RdpD3DRenderer();
+            if (_renderer.Initialize(PartPanel, width, height))
+            {
+                PartPanel.Visibility = Visibility.Visible;
+                PartViewbox.Visibility = Visibility.Visible;
+                PartFrame.Visibility = Visibility.Collapsed;
+                DiagnosticLog?.Invoke($"[embed] D3D 渲染器初始化成功（{width}×{height}）");
+                LogRenderPathOnce("D3D11 / SwapChainPanel");
+            }
+            else
+            {
+                DiagnosticLog?.Invoke($"[embed] D3D 初始化失败（{_renderer.LastError}），回退 SoftwareBitmap");
+                _renderer.Dispose();
+                _renderer = null;
+                _d3dFailed = true;
+                CreateSoftRenderState();
+                PartFrame.Visibility = Visibility.Visible;
+                PartPanel.Visibility = Visibility.Collapsed;
+                PartViewbox.Visibility = Visibility.Collapsed;
+            }
+
+            // 面板 DIP 尺寸 = 帧尺寸；Viewbox(Uniform) 负责缩放与居中
+            PartPanel.Width = width;
+            PartPanel.Height = height;
+            PartViewbox.Visibility = PartPanel.Visibility;
+            // Connected 事件可能被错过（HookClient 晚于连接），这里补写尺寸 ——
+            // 必须写，否则 UpdatePanelLayout / 坐标映射会一直拿到 0（M5 黑屏同源问题）。
+            _remoteWidth = width;
+            _remoteHeight = height;
+
+            return _renderer is { Initialized: true };
         }
 
         private bool IsCurrentClient(RdpEmbeddedClient client, int generation) =>
@@ -604,32 +692,7 @@ namespace Yomori.Views
                         return;
                     }
 
-                    _renderer = new RdpD3DRenderer();
-                    if (_renderer.Initialize(PartPanel, initW, initH))
-                    {
-                        PartPanel.Visibility = Visibility.Visible;
-                        PartViewbox.Visibility = Visibility.Visible;
-                        PartFrame.Visibility = Visibility.Collapsed;
-                        DiagnosticLog?.Invoke($"[embed] D3D 渲染器初始化成功（{initW}×{initH}）");
-                        LogRenderPathOnce("D3D11 / SwapChainPanel");
-                    }
-                    else
-                    {
-                        DiagnosticLog?.Invoke($"[embed] D3D 初始化失败（{_renderer.LastError}），回退 SoftwareBitmap");
-                        _renderer.Dispose();
-                        _renderer = null;
-                        _d3dFailed = true;
-                        CreateSoftRenderState();
-                        PartFrame.Visibility = Visibility.Visible;
-                    }
-                    // 面板 DIP 尺寸 = 帧尺寸；Viewbox(Uniform) 负责缩放与居中
-                    PartPanel.Width = initW;
-                    PartPanel.Height = initH;
-                    PartViewbox.Visibility = PartPanel.Visibility;
-                    // Connected 事件可能被错过（HookClient 晚于连接），这里补写尺寸 ——
-                    // 必须写，否则 UpdatePanelLayout / 坐标映射会一直拿到 0（M5 黑屏同源问题）。
-                    _remoteWidth = initW;
-                    _remoteHeight = initH;
+                    EnsureRendererOnUi(initW, initH);
                 });
                 if (enqueued != true)
                 {
@@ -697,11 +760,22 @@ namespace Yomori.Views
             {
                 return;
             }
+
+            // 还没上屏（刚 Attach、布局尚未完成）：交换链和软件位图都要往可视树上挂，
+            // 这时候抓帧只会白抓 —— 让 _pendingFirstFrame 留着，下一拍再来。
+            if (!IsLoaded)
+            {
+                return;
+            }
             var now = Environment.TickCount64;
             EmitFrameRhythmStats(now);
 
             var seq = System.Threading.Volatile.Read(ref _frameSeq);
-            if (seq == _presentedSeq)
+
+            // 「还没呈现过第一帧」时不受 _frameSeq 约束：远端静止的桌面永远不会触发
+            // FrameArrived（原生只在 end_paint 回调），光等新帧就是永久黑屏。
+            // 原生缓存里始终有最后一帧，抓它即可。
+            if (seq == _presentedSeq && !_pendingFirstFrame)
             {
                 return; // 还没有新帧：保留最后一帧即可
             }
@@ -710,12 +784,28 @@ namespace Yomori.Views
             {
                 return;
             }
-            _presentedSeq = seq;
 
             if (!client.TryCopyFrame(out var w, out var h, out var stride, out var pixels))
             {
+                // ⚠️ 这里**不能**推进 _presentedSeq：会话还在 CONNECTING / 尺寸切换瞬间
+                // 抓帧会失败，一旦推进就再也等不到这一帧了（正是切页回来黑屏的另一半原因）。
+                if (_pendingFirstFrame && ++_pendingFirstFrameTries > PendingFirstFrameMaxTries)
+                {
+                    _pendingFirstFrame = false; // 会话大概已断：停止空转，等下一条连接
+                }
                 return; // 尺寸切换瞬间等：下一拍再来
             }
+
+            _presentedSeq = seq;
+            _pendingFirstFrame = false;
+
+            // 渲染器是挂到「本实例的面板」上的，切页回来时新实例还没有渲染器；
+            // 上面既然已经抓到帧（拿得到真实尺寸），就地建好，不必再等下一帧触发。
+            if (_renderer is null && !_d3dFailed && !Yomori.Services.RdpD3DRenderer.ShouldUseSoftware)
+            {
+                EnsureRendererOnUi(w, h);
+            }
+
             if (_renderer is { Initialized: true })
             {
                 if (_renderer.Present(pixels, w, h, stride))
