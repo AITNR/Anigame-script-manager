@@ -296,7 +296,7 @@ jobs:
             -c Release -p:Platform=x64 -p:Version=${{ steps.ver.outputs.version }} `
             -r win-x64 --self-contained true -o $pub
 
-      - name: 打包（补齐 .pri / XBF / FreeRDP 运行库 / 看板娘素材 + 自检）
+      - name: 打包（补齐 .pri / XBF / FreeRDP 运行库 / 图标 + 自检）
         id: pack
         shell: pwsh
         env:

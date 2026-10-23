@@ -18,6 +18,9 @@ build/
 dist/
 *.spec
 
+# 本地试跑打包脚本产生的目录（package_release.py --out）
+_dist*/
+
 # Runtime logs
 logs/
 *.log

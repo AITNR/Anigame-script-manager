@@ -10,7 +10,7 @@
    所以打包 = publish 输出（自包含时，带 .NET 运行时）+ build 输出（补齐运行期文件）。
 2. **绝不能把仓库根的 `config.json` 打进包**：那是使用者本机的真实配置
    （目标账户名、桥目录等）。程序首次运行会自己生成默认配置。
-3. 看板娘素材在**仓库根** `assets/`，必须与 exe 同级落地 ——
+3. 应用图标等资源在**仓库根** `assets/`，必须与 exe 同级落地 ——
    `AppPaths.ResolveBaseDir()` 就是靠"同级有 assets/ 或 config.json"回溯定位程序根目录的。
 4. **第三方组件的许可证副本必须随包发**。包里实际分发着 FreeRDP / WinPR / OpenSSL 的
    DLL，这三者都是 Apache-2.0，该许可证 §4 要求分发时附上许可证副本 —— 所以打包末尾会
@@ -165,7 +165,7 @@ def _verify(app_dir: Path, *, require_dotnet_runtime: bool) -> None:
     need("cjson.dll", "cJSON（FreeRDP 依赖）")
     need("libssl-3-x64.dll", "OpenSSL libssl（FreeRDP 依赖）")
     need("libcrypto-3-x64.dll", "OpenSSL libcrypto（FreeRDP 依赖）")
-    need("assets/mascot", "看板娘素材（也是程序根目录的定位标记）")
+    need("assets/icon.ico", "应用图标（也是程序根目录的定位标记）")
     # 第三方组件与许可声明。FreeRDP / WinPR / OpenSSL 都是 Apache-2.0，§4 要求分发时
     # 随附许可证副本 —— 这个文件缺了就是不合规的包，按硬性缺失处理（与"跑不起来"同级）。
     need("THIRD-PARTY-NOTICES.txt", "第三方组件与许可声明（Apache-2.0 要求随包分发）")
@@ -255,7 +255,7 @@ Yomori / 二游脚本助手 · WinUI 3 版
 {package_kind}
 
 目录约定：
-  assets/          看板娘与卡片素材（删掉会导致程序找不到自己的根目录）
+  assets/          应用图标等资源（删掉会导致程序找不到自己的根目录）
   logs/            运行日志（首次运行后生成）
   runtime_stats/   耗时统计（首次运行后生成）
   config.json      你的配置，**不随包发布**（首次运行自动生成）
@@ -371,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
     if publish_dir is not None:
         copied += _copy_tree(publish_dir, app_dir, skip_junk=False)
 
-    # 看板娘素材：必须在 exe 同级
+    # 资源目录：必须在 exe 同级（AppPaths 靠它认定程序根目录）
     copied += _copy_tree(assets_dir, app_dir / "assets", skip_junk=False)
 
     import datetime
