@@ -22,7 +22,8 @@ Python / PySide6 版（v1.0 RC1，legacy）的变更记录见仓库根的 [CHANG
   窗口恢复单列布局。`config.json` 不再写入 `window.mascot_panel`
   （旧配置里的该键会被忽略，不需要手工清理）。运行状态仍由主页状态卡与通道概览呈现。
 - **更换应用图标**：`assets/icon.ico` 换为新 logo（16–256 共 9 档尺寸），
-  另存 `assets/logo.png` 供文档使用。
+  另存 `assets/logo.png` 供标题栏与文档使用。两者背景均为**透明**——
+  原先是白底圆角图，深色标题栏与任务栏上会露出一块白方框。
 - **会话代理改为独立工程**（`src/Yomori.Agent`）：代理不再复用主控端可执行文件，
   单独发布一份不引用 WinUI / WindowsAppSDK 的纯后台程序，随包放在安装目录的 `agent\` 下。
   - 部署到 `%ProgramData%\Yomori\agent` 的体积由 **228MB 降到约 73MB**，
