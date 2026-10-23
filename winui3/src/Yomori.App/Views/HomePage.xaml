@@ -5,14 +5,15 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
     <!-- 主页（2026-10-23 改版）：
-         版式参考「横幅图 + 卡片区」：顶部一张通栏图（贴窗口左右边、固定高度、右键更换），
-         图左上角叠应用名；图下方是内容区，标题行 + 三张功能入口卡。
+         版式参考「横幅图 + 卡片区」：顶部一张通栏图（贴窗口左右边、撑满剩余高度、右键更换），
+         图左上角叠应用名；图下方是内容区，标题行 + 四张功能入口卡。
          原来的「总览」标题 + 描述 + 状态四格换成了这张图，底部「会话通道」概览整块删除。 -->
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
+            <!-- 横幅吃满剩余高度：卡片区之下不再留一大片空背景 -->
             <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <!-- 上次运行异常报告（有才占位，单独一行，不压在图上面） -->
@@ -32,8 +33,8 @@
             </InfoBar.ActionButton>
         </InfoBar>
 
-        <!-- 横幅图：贴内容区左右边，整块右键可换 -->
-        <Grid x:Name="BannerHost" Grid.Row="1" Height="300">
+        <!-- 横幅图：贴内容区左右边、吃掉剩余高度，整块右键可换 -->
+        <Grid x:Name="BannerHost" Grid.Row="1" MinHeight="160">
             <Image x:Name="BannerImage"
                    Stretch="UniformToFill"
                    Visibility="Collapsed" />
