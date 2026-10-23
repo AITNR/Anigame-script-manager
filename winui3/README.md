@@ -343,7 +343,7 @@ winui3/
       ├─ RdpView.xaml(.cs)         # 内嵌画面控件（D3D 交换链 + 输入 + 帧率统计）
       ├─ RdpFullScreenCoordinator.cs / RdpFullScreenWindow.cs   # 全屏编排（两页共用）
       ├─ RdpChannelWindow.cs       # 通道「弹出独立窗口」（复用同一 client，不带钩子）
-      ├─ HomePage.xaml(.cs)        # 主页（一张可右键更换的图）
+      ├─ HomePage.xaml(.cs)        # 总览（含会话通道概览卡）
       ├─ TasksPage.xaml(.cs)       # 任务管理：三栏（执行通道 / 通道内任务 / 任务详情），按通道编排
       ├─ StatsPage.xaml(.cs)       # 耗时统计
       ├─ LogsPage.xaml(.cs)        # 运行日志

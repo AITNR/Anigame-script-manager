@@ -412,27 +412,6 @@ public sealed class MainViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 改主页大图后立刻落盘。
-    ///
-    /// 刻意不走 <see cref="SaveConfig"/>：那条路径会顺带重排任务序号、重新同步开机自启项，
-    /// 换一张图不该牵动这些。这里只写 config.json。
-    /// </summary>
-    public void SaveHomeBanner(string? path)
-    {
-        Config.HomeBannerPath = (path ?? string.Empty).Trim();
-
-        try
-        {
-            _configManager.Save(Config);
-        }
-        catch (Exception ex)
-        {
-            AppendLog($"保存首页图片设置失败：{ex.Message}");
-            _ = DialogHelper.ShowMessageAsync("保存失败", $"保存首页图片设置失败：{ex.Message}");
-        }
-    }
-
-    /// <summary>
     /// 记录主窗口几何，用于下次启动时"记忆上次大小"。
     ///
     /// <paramref name="bounds"/> 为 null 表示当前处于最大化/最小化等"非还原"状态：
@@ -3643,6 +3622,40 @@ public sealed class MainViewModel : ObservableObject
 
     /// <summary>本轮执行涉及的全部通道会话（「本地执行」组在最前）。</summary>
     public IReadOnlyList<RdpChannelSession> Sessions => _sessions;
+
+    /// <summary>
+    /// 主页「会话通道」概览的数据源。由主页按 1Hz 调 <see cref="RefreshChannelOverview"/> 重建 ——
+    /// 通道会话的属性不是可观察的，重建集合是最省事又足够便宜的做法（最多 8 条通道）。
+    /// </summary>
+    public ObservableCollection<ChannelOverviewItem> ChannelOverview { get; } = new();
+
+    /// <summary>主页上有没有可展示的通道（没跑过任务时为 false，整块卡片隐藏）。</summary>
+    public bool HasChannelOverview => _sessions.Count > 0;
+
+    /// <summary>把当前各通道会话的状态拍成快照，供主页概览显示。</summary>
+    public void RefreshChannelOverview()
+    {
+        ChannelOverview.Clear();
+
+        foreach (var session in _sessions)
+        {
+            ChannelOverview.Add(new ChannelOverviewItem(
+                session.ChannelId,
+                session.DisplayName,
+                session.IsRemote
+                    ? $"{session.TargetHost}  /  {session.TargetUser}"
+                    : "主控端当前会话",
+                session.StatusText,
+                $"{session.Progress} / {session.Total}",
+                session.HeartbeatText,
+                session.IsStale,
+                session.IsRemote,
+                session.IsActive,
+                session.HasCommand));
+        }
+
+        OnPropertyChanged(nameof(HasChannelOverview));
+    }
 
     /// <summary>
     /// 当前展示的通道。M4 引入通道页面后由页面切换来设置；在此之前取第一条远程通道
