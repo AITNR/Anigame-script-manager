@@ -721,6 +721,18 @@ public sealed partial class MainWindow : Window
     /// <summary>状态栏的轮询计时器。只在主窗口生命周期内跑。</summary>
     private DispatcherQueueTimer? _sideStatusTimer;
 
+    /// <summary>展开/收起的宽度过渡时长。</summary>
+    private const int SideStatusSlideMs = 200;
+
+    /// <summary>切换过程中"旧内容淡出"的时长（短于宽度过渡，先看不见再变窄，避免文字被挤成一团）。</summary>
+    private const int SideStatusFadeOutMs = 90;
+
+    /// <summary>切换完成后"新内容淡入"的时长。</summary>
+    private const int SideStatusFadeInMs = 140;
+
+    /// <summary>正在跑的过渡动画（重复点击时先停掉它，不等它自己结束）。</summary>
+    private Storyboard? _sideStatusBoard;
+
     /// <summary>状态栏当前是否收起（与配置里的 <c>window.sidebar_collapsed</c> 同步）。</summary>
     private bool _sideStatusCollapsed;
 
@@ -762,23 +774,125 @@ public sealed partial class MainWindow : Window
     /// <summary>
     /// 切换展开/收起。
     ///
-    /// <paramref name="persist"/> 为 false 时只在界面上应用（启动时按配置恢复用），
-    /// 不写盘 —— 否则启动那一刻会把"配置里本来就是 false"再写一遍。
+    /// <para>用户点击时播一段过渡：旧内容淡出 → 宽度滑到目标值 → 新内容淡入。
+    /// 宽度是**布局属性**，动画必须开 <c>EnableDependentAnimation</c>，否则整段会被静默跳过
+    /// （项目里切子菜单那套动画踩过同一个坑）。</para>
+    ///
+    /// <para><paramref name="persist"/> 为 false 时只在界面上应用（启动时按配置恢复用），
+    /// 不写盘 —— 否则启动那一刻会把"配置里本来就是 false"再写一遍。</para>
     /// </summary>
     private void SetSideStatusCollapsed(bool collapsed, bool persist)
     {
+        var changed = _sideStatusCollapsed != collapsed;
         _sideStatusCollapsed = collapsed;
-
-        // 两套内容互斥显示 + 容器改宽。改宽在主线程上会触发一次布局，
-        // 但只在用户点按钮时发生，谈不上频繁。
-        SideStatusExpanded.Visibility = collapsed ? Visibility.Collapsed : Visibility.Visible;
-        SideStatusCollapsed.Visibility = collapsed ? Visibility.Visible : Visibility.Collapsed;
-        SideStatusPanel.Width = collapsed ? SideStatusCollapsedWidth : SideStatusExpandedWidth;
 
         if (persist)
         {
             VM.SaveSidebarCollapsed(collapsed);
         }
+
+        // 启动恢复（状态没变）或控件还没进过布局树：直接落终态，不播动画
+        // —— 否则程序一起手就自己"啪"地缩一下。
+        if (changed && SideStatusPanel.IsLoaded)
+        {
+            PlaySideStatusTransition(collapsed);
+            return;
+        }
+
+        _sideStatusBoard?.Stop();
+        _sideStatusBoard = null;
+        ApplySideStatusLayout(collapsed);
+    }
+
+    /// <summary>把状态栏直接摆成某个终态（不带动画）。两套内容各留 Opacity=1。</summary>
+    private void ApplySideStatusLayout(bool collapsed)
+    {
+        SideStatusExpanded.Visibility = collapsed ? Visibility.Collapsed : Visibility.Visible;
+        SideStatusCollapsed.Visibility = collapsed ? Visibility.Visible : Visibility.Collapsed;
+        SideStatusPanel.Width = collapsed ? SideStatusCollapsedWidth : SideStatusExpandedWidth;
+        SideStatusExpanded.Opacity = 1;
+        SideStatusCollapsed.Opacity = 1;
+    }
+
+    /// <summary>
+    /// 播一段展开/收起过渡。
+    ///
+    /// <para>顺序刻意是"先淡出、再变宽、最后淡入"：宽度过渡期间内容仍参与布局，
+    /// 如果它还是可见的，264px 的文字会被一路挤扁，看起来像在抽搐。
+    /// 90ms 内淡到看不见，剩下的变宽过程就是干净的一条空面板在滑。</para>
+    ///
+    /// <para>两段动画分开播（Completed 里接第二段），而不是塞进一个 Storyboard 用 BeginTime：
+    /// 第二段依赖第一段的终态（切换 Visibility），用一个 board 就得靠延迟猜时间。</para>
+    /// </summary>
+    private void PlaySideStatusTransition(bool collapsed)
+    {
+        // 上一次过渡还没结束（用户连点）：直接停掉，接着播这一次。
+        // Stop 会把动画值释放回基础值，所以下面显式把两边的 Opacity 归 1 再重新淡出。
+        _sideStatusBoard?.Stop();
+        _sideStatusBoard = null;
+        SideStatusExpanded.Opacity = 1;
+        SideStatusCollapsed.Opacity = 1;
+
+        var outgoing = collapsed ? (FrameworkElement)SideStatusExpanded : SideStatusCollapsed;
+        var incoming = collapsed ? (FrameworkElement)SideStatusCollapsed : SideStatusExpanded;
+
+        var board = new Storyboard();
+
+        var fadeOut = new DoubleAnimation
+        {
+            To = 0,
+            Duration = new Duration(TimeSpan.FromMilliseconds(SideStatusFadeOutMs)),
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+        };
+        Storyboard.SetTarget(fadeOut, outgoing);
+        Storyboard.SetTargetProperty(fadeOut, "Opacity");
+        board.Children.Add(fadeOut);
+
+        // 宽度属于依赖动画：不开这个开关，这一条会被静默丢弃，面板会"瞬移"而不是滑过去
+        var slide = new DoubleAnimation
+        {
+            To = collapsed ? SideStatusCollapsedWidth : SideStatusExpandedWidth,
+            Duration = new Duration(TimeSpan.FromMilliseconds(SideStatusSlideMs)),
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseInOut },
+            EnableDependentAnimation = true,
+        };
+        Storyboard.SetTarget(slide, SideStatusPanel);
+        Storyboard.SetTargetProperty(slide, "Width");
+        board.Children.Add(slide);
+
+        board.Completed += (_, _) =>
+        {
+            board.Stop();
+            _sideStatusBoard = null;
+
+            // 先落终态（切 Visibility + 把宽度钉到目标值），再让新内容淡入
+            ApplySideStatusLayout(collapsed);
+            incoming.Opacity = 0;
+
+            var fadeIn = new DoubleAnimation
+            {
+                To = 1,
+                Duration = new Duration(TimeSpan.FromMilliseconds(SideStatusFadeInMs)),
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+            };
+            Storyboard.SetTarget(fadeIn, incoming);
+            Storyboard.SetTargetProperty(fadeIn, "Opacity");
+
+            var inBoard = new Storyboard();
+            inBoard.Children.Add(fadeIn);
+
+            // HoldEnd 会让动画值长期压住 Opacity，这之后谁再改它都不生效 —— 必须卸载
+            inBoard.Completed += (_, _) =>
+            {
+                inBoard.Stop();
+                incoming.Opacity = 1;
+            };
+
+            inBoard.Begin();
+        };
+
+        _sideStatusBoard = board;
+        board.Begin();
     }
 
     private void OnToggleSideStatus(object sender, RoutedEventArgs e) =>
@@ -895,7 +1009,8 @@ public sealed partial class MainWindow : Window
             var session = sessions[i];
             row.Show(
                 session.DisplayName,
-                $"{session.Progress} / {session.Total}",
+                session.Progress,
+                session.Total,
                 session.IsStale ? $"{session.StatusText}（失联）" : session.StatusText,
                 session.IsActive);
         }

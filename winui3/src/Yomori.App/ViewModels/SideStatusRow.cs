@@ -21,6 +21,7 @@ public sealed class SideStatusRow : ObservableObject
     private string _name = string.Empty;
     private string _progressText = string.Empty;
     private string _stateText = string.Empty;
+    private double _progressRatio;
     private Visibility _activeDot = Visibility.Collapsed;
     private Visibility _visible = Visibility.Collapsed;
 
@@ -36,6 +37,18 @@ public sealed class SideStatusRow : ObservableObject
     {
         get => _progressText;
         set => SetProperty(ref _progressText, value);
+    }
+
+    /// <summary>
+    /// 该通道的进度比例（0..1），直接喂给这一行自己的细进度条。
+    ///
+    /// <para>不做成"从 ProgressText 里解析"：比例是本轮汇总时就有的原始数字，
+    /// 让界面去拆字符串既慢又容易在「合计」「总计」这类文案上出错。</para>
+    /// </summary>
+    public double ProgressRatio
+    {
+        get => _progressRatio;
+        set => SetProperty(ref _progressRatio, value);
     }
 
     /// <summary>该通道的状态文案（运行中 / 已完成 / 已失联…）。</summary>
@@ -60,10 +73,13 @@ public sealed class SideStatusRow : ObservableObject
     }
 
     /// <summary>把某一行的显示内容整体刷一遍（值没变时 SetProperty 不会发通知）。</summary>
-    public void Show(string name, string progressText, string stateText, bool active)
+    public void Show(string name, int progress, int total, string stateText, bool active)
     {
         Name = name;
-        ProgressText = progressText;
+
+        // 总数是 0（还没下发 / 刚复位）时给 0 而不是 NaN —— ProgressBar 拿到 NaN 会把值拦在旧值上
+        ProgressRatio = total > 0 ? Math.Clamp((double)progress / total, 0d, 1d) : 0d;
+        ProgressText = $"{progress} / {total}";
         StateText = stateText;
         ActiveDot = active ? Visibility.Visible : Visibility.Collapsed;
         Visible = Visibility.Visible;
