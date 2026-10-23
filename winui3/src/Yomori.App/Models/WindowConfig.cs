@@ -34,6 +34,7 @@ public sealed class WindowConfig : ObservableObject, ICloneable
     private int _width;
     private int _height;
     private bool _maximized;
+    private bool _sidebarCollapsed;
     private string _closeAction = CloseActionAsk;
 
     /// <summary>窗口左上角 X（物理像素）。null = 未记录。</summary>
@@ -74,6 +75,19 @@ public sealed class WindowConfig : ObservableObject, ICloneable
     {
         get => _maximized;
         set => SetProperty(ref _maximized, value);
+    }
+
+    /// <summary>
+    /// 主窗口右侧「执行状态栏」是否处于收起状态。
+    ///
+    /// <para>和窗口几何放在一起是因为它同属纯界面偏好，也同一批落盘；
+    /// 老配置里没有这个键 → 默认 false（展开），与刚做完时的观感一致。</para>
+    /// </summary>
+    [JsonPropertyName("sidebar_collapsed")]
+    public bool SidebarCollapsed
+    {
+        get => _sidebarCollapsed;
+        set => SetProperty(ref _sidebarCollapsed, value);
     }
 
     /// <summary>

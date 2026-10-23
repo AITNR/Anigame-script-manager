@@ -77,43 +77,245 @@
 
             <NavigationView.Content>
                 <Grid>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="*" />
-                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
 
-                    <!-- 运行控制栏 -->
-                    <Border Grid.Row="0" Grid.Column="0"
-                            Padding="12,8"
+                    <!-- 左：运行控制栏 + 页面容器 -->
+                    <Grid Grid.Column="0">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+
+                        <!-- 运行控制栏 -->
+                        <Border Grid.Row="0"
+                                Padding="12,8"
+                                BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                                BorderThickness="0,0,0,1">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Button Content="开始执行"
+                                        Style="{StaticResource AccentButtonStyle}"
+                                        IsEnabled="{x:Bind VM.CanStart, Mode=OneWay}"
+                                        Click="OnStartClicked" />
+                                <Button Content="暂停执行"
+                                        IsEnabled="{x:Bind VM.CanPause, Mode=OneWay}"
+                                        Click="OnPauseClicked" />
+                                <Button Content="继续执行"
+                                        IsEnabled="{x:Bind VM.IsRunning, Mode=OneWay}"
+                                        Click="OnResumeClicked" />
+                                <Button Content="停止执行  F8"
+                                        IsEnabled="{x:Bind VM.CanStop, Mode=OneWay}"
+                                        Click="OnStopClicked"
+                                        Background="{StaticResource YomoriDangerBrush}" />
+                                <Button Content="紧急停止全部  Ctrl+Alt+F8"
+                                        IsEnabled="{x:Bind VM.CanStop, Mode=OneWay}"
+                                        Click="OnEmergencyStopClicked"
+                                        Background="{StaticResource YomoriDangerDeepBrush}" />
+                                <Button Content="保存配置" Click="OnSaveClicked" />
+                                <Button Content="取消关机" Click="OnCancelShutdownClicked" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- 页面容器 -->
+                        <Frame x:Name="ContentFrame" Grid.Row="1" />
+                    </Grid>
+
+                    <!-- ===== 右侧执行状态栏（可收起） =====
+                         宽度与展开/收起两套内容的切换全在代码里做（SetSideStatusCollapsed）：
+                         XAML 里用 x:Bind 绑 bool 到 Width / Visibility 都需要转换器，不如直接设。 -->
+                    <Border x:Name="SideStatusPanel"
+                            Grid.Column="1"
+                            Width="264"
                             BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
-                            BorderThickness="0,0,0,1">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <Button Content="开始执行"
-                                    Style="{StaticResource AccentButtonStyle}"
-                                    IsEnabled="{x:Bind VM.CanStart, Mode=OneWay}"
-                                    Click="OnStartClicked" />
-                            <Button Content="暂停执行"
-                                    IsEnabled="{x:Bind VM.CanPause, Mode=OneWay}"
-                                    Click="OnPauseClicked" />
-                            <Button Content="继续执行"
-                                    IsEnabled="{x:Bind VM.IsRunning, Mode=OneWay}"
-                                    Click="OnResumeClicked" />
-                            <Button Content="停止执行  F8"
-                                    IsEnabled="{x:Bind VM.CanStop, Mode=OneWay}"
-                                    Click="OnStopClicked"
-                                    Background="{StaticResource YomoriDangerBrush}" />
-                            <Button Content="紧急停止全部  Ctrl+Alt+F8"
-                                    IsEnabled="{x:Bind VM.CanStop, Mode=OneWay}"
-                                    Click="OnEmergencyStopClicked"
-                                    Background="{StaticResource YomoriDangerDeepBrush}" />
-                            <Button Content="保存配置" Click="OnSaveClicked" />
-                            <Button Content="取消关机" Click="OnCancelShutdownClicked" />
-                        </StackPanel>
-                    </Border>
+                            BorderThickness="1,0,0,0"
+                            Background="{ThemeResource LayerFillColorAltBrush}">
 
-                    <!-- 页面容器 -->
-                    <Frame x:Name="ContentFrame"
-                           Grid.Row="1" Grid.Column="0" />
+                        <Grid>
+                            <!-- 展开态 -->
+                            <Grid x:Name="SideStatusExpanded">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                </Grid.RowDefinitions>
+
+                                <!-- 头部：标题 + 收起按钮 -->
+                                <Grid Grid.Row="0" Margin="14,8,8,6" ColumnSpacing="6">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <TextBlock Grid.Column="0"
+                                               Text="执行状态"
+                                               FontSize="12"
+                                               Opacity="0.7"
+                                               VerticalAlignment="Center" />
+
+                                    <Button Grid.Column="1"
+                                            Width="28" Height="28"
+                                            Padding="0"
+                                            Background="Transparent"
+                                            BorderThickness="0"
+                                            Click="OnToggleSideStatus"
+                                            ToolTipService.ToolTip="收起状态栏"
+                                            AutomationProperties.Name="收起执行状态栏">
+                                        <!-- E76C = ChevronRight。SymbolIcon 没有 FontSize，
+                                             且 Symbol 枚举里没有 Chevron* —— 一律用 FontIcon。 -->
+                                        <FontIcon Glyph="&#xE76C;" FontSize="12" />
+                                    </Button>
+                                </Grid>
+
+                                <!-- 状态值 + 总进度 -->
+                                <StackPanel Grid.Row="1" Margin="14,0,14,10" Spacing="8">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <!-- 状态色点：三色各一个，代码只切 Visibility，
+                                             颜色由主题资源决定，不在这里硬编码。 -->
+                                        <Grid Width="10" Height="10" VerticalAlignment="Center">
+                                            <Ellipse x:Name="SideDotActive" Width="8" Height="8"
+                                                     Fill="{StaticResource YomoriAccentBrush}"
+                                                     Visibility="Collapsed" />
+                                            <Ellipse x:Name="SideDotAbnormal" Width="8" Height="8"
+                                                     Fill="{StaticResource YomoriDangerBrush}"
+                                                     Visibility="Collapsed" />
+                                            <Ellipse x:Name="SideDotIdle" Width="8" Height="8"
+                                                     Fill="{ThemeResource TextFillColorDisabledBrush}" />
+                                        </Grid>
+
+                                        <TextBlock x:Name="SideStatusValue"
+                                                   Text="空闲"
+                                                   FontSize="15"
+                                                   FontWeight="SemiBold"
+                                                   VerticalAlignment="Center"
+                                                   TextTrimming="CharacterEllipsis" />
+                                    </StackPanel>
+
+                                    <ProgressBar x:Name="SideProgressBar"
+                                                 Minimum="0" Maximum="1" Value="0"
+                                                 Height="4" />
+
+                                    <Grid>
+                                        <TextBlock x:Name="SideProgressText"
+                                                   Text="0 / 0"
+                                                   FontSize="12"
+                                                   Opacity="0.7" />
+                                        <TextBlock x:Name="SideElapsedText"
+                                                   Text="00:00"
+                                                   FontSize="12"
+                                                   Opacity="0.7"
+                                                   HorizontalAlignment="Right" />
+                                    </Grid>
+                                </StackPanel>
+
+                                <!-- 当前任务 -->
+                                <StackPanel Grid.Row="2" Margin="14,0,14,10" Spacing="3">
+                                    <TextBlock Text="当前任务" Style="{StaticResource StatusLabelStyle}" />
+                                    <TextBlock x:Name="SideCurrentTask"
+                                               Text="－"
+                                               FontSize="13"
+                                               TextTrimming="CharacterEllipsis" />
+                                </StackPanel>
+
+                                <!-- 执行项目（本轮各条通道 / 本地执行组） -->
+                                <TextBlock Grid.Row="3"
+                                           Text="执行项目"
+                                           Style="{StaticResource StatusLabelStyle}"
+                                           Margin="14,0,14,4" />
+
+                                <Grid Grid.Row="4">
+                                    <TextBlock x:Name="SideEmptyHint"
+                                               Text="尚未开始执行。"
+                                               FontSize="12"
+                                               Opacity="0.55"
+                                               Margin="14,0,14,0"
+                                               TextWrapping="Wrap" />
+
+                                    <ScrollViewer Padding="8,0,8,8"
+                                                  VerticalScrollBarVisibility="Auto"
+                                                  HorizontalScrollBarVisibility="Disabled"
+                                                  HorizontalScrollMode="Disabled"
+                                                  HorizontalContentAlignment="Stretch">
+                                        <ItemsControl x:Name="SideRowList">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Border Padding="6,5"
+                                                            CornerRadius="4"
+                                                            Visibility="{Binding Visible}">
+                                                        <Grid ColumnSpacing="6">
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="Auto" />
+                                                                <ColumnDefinition Width="*" />
+                                                            </Grid.ColumnDefinitions>
+
+                                                            <Ellipse Grid.Column="0"
+                                                                     Width="6" Height="6"
+                                                                     VerticalAlignment="Center"
+                                                                     Fill="{StaticResource YomoriAccentBrush}"
+                                                                     Visibility="{Binding ActiveDot}" />
+
+                                                            <StackPanel Grid.Column="1" Spacing="1">
+                                                                <TextBlock Text="{Binding Name}"
+                                                                           FontSize="12"
+                                                                           TextTrimming="CharacterEllipsis" />
+                                                                <Grid>
+                                                                    <TextBlock Text="{Binding ProgressText}"
+                                                                               FontSize="11"
+                                                                               Opacity="0.6" />
+                                                                    <TextBlock Text="{Binding StateText}"
+                                                                               FontSize="11"
+                                                                               Opacity="0.6"
+                                                                               HorizontalAlignment="Right"
+                                                                               TextTrimming="CharacterEllipsis" />
+                                                                </Grid>
+                                                            </StackPanel>
+                                                        </Grid>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </ScrollViewer>
+                                </Grid>
+                            </Grid>
+
+                            <!-- 收起态：只剩一个展开按钮 + 进度数字 -->
+                            <StackPanel x:Name="SideStatusCollapsed"
+                                        Visibility="Collapsed"
+                                        Padding="0,8,0,8"
+                                        Spacing="10"
+                                        HorizontalAlignment="Stretch">
+
+                                <Button Width="26" Height="26"
+                                        HorizontalAlignment="Center"
+                                        Padding="0"
+                                        Background="Transparent"
+                                        BorderThickness="0"
+                                        Click="OnToggleSideStatus"
+                                        ToolTipService.ToolTip="展开状态栏"
+                                        AutomationProperties.Name="展开执行状态栏">
+                                    <FontIcon Glyph="&#xE76B;" FontSize="12" />
+                                </Button>
+
+                                <!-- 44px 的窄条放不下四个字，只用两个字 + 进度数字 -->
+                                <TextBlock Text="状态"
+                                           FontSize="11"
+                                           Opacity="0.6"
+                                           HorizontalAlignment="Center" />
+
+                                <TextBlock x:Name="SideCollapsedProgressText"
+                                           Text="0/0"
+                                           FontSize="11"
+                                           Opacity="0.75"
+                                           MaxWidth="40"
+                                           TextWrapping="Wrap"
+                                           TextAlignment="Center"
+                                           HorizontalAlignment="Center" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
                 </Grid>
             </NavigationView.Content>
         </NavigationView>

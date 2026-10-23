@@ -1,5 +1,6 @@
 // -*- coding: utf-8 -*-
 using System;
+using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -131,6 +132,11 @@ public sealed partial class MainWindow : Window
             // 通知区域会留一个点不动的僵尸图标，直到用户把鼠标划过去才消失。
             _autoExitTimer?.Stop();
             _autoExitTimer = null;
+
+            // 状态栏计时器同理：窗口都没了还每秒取一次快照纯属白烧
+            _sideStatusTimer?.Stop();
+            _sideStatusTimer = null;
+
             _tray?.Dispose();
             _tray = null;
 
@@ -152,6 +158,9 @@ public sealed partial class MainWindow : Window
 
         // 子菜单先按当前配置铺一遍（配置里已启用的通道一启动就该出现在「会话通道」下面）
         RebuildChannelMenuItems();
+
+        // 右侧执行状态栏：建行对象、恢复上次的展开/收起、起 1Hz 刷新
+        InitializeSideStatus();
 
         // M5/M6 自检通道：自动导航到「通道管理」页（页面 Loaded 里自动连接、画面挂在本页）
         if (Program.EmbedVmArgs is not null)
@@ -695,8 +704,204 @@ public sealed partial class MainWindow : Window
         timer.Start();
     }
 
-    // ---------------- 看板娘面板：展开 / 收起 / 关闭 ----------------
+    // ---------------- 右侧执行状态栏：展开 / 收起 / 1Hz 刷新 ----------------
 
+    /// <summary>展开态宽度（与 XAML 里的初值保持一致）。</summary>
+    private const double SideStatusExpandedWidth = 264;
+
+    /// <summary>收起态宽度：只留一个展开按钮 + 竖排文字的窄条。</summary>
+    private const double SideStatusCollapsedWidth = 44;
+
+    /// <summary>
+    /// 状态栏能显示的执行项目上限。通道配置本身的硬上限就是 8 条
+    /// （见 <c>RdpConfig</c> 的校验），所以行对象按这个数一次建满、之后复用。
+    /// </summary>
+    private const int SideStatusMaxRows = 8;
+
+    /// <summary>状态栏的轮询计时器。只在主窗口生命周期内跑。</summary>
+    private DispatcherQueueTimer? _sideStatusTimer;
+
+    /// <summary>状态栏当前是否收起（与配置里的 <c>window.sidebar_collapsed</c> 同步）。</summary>
+    private bool _sideStatusCollapsed;
+
+    /// <summary>
+    /// 上一拍写进控件的内容签名。拼字符串比对而不是无条件重设 ——
+    /// 见 <see cref="RefreshSideStatus"/> 的注释。
+    /// </summary>
+    private string _sideStatusSignature = string.Empty;
+
+    /// <summary>复用的「执行项目」行对象（固定 <see cref="SideStatusMaxRows"/> 个）。</summary>
+    public ObservableCollection<SideStatusRow> SideStatusRows { get; } = new();
+
+    /// <summary>
+    /// 状态栏的一次性初始化：建行对象、恢复上次的展开/收起状态、起 1Hz 计时器。
+    /// </summary>
+    private void InitializeSideStatus()
+    {
+        for (var i = 0; i < SideStatusMaxRows; i++)
+        {
+            SideStatusRows.Add(new SideStatusRow());
+        }
+
+        // 直接赋 ItemsSource，不走 x:Bind：Window 上的 x:Bind 求值时机比这行更早，
+        // 集合内容不可靠；属性赋值则一定会让 ItemsControl 重新取一次。
+        SideRowList.ItemsSource = SideStatusRows;
+
+        SetSideStatusCollapsed(VM.Config.Window.SidebarCollapsed, persist: false);
+
+        _sideStatusTimer = DispatcherQueue.CreateTimer();
+        _sideStatusTimer.Interval = TimeSpan.FromSeconds(1);
+        _sideStatusTimer.IsRepeating = true;
+        _sideStatusTimer.Tick += (_, _) => RefreshSideStatus();
+        _sideStatusTimer.Start();
+
+        // 先刷一次，别让用户看到"空闲 / 0 / 0"闪一下
+        RefreshSideStatus();
+    }
+
+    /// <summary>
+    /// 切换展开/收起。
+    ///
+    /// <paramref name="persist"/> 为 false 时只在界面上应用（启动时按配置恢复用），
+    /// 不写盘 —— 否则启动那一刻会把"配置里本来就是 false"再写一遍。
+    /// </summary>
+    private void SetSideStatusCollapsed(bool collapsed, bool persist)
+    {
+        _sideStatusCollapsed = collapsed;
+
+        // 两套内容互斥显示 + 容器改宽。改宽在主线程上会触发一次布局，
+        // 但只在用户点按钮时发生，谈不上频繁。
+        SideStatusExpanded.Visibility = collapsed ? Visibility.Collapsed : Visibility.Visible;
+        SideStatusCollapsed.Visibility = collapsed ? Visibility.Visible : Visibility.Collapsed;
+        SideStatusPanel.Width = collapsed ? SideStatusCollapsedWidth : SideStatusExpandedWidth;
+
+        if (persist)
+        {
+            VM.SaveSidebarCollapsed(collapsed);
+        }
+    }
+
+    private void OnToggleSideStatus(object sender, RoutedEventArgs e) =>
+        SetSideStatusCollapsed(!_sideStatusCollapsed, persist: true);
+
+    /// <summary>
+    /// 刷一次状态栏。
+    ///
+    /// <para>**为什么是轮询而不是绑定**：<see cref="RdpChannelSession"/> 的
+    /// Progress / StatusText / HeartbeatText 都是不可观察的普通属性，只在主控端
+    /// 轮询桥里的 status.json 时就地改写 —— 绑不上去，只能定时取快照。
+    /// 主页「会话通道」概览用的也是这个办法。</para>
+    ///
+    /// <para>**但不做每拍无条件重设**：先把整屏要显示的内容拼成一个签名，
+    /// 和上一拍一样就立刻返回。项目里多画面页那套 1Hz 全量重设已经三次掀掉进程，
+    /// 状态栏宁可多拼一个字符串，也不每秒重写一遍控件属性。</para>
+    /// </summary>
+    private void RefreshSideStatus()
+    {
+        // 计时器在 UI 线程上跑，但留一道闸：这条链上以后若有人从后台调它，也不至于炸。
+        if (!DispatcherQueue.HasThreadAccess)
+        {
+            DispatcherQueue.TryEnqueue(RefreshSideStatus);
+            return;
+        }
+
+        var vm = VM;
+        var sessions = vm.Sessions;
+
+        var statusText = vm.PanelStatusText;
+        var taskText = vm.PanelCurrentTask;
+        var progressText = vm.PanelProgressText;
+        var elapsedText = vm.PanelElapsedText;
+
+        var done = 0;
+        var total = 0;
+        var anyActive = false;
+
+        for (var i = 0; i < sessions.Count; i++)
+        {
+            var session = sessions[i];
+            done += session.Progress;
+            total += session.Total;
+            anyActive |= session.IsActive;
+        }
+
+        // 「有异常」由 VM 统一判（多块并行时那是整轮汇总的结论，单块各有各的收尾时机）
+        var anyAbnormal = vm.PanelHasAbnormal;
+
+        var ratio = total > 0 ? Math.Clamp((double)done / total, 0d, 1d) : 0d;
+        var rowCount = Math.Min(sessions.Count, SideStatusMaxRows);
+
+        // 签名要覆盖"看得见的每一个取值的来源"
+        var signature = new System.Text.StringBuilder(160)
+            .Append(statusText).Append('\n')
+            .Append(taskText).Append('\n')
+            .Append(progressText).Append('\n')
+            .Append(elapsedText).Append('\n')
+            .Append(ratio.ToString("F4")).Append('\n')
+            .Append(anyActive ? '1' : '0')
+            .Append(anyAbnormal ? '1' : '0')
+            .Append('\n')
+            .Append(rowCount);
+
+        for (var i = 0; i < rowCount; i++)
+        {
+            var session = sessions[i];
+            signature.Append('\n')
+                     .Append(session.DisplayName)
+                     .Append('|').Append(session.Progress).Append('/').Append(session.Total)
+                     .Append('|').Append(session.StatusText)
+                     .Append('|').Append(session.IsStale ? '1' : '0')
+                     .Append('|').Append(session.IsActive ? '1' : '0');
+        }
+
+        var key = signature.ToString();
+        if (string.Equals(key, _sideStatusSignature, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _sideStatusSignature = key;
+
+        SideStatusValue.Text = statusText;
+        SideCurrentTask.Text = taskText;
+        SideProgressText.Text = progressText;
+        SideElapsedText.Text = elapsedText;
+
+        // 收起态只有 44px 宽："合计 3 / 7" 这种带空格与前缀的文本会折成三四行，
+        // 去掉空格和「合计」两个字，只留裸数字
+        SideCollapsedProgressText.Text = progressText
+            .Replace(" ", string.Empty, StringComparison.Ordinal)
+            .Replace("合计", string.Empty, StringComparison.Ordinal);
+
+        SideProgressBar.Value = ratio;
+
+        // 三个色点互斥显示：颜色由主题资源给，代码只负责选哪一个露出来
+        SideDotActive.Visibility = anyActive ? Visibility.Visible : Visibility.Collapsed;
+        SideDotAbnormal.Visibility = anyAbnormal ? Visibility.Visible : Visibility.Collapsed;
+        SideDotIdle.Visibility = anyActive || anyAbnormal ? Visibility.Collapsed : Visibility.Visible;
+
+        SideEmptyHint.Visibility = rowCount == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        for (var i = 0; i < SideStatusRows.Count; i++)
+        {
+            var row = SideStatusRows[i];
+
+            if (i >= rowCount)
+            {
+                row.Hide();
+                continue;
+            }
+
+            var session = sessions[i];
+            row.Show(
+                session.DisplayName,
+                $"{session.Progress} / {session.Total}",
+                session.IsStale ? $"{session.StatusText}（失联）" : session.StatusText,
+                session.IsActive);
+        }
+    }
+
+    // ---------------- 导航 ----------------
 
     private string _currentTag = string.Empty;
 

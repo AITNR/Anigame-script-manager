@@ -462,6 +462,31 @@ public sealed class MainViewModel : ObservableObject
     }
 
     /// <summary>
+    /// 记录右侧「执行状态栏」的收起/展开状态。
+    ///
+    /// 与 <see cref="SaveWindowPlacement"/> / <see cref="SaveCloseAction"/> 同一类动作：
+    /// 随手发生、不写运行日志、不弹窗，值没变时连盘都不写；只改 <c>Config.Window</c>。
+    /// </summary>
+    public void SaveSidebarCollapsed(bool collapsed)
+    {
+        if (Config.Window.SidebarCollapsed == collapsed)
+        {
+            return;
+        }
+
+        Config.Window.SidebarCollapsed = collapsed;
+
+        try
+        {
+            _configManager.Save(Config);
+        }
+        catch
+        {
+            // 记不住状态栏的折叠状态不该影响用户操作
+        }
+    }
+
+    /// <summary>
     /// 记录"点关闭按钮时的行为"（每次询问 / 收进状态栏 / 直接退出 / 按状态自动）。
     ///
     /// 与 <see cref="SaveWindowPlacement"/> 同一类动作：
@@ -3788,6 +3813,14 @@ public sealed class MainViewModel : ObservableObject
     private RdpChannelSession? LocalGroup => _sessions.FirstOrDefault(s => !s.IsRemote);
 
     /// <summary>
+    /// 上一轮（多块并行时是整轮）是否出现过异常。
+    ///
+    /// <para>给右侧执行状态栏的状态点亮红灯用 —— 面板文案里虽然也播了「（有异常）」，
+    /// 但状态栏那么窄，一行字经常被截掉半句，色点比文字先被看到。</para>
+    /// </summary>
+    public bool PanelHasAbnormal => _lastRunAbnormal;
+
+    /// <summary>
     /// 面板四项都是计算属性，值来自各通道会话 —— 任何一个块的状态变了都要整体通知一次。
     /// （属性名要写全：计算属性没法用"某个字段变了"来推断。）
     /// </summary>
@@ -3797,6 +3830,7 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(PanelCurrentTask));
         OnPropertyChanged(nameof(PanelElapsedText));
         OnPropertyChanged(nameof(PanelProgressText));
+        OnPropertyChanged(nameof(PanelHasAbnormal));
     }
 
     /// <summary>是否正在连接 / 等待目标会话。</summary>
