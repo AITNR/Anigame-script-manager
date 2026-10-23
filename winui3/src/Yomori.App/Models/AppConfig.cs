@@ -155,6 +155,15 @@ public sealed class AppConfig : ObservableObject
     public WindowConfig Window { get; set; } = new();
 
     /// <summary>
+    /// 主页大图的图片路径（绝对路径）。空串 = 没设置，用随程序发布的 <c>assets/home_banner.jpg</c>。
+    ///
+    /// 只记路径、不复制文件：换图后原图可以随便挪，只要路径还指得到就行；
+    /// 图片被删/移走时主页回退到默认图，不影响启动与任务执行。
+    /// </summary>
+    [JsonPropertyName("home_banner")]
+    public string HomeBannerPath { get; set; } = string.Empty;
+
+    /// <summary>
     /// <b>只有导出文件里才有</b>：这次导出了哪些内容类别、密码是不是明文。
     ///
     /// 正常 config.json 不写它（<see cref="Models.ExportOptions"/> 默认值不写就是 null）。
@@ -186,6 +195,9 @@ public sealed class AppConfig : ObservableObject
 
         Theme = allowed || LegacyThemes.Contains(theme) ? theme : "system";
         ShutdownDelaySeconds = Math.Max(0, ShutdownDelaySeconds);
+        // 只做去空白：路径失效（盘符拔了、文件被删）由主页自己回退默认图，
+        // 不能在这里清空 —— 临时拔一次 U 盘就把用户的选择抹掉太粗暴。
+        HomeBannerPath = (HomeBannerPath ?? string.Empty).Trim();
         UpdateChannel = UpdateChannels.Normalize(UpdateChannel);
         ExternalLogKeepFiles = Math.Max(1, ExternalLogKeepFiles);
         EventLineLimit = ExternalLogDefaults.NormalizeEventLineLimit(EventLineLimit);
@@ -262,5 +274,6 @@ public sealed class AppConfig : ObservableObject
         EventLineLimit = EventLineLimit,
         Rdp = (RdpConfig)Rdp.Clone(),
         Window = (WindowConfig)Window.Clone(),
+        HomeBannerPath = HomeBannerPath,
     };
 }
