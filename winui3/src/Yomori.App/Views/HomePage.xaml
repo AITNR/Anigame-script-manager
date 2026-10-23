@@ -5,143 +5,185 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
     <!-- 主页（2026-10-23 改版）：
-         原来的「总览」标题 + 描述 + 状态四格，换成顶部一张图（右键更换）；
-         底部「会话通道」概览整块删除 —— 通道入口在左侧菜单。
-         中间三张入口卡（任务执行 / 耗时统计 / 运行日志）原样保留。 -->
-    <ScrollViewer Padding="20,16">
-        <StackPanel Spacing="16">
+         版式参考「横幅图 + 卡片区」：顶部一张通栏图（贴窗口左右边、固定高度、右键更换），
+         图左上角叠应用名；图下方是内容区，标题行 + 三张功能入口卡。
+         原来的「总览」标题 + 描述 + 状态四格换成了这张图，底部「会话通道」概览整块删除。 -->
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
 
-            <!-- 上次运行异常报告 -->
-            <InfoBar x:Name="ProblemReportBar"
-                     IsOpen="False"
-                     Severity="Warning"
-                     Title="上次运行存在需要注意的情况"
-                     IsClosable="True"
-                     CloseButtonClick="OnProblemReportClosed">
-                <InfoBar.Content>
-                    <TextBlock x:Name="ProblemReportText" TextWrapping="Wrap" />
-                </InfoBar.Content>
-                <InfoBar.ActionButton>
-                    <Button Content="打开日志目录" Click="OnOpenLogFolder" />
-                </InfoBar.ActionButton>
-            </InfoBar>
+        <!-- 上次运行异常报告（有才占位，单独一行，不压在图上面） -->
+        <InfoBar x:Name="ProblemReportBar"
+                 Grid.Row="0"
+                 Margin="16,12,16,0"
+                 IsOpen="False"
+                 Severity="Warning"
+                 Title="上次运行存在需要注意的情况"
+                 IsClosable="True"
+                 CloseButtonClick="OnProblemReportClosed">
+            <InfoBar.Content>
+                <TextBlock x:Name="ProblemReportText" TextWrapping="Wrap" />
+            </InfoBar.Content>
+            <InfoBar.ActionButton>
+                <Button Content="打开日志目录" Click="OnOpenLogFolder" />
+            </InfoBar.ActionButton>
+        </InfoBar>
 
-            <!-- 首页大图：整块右键可换 -->
-            <Grid x:Name="BannerHost" Height="200">
-                <Image x:Name="BannerImage"
-                       Stretch="UniformToFill"
-                       Visibility="Collapsed" />
+        <!-- 横幅图：贴内容区左右边，整块右键可换 -->
+        <Grid x:Name="BannerHost" Grid.Row="1" Height="300">
+            <Image x:Name="BannerImage"
+                   Stretch="UniformToFill"
+                   Visibility="Collapsed" />
 
-                <!-- 没设置图片（或默认图也丢了）时的占位 -->
-                <StackPanel x:Name="BannerPlaceholder"
-                            HorizontalAlignment="Center"
-                            VerticalAlignment="Center"
-                            MaxWidth="460"
-                            Spacing="8">
-                    <TextBlock x:Name="PlaceholderTitle"
-                               Text="还没有设置首页图片"
-                               HorizontalAlignment="Center"
-                               Style="{StaticResource SubtitleTextBlockStyle}" />
-                    <TextBlock x:Name="PlaceholderHint"
-                               Text="在任意位置点右键，选一张图片放到这里。"
-                               HorizontalAlignment="Center"
-                               TextAlignment="Center"
-                               TextWrapping="Wrap"
-                               Opacity="0.7"
-                               FontSize="12" />
+            <!-- 左上角压一层暗角，保证叠在上面的标题在任何图上都读得清 -->
+            <Border IsHitTestVisible="False">
+                <Border.Background>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="0.55,1">
+                        <GradientStop Color="#B3000000" Offset="0" />
+                        <GradientStop Color="#00000000" Offset="1" />
+                    </LinearGradientBrush>
+                </Border.Background>
+            </Border>
+
+            <!-- 图上的应用名（参考版式：标题压在横幅左上角） -->
+            <StackPanel Margin="36,30,0,0"
+                        HorizontalAlignment="Left"
+                        VerticalAlignment="Top"
+                        Spacing="2">
+                <TextBlock Text="Yomori"
+                           FontSize="38"
+                           FontWeight="SemiBold"
+                           Foreground="White" />
+                <TextBlock Text="二游脚本助手"
+                           FontSize="20"
+                           Foreground="White"
+                           Opacity="0.9" />
+            </StackPanel>
+
+            <!-- 没设置图片（或默认图也丢了）时的占位 -->
+            <StackPanel x:Name="BannerPlaceholder"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        MaxWidth="460"
+                        Spacing="8">
+                <TextBlock x:Name="PlaceholderTitle"
+                           Text="还没有设置首页图片"
+                           HorizontalAlignment="Center"
+                           Style="{StaticResource SubtitleTextBlockStyle}" />
+                <TextBlock x:Name="PlaceholderHint"
+                           Text="在任意位置点右键，选一张图片放到这里。"
+                           HorizontalAlignment="Center"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap"
+                           Opacity="0.7"
+                           FontSize="12" />
+            </StackPanel>
+
+            <!-- 有图时的小提示：不然「右键能换图」这件事没人猜得到 -->
+            <Border x:Name="BannerHint"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Bottom"
+                    Margin="0,0,14,14"
+                    Padding="9,4"
+                    CornerRadius="4"
+                    Background="#66000000"
+                    Visibility="Collapsed">
+                <TextBlock Text="右键更换图片" FontSize="11" Foreground="White" />
+            </Border>
+
+            <Grid.ContextFlyout>
+                <MenuFlyout Opening="OnBannerMenuOpening">
+                    <MenuFlyoutItem Text="更换图片…" Click="OnChangeBannerImage" />
+                    <MenuFlyoutItem x:Name="ClearBannerItem" Text="恢复默认图片" Click="OnRestoreDefaultBanner" />
+                </MenuFlyout>
+            </Grid.ContextFlyout>
+        </Grid>
+
+        <!-- 图下方的内容区 -->
+        <ScrollViewer Grid.Row="2" Padding="20,18,20,20">
+            <StackPanel Spacing="14">
+
+                <!-- 小节标题行 -->
+                <StackPanel Orientation="Horizontal" Spacing="4">
+                    <TextBlock Text="快捷入口" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <FontIcon Glyph="&#xE76C;" FontSize="12" VerticalAlignment="Center" Opacity="0.7" />
                 </StackPanel>
 
-                <!-- 有图时的小提示：不然「右键能换图」这件事没人猜得到 -->
-                <Border x:Name="BannerHint"
-                        HorizontalAlignment="Right"
-                        VerticalAlignment="Bottom"
-                        Margin="0,0,12,12"
-                        Padding="9,4"
-                        CornerRadius="4"
-                        Background="#66000000"
-                        Visibility="Collapsed">
-                    <TextBlock Text="右键更换图片" FontSize="11" Foreground="White" />
-                </Border>
+                <!-- 三张主卡片（对应 Python 版的卡片式总览） -->
+                <Grid MinHeight="260">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
 
-                <Grid.ContextFlyout>
-                    <MenuFlyout Opening="OnBannerMenuOpening">
-                        <MenuFlyoutItem Text="更换图片…" Click="OnChangeBannerImage" />
-                        <MenuFlyoutItem x:Name="ClearBannerItem" Text="恢复默认图片" Click="OnRestoreDefaultBanner" />
-                    </MenuFlyout>
-                </Grid.ContextFlyout>
-            </Grid>
+                    <Button Grid.Column="0" Margin="0,0,8,0"
+                            Style="{StaticResource OverviewCardStyle}"
+                            Click="OnOpenTasks">
+                        <Grid Padding="20">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Border Width="44" Height="44" CornerRadius="22" Background="{StaticResource YomoriAccentBrush}">
+                                <FontIcon Glyph="&#xE8FD;" Foreground="White" FontSize="20" />
+                            </Border>
+                            <StackPanel Grid.Row="1" VerticalAlignment="Center" Spacing="6" Margin="0,14,0,0">
+                                <TextBlock Text="任务执行" Style="{StaticResource SubtitleTextBlockStyle}" />
+                                <TextBlock Text="配置脚本路径、超时策略、并发组与监控关键词。"
+                                           TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+                            </StackPanel>
+                            <TextBlock Grid.Row="2" Text="进入 →" FontSize="12" Opacity="0.6" />
+                        </Grid>
+                    </Button>
 
-            <!-- 三张主卡片（对应 Python 版的卡片式总览） -->
-            <Grid MinHeight="260">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
+                    <Button Grid.Column="1" Margin="4,0"
+                            Style="{StaticResource OverviewCardStyle}"
+                            Click="OnOpenStats">
+                        <Grid Padding="20">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Border Width="44" Height="44" CornerRadius="22" Background="{StaticResource YomoriAccentSoftBrush}">
+                                <FontIcon Glyph="&#xE916;" Foreground="White" FontSize="20" />
+                            </Border>
+                            <StackPanel Grid.Row="1" VerticalAlignment="Center" Spacing="6" Margin="0,14,0,0">
+                                <TextBlock Text="运行耗时统计" Style="{StaticResource SubtitleTextBlockStyle}" />
+                                <TextBlock Text="按脚本查看执行次数、平均耗时与最近完成时间。"
+                                           TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+                            </StackPanel>
+                            <TextBlock Grid.Row="2" Text="进入 →" FontSize="12" Opacity="0.6" />
+                        </Grid>
+                    </Button>
 
-                <Button Grid.Column="0" Margin="0,0,8,0"
-                        Style="{StaticResource OverviewCardStyle}"
-                        Click="OnOpenTasks">
-                    <Grid Padding="20">
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto" />
-                            <RowDefinition Height="*" />
-                            <RowDefinition Height="Auto" />
-                        </Grid.RowDefinitions>
-                        <Border Width="44" Height="44" CornerRadius="22" Background="{StaticResource YomoriAccentBrush}">
-                            <FontIcon Glyph="&#xE8FD;" Foreground="White" FontSize="20" />
-                        </Border>
-                        <StackPanel Grid.Row="1" VerticalAlignment="Center" Spacing="6" Margin="0,14,0,0">
-                            <TextBlock Text="任务执行" Style="{StaticResource SubtitleTextBlockStyle}" />
-                            <TextBlock Text="配置脚本路径、超时策略、并发组与监控关键词。"
-                                       TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
-                        </StackPanel>
-                        <TextBlock Grid.Row="2" Text="进入 →" FontSize="12" Opacity="0.6" />
-                    </Grid>
-                </Button>
-
-                <Button Grid.Column="1" Margin="4,0"
-                        Style="{StaticResource OverviewCardStyle}"
-                        Click="OnOpenStats">
-                    <Grid Padding="20">
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto" />
-                            <RowDefinition Height="*" />
-                            <RowDefinition Height="Auto" />
-                        </Grid.RowDefinitions>
-                        <Border Width="44" Height="44" CornerRadius="22" Background="{StaticResource YomoriAccentSoftBrush}">
-                            <FontIcon Glyph="&#xE916;" Foreground="White" FontSize="20" />
-                        </Border>
-                        <StackPanel Grid.Row="1" VerticalAlignment="Center" Spacing="6" Margin="0,14,0,0">
-                            <TextBlock Text="运行耗时统计" Style="{StaticResource SubtitleTextBlockStyle}" />
-                            <TextBlock Text="按脚本查看执行次数、平均耗时与最近完成时间。"
-                                       TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
-                        </StackPanel>
-                        <TextBlock Grid.Row="2" Text="进入 →" FontSize="12" Opacity="0.6" />
-                    </Grid>
-                </Button>
-
-                <Button Grid.Column="2" Margin="8,0,0,0"
-                        Style="{StaticResource OverviewCardStyle}"
-                        Click="OnOpenLogs">
-                    <Grid Padding="20">
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto" />
-                            <RowDefinition Height="*" />
-                            <RowDefinition Height="Auto" />
-                        </Grid.RowDefinitions>
-                        <Border Width="44" Height="44" CornerRadius="22" Background="{StaticResource YomoriAccentSoftBrush}">
-                            <FontIcon Glyph="&#xE8A5;" Foreground="White" FontSize="20" />
-                        </Border>
-                        <StackPanel Grid.Row="1" VerticalAlignment="Center" Spacing="6" Margin="0,14,0,0">
-                            <TextBlock Text="运行日志" Style="{StaticResource SubtitleTextBlockStyle}" />
-                            <TextBlock Text="实时查看调度过程，出问题时在这里找原因。"
-                                       TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
-                        </StackPanel>
-                        <TextBlock Grid.Row="2" Text="进入 →" FontSize="12" Opacity="0.6" />
-                    </Grid>
-                </Button>
-            </Grid>
-        </StackPanel>
-    </ScrollViewer>
+                    <Button Grid.Column="2" Margin="8,0,0,0"
+                            Style="{StaticResource OverviewCardStyle}"
+                            Click="OnOpenLogs">
+                        <Grid Padding="20">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Border Width="44" Height="44" CornerRadius="22" Background="{StaticResource YomoriAccentSoftBrush}">
+                                <FontIcon Glyph="&#xE8A5;" Foreground="White" FontSize="20" />
+                            </Border>
+                            <StackPanel Grid.Row="1" VerticalAlignment="Center" Spacing="6" Margin="0,14,0,0">
+                                <TextBlock Text="运行日志" Style="{StaticResource SubtitleTextBlockStyle}" />
+                                <TextBlock Text="实时查看调度过程，出问题时在这里找原因。"
+                                           TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+                            </StackPanel>
+                            <TextBlock Grid.Row="2" Text="进入 →" FontSize="12" Opacity="0.6" />
+                        </Grid>
+                    </Button>
+                </Grid>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
 </Page>
