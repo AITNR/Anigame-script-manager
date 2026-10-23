@@ -33,6 +33,7 @@ public sealed partial class MainWindow : Window
 
     private readonly DispatcherQueueTimer _placementSaveTimer;
 
+
     // ---------------- 关闭按钮 / 状态栏 ----------------
 
     /// <summary>状态栏图标（首次隐藏时创建；从未收进托盘的用户不会多一个图标）。</summary>
@@ -161,6 +162,7 @@ public sealed partial class MainWindow : Window
 
         // 右侧执行状态栏：建行对象、恢复上次的展开/收起、起 1Hz 刷新
         InitializeSideStatus();
+
 
         // M5/M6 自检通道：自动导航到「通道管理」页（页面 Loaded 里自动连接、画面挂在本页）
         if (Program.EmbedVmArgs is not null)
@@ -1259,10 +1261,22 @@ public sealed partial class MainWindow : Window
 
     private void OnNavigationSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
-        if (args.SelectedItem is NavigationViewItem item && item.Tag is string tag)
+        if (args.SelectedItem is not NavigationViewItem item || item.Tag is not string tag)
         {
-            NavigateTo(tag);
+            return;
         }
+
+        // 父项「会话通道」只是展开开关，永远不该成为导航目标。
+        // XAML 里已经用 SelectsOnInvoked="False" 让它点不动选中态，这里再兜一道：
+        // 万一某条路径仍把父项设成 SelectedItem（旧版本框架 / 代码里直接赋值），
+        // 别顺手把 tag="channels" 经 NavigateTo 映射到「多画面」—— 那正是"点父项和点子项一个效果"的成因。
+        if (item == ChannelsNavItem)
+        {
+            SyncNavigationSelection(_currentTag);
+            return;
+        }
+
+        NavigateTo(tag);
     }
 
     /// <summary>
