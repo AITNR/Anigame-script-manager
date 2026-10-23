@@ -79,4 +79,17 @@
     <Copy SourceFiles="@(RdpRuntimeDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
   </Target>
 
+  <!-- ============ 用不到的 WinAppSDK 载荷（AI / ML / Widgets）在哪裁 ============
+       WindowsAppSDKSelfContained 的运行时文件来自**框架 MSIX 整包解压**
+       （`obj\...\MsixContent\`，见 Microsoft.WindowsAppSDK.SelfContained.targets 的
+       AddMicrosoftWindowsAppSDKPayloadFilesFromMsix），包里本就塞着 AI / ML / Widgets。
+       实测过：把伞包换成 6 个子包、清空 bin 重建，onnxruntime.dll / DirectML.dll /
+       Microsoft.Windows.AI.* 照样一个不少 —— 引用层面挡不住。
+
+       ⚠️ 也别指望在本文件里加 `AfterTargets="Build"` 的 Delete 目标：那批文件是在
+          AssignTargetPaths 阶段之前就挂进 None 项的，删完还会被后续拷贝再写一遍，
+          实测删不掉（只剩一句误导性的"已剔除"日志）。
+       所以裁剪统一放在 tools/package_release.py 的 _prune_unused()：它是发布包与安装目录的
+       唯一出口，bin 目录里留着那些文件无害。清单依据：grep 全源码零引用
+       Windows.AI / OnnxRuntime / DirectML / Widgets。 -->
 </Project>

@@ -33,6 +33,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import re
 import shutil
 import sys
 import zipfile
@@ -88,6 +90,37 @@ _JUNK_NAMES = {
 # build 输出里的中间目录：不进发布包
 _JUNK_DIRS = {"ref", "refint", "obj", ".vs", "win-x64", "bin"}
 
+# WinUI 3 自带 83 种语言的 MUI 目录：<语言>\Microsoft.ui.xaml.dll.mui
+#     （+ Microsoft.UI.Xaml.Phone.dll.mui），每个目录固定 2 个文件，
+#     452 个条目里 166 个是它们，共 3.7MB。
+# 这些是 **WinUI 内置控件**的本地化字符串（日期选择器的月份名、内置对话框按钮、
+# 自动化名称），不是本程序的界面文字（那走 XAML / .pri，与这里无关）。
+# 删掉不报错：Windows 的 MUI 查找失败会回退到 DLL 内的中性资源（英文），
+# 只有上面那几句会变英文。所以只留简体中文 + 英文兜底。
+#
+# ⚠️ 目录名就是语言标识（OS 的 MUI 查找规则），**不能改造成 lang\zh-CN 之类**，
+#    只能整个目录丢掉。这条规则也解释了为什么安装目录看着散 —— 摊平不了。
+# ⚠️ `<SatelliteResourceLanguages>` 对这批文件无效：它们是通过
+#    RuntimeTargetsCopyLocalItems（runtime 资产）进输出的，不是卫星程序集。
+_MUI_KEEP_CULTURES = {"zh-cn", "zh-tw", "en-us"}
+
+# 语言目录名形状：af-ZA / sr-Cyrl-RS / ca-Es-VALENCIA / quz-PE
+_CULTURE_DIR_RE = re.compile(r"^[a-z]{2,3}(?:-[a-z0-9]{2,8})+$", re.IGNORECASE)
+
+# WinAppSDK 框架 MSIX **整包**带进来的 AI / ML / Widgets 载荷：本程序一次都没用
+#     （grep 全源码：Windows.AI / OnnxRuntime / DirectML / Widgets 零引用），
+#     却占 25 个文件、约 46MB —— onnxruntime.dll 21MB、DirectML.dll 18MB 是最大两块。
+# ⚠️ 在 csproj 里换子包引用**挡不住**（载荷来自 MSIX 解压，与引用哪几个子包无关），
+#    只有在"发布包"这个出口裁才行 —— 所以放在这里，不放 csproj。
+_UNUSED_PAYLOAD_PREFIXES = (
+    "microsoft.windows.ai.",   # 含 .Projection.dll / .winmd
+    "microsoft.windows.widgets.",
+    "microsoft.ml.onnxruntime",
+    "onnxruntime",             # onnxruntime.dll / onnxruntime_providers_shared.dll
+    "directml",
+    "workloads",               # workloads*.json：AI 工作负载清单
+)
+
 
 def _is_junk(rel: Path) -> bool:
     """rel 是相对 build 输出根的路径。"""
@@ -139,6 +172,77 @@ def _copy_tree(
         count += 1
 
     return count
+
+
+# ---------------------------------------------------------------- 收尾裁剪
+
+def _deps_listed_names(app_dir: Path) -> set[str]:
+    """`Yomori.deps.json` 里登记过的文件名（全小写）。
+
+    ⚠️ 这是裁剪的**护栏**，别去掉：宿主启动时按 deps.json 里的相对路径去找程序集，
+       登记了却不在磁盘上会直接抛
+         "An assembly specified in the application dependencies manifest was not found"
+       → 双击没反应、也没有界面可以报错。
+       实测：`Microsoft.Windows.AI.*.Projection.dll` / `Microsoft.Windows.Widgets.Projection.dll`
+       这 7 个**托管**投影**确实登记在 deps.json 里**（虽然本程序一次不加载），
+       而 onnxruntime / DirectML / *.winmd / workloads*.json 都没登记。
+       所以按名单删之前先查这里 —— 登记过的留着（合计不到 0.3MB，不差这点）。
+    """
+    deps = app_dir / "Yomori.deps.json"
+    if not deps.exists():
+        return set()
+
+    data = json.loads(deps.read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for library in (data.get("targets") or {}).values():
+        for entry in (library or {}).values():
+            for section in ("runtime", "native", "resources", "runtimeTargets"):
+                for rel in (entry.get(section) or {}):
+                    names.add(Path(rel).name.lower())
+    return names
+
+
+def _prune_unused(app_dir: Path) -> tuple[int, int]:
+    """把"发了但程序用不到"的东西从发布包里删掉，返回 (删除文件数, 删除目录数)。
+
+    为什么放在最后统一做，而不是在 _copy_tree 里筛：
+    publish 那份是 `skip_junk=False` 原样铺的（它自带完整自包含运行时，逐项筛风险更大），
+    而 AI 载荷在 build 和 publish 两边都有 —— 只有在"两边都铺完"这一个点上裁才不会漏。
+
+    两类东西：
+    1. WinAppSDK 框架 MSIX 整包带进来的 AI / ML / Widgets 载荷（见
+       _UNUSED_PAYLOAD_PREFIXES 的说明），约 25 个文件 / 46MB。
+    2. WinUI 自带的 80 余种语言 MUI 目录（见 _MUI_KEEP_CULTURES 的说明），
+       每个固定 2 个 .mui，共约 3.7MB。
+
+    被 `deps.json` 登记过的文件名一律不删（见 _deps_listed_names）。
+    """
+    files = 0
+    dirs = 0
+    listed = _deps_listed_names(app_dir)
+
+    for item in list(app_dir.iterdir()):
+        if item.is_file():
+            name = item.name.lower()
+            if name.startswith(_UNUSED_PAYLOAD_PREFIXES) and name not in listed:
+                item.unlink()
+                files += 1
+            continue
+
+        # 语言目录：名字像语言代码，且内容**全部**是 .mui 才敢整目录删
+        if not _CULTURE_DIR_RE.match(item.name) or item.name.lower() in _MUI_KEEP_CULTURES:
+            continue
+        children = list(item.iterdir())
+        if not children:
+            continue
+        if not all(c.is_file() and c.suffix.lower() == ".mui" for c in children):
+            continue
+        files += len(children)
+        shutil.rmtree(item)
+        dirs += 1
+
+    return files, dirs
+
 
 
 # ---------------------------------------------------------------- 自检
@@ -427,6 +531,9 @@ def main(argv: list[str] | None = None) -> int:
     if agent_dir is not None:
         copied += _copy_tree(agent_dir, app_dir / "agent", skip_junk=False)
 
+    # 收尾裁剪：AI/ML/Widgets 载荷 + 用不到的语言目录（必须在 build / publish 都铺完之后）
+    pruned_files, pruned_dirs = _prune_unused(app_dir)
+
     import datetime
 
     built_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -447,6 +554,7 @@ def main(argv: list[str] | None = None) -> int:
     total_mb = sum(f.stat().st_size for f in app_dir.rglob("*") if f.is_file()) / 1024 / 1024
     print(f"已铺好 {app_dir}")
     print(f"  文件 {sum(1 for f in app_dir.rglob('*') if f.is_file())} 个 / {total_mb:.1f} MB（拷贝 {copied} 次）")
+    print(f"  裁掉用不到的载荷：{pruned_files} 个文件 / {pruned_dirs} 个语言目录")
 
     if args.no_zip:
         return 0
