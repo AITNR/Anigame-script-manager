@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Windows.Storage.Pickers;
 using Yomori.Services;
@@ -26,6 +27,49 @@ public static class DialogHelper
 {
     /// <summary>全局对话框闸门：保证同一时刻只有一个 ContentDialog 存活。</summary>
     private static readonly SemaphoreSlim Gate = new(1, 1);
+
+    /// <summary>
+    /// 把当前续体搬回 UI 线程（无返回值）。
+    /// 见 <see cref="ReturnToUiThreadAsync{T}"/> 的说明。
+    /// </summary>
+    private static Task ToUiThreadAsync(Window window) => ReturnToUiThreadAsync(window, true);
+
+    /// <summary>
+    /// 在 UI 线程上交付选择器结果。
+    ///
+    /// 【为什么必须有这一句】Windows App SDK 1.8 的 <c>Microsoft.Windows.Storage.Pickers</c>
+    /// 返回的 awaitable **不捕获 SynchronizationContext**，所以 <c>await picker.PickSingleFileAsync()</c>
+    /// 之后的续体**不保证**还在 UI 线程上（实测落在 ThreadPool 上）。而调用方拿到路径第一件事
+    /// 几乎都是写 x:Bind 属性 —— 生成的 setter 就是 <c>TextBlock.set_Text</c> 这类 WinRT 调用，
+    /// 只能在对象所属的 UI 线程上碰，否则 COMException 0x8001010E (RPC_E_WRONG_THREAD)；
+    /// 调用方又多是 <c>async void</c> 事件处理器，异常没人接 → 直接掀进程（无对话框、无日志）。
+    ///
+    /// 2026-10-04 在「导入配置」那一处栽过（栈：ImportConfigAsync → Tasks.Clear() → ClearItems()
+    /// → HomePage.g.cs Update_VM_Tasks_Count → TextBlock.set_Text），当时只在那个调用点包了
+    /// RunOnUiThreadAsync；2026-10-23 任务页「浏览」选脚本时同一个坑又踩一次
+    /// （栈：OnBrowseScript → TaskConfig.set_ScriptPath → TasksPage.g.cs Update_ScriptPath
+    /// → TextBlock.set_Text）。**护栏只护一半最坑**，所以收口在这里：
+    /// 本类所有选择器的返回值一律在 UI 线程上交付，调用方不必自己再包一层。
+    /// </summary>
+    private static Task<T> ReturnToUiThreadAsync<T>(Window window, T value)
+    {
+        var queue = window.DispatcherQueue;
+        if (queue is null || queue.HasThreadAccess)
+        {
+            return Task.FromResult(value);
+        }
+
+        // 故意不用 RunContinuationsAsynchronously：SetResult 是在 UI 线程的排队回调里触发的，
+        // 续体就地跑完（仍在该 UI 线程），调用方 await 之后就是 UI 线程。
+        var tcs = new TaskCompletionSource<T>();
+        if (!queue.TryEnqueue(() => tcs.TrySetResult(value)))
+        {
+            // 队列已关闭（程序正在退出）：退回原线程交付，宁可冒险也别让调用方永远挂着。
+            tcs.TrySetResult(value);
+        }
+
+        return tcs.Task;
+    }
 
     public static async Task<string?> PickSaveFileAsync(string suggestedName, params (string Label, string Pattern)[] filters)
     {
@@ -55,11 +99,13 @@ public static class DialogHelper
             }
 
             var file = await picker.PickSaveFileAsync();
-            return file?.Path;
+            return await ReturnToUiThreadAsync(window, file?.Path);
         }
         catch (Exception ex)
         {
-            await ShowMessageAsync("无法打开文件选择器", $"保存对话框出错：{ex.Message}");
+            var detail = ex.Message;
+            await ToUiThreadAsync(window);   // ContentDialog 也必须在 UI 线程上开
+            await ShowMessageAsync("无法打开文件选择器", $"保存对话框出错：{detail}");
             return null;
         }
     }
@@ -91,11 +137,13 @@ public static class DialogHelper
             }
 
             var file = await picker.PickSingleFileAsync();
-            return file?.Path;
+            return await ReturnToUiThreadAsync(window, file?.Path);
         }
         catch (Exception ex)
         {
-            await ShowMessageAsync("无法打开文件选择器", $"打开对话框出错：{ex.Message}");
+            var detail = ex.Message;
+            await ToUiThreadAsync(window);   // ContentDialog 也必须在 UI 线程上开
+            await ShowMessageAsync("无法打开文件选择器", $"打开对话框出错：{detail}");
             return null;
         }
     }
