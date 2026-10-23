@@ -59,13 +59,16 @@ public sealed partial class HomePage : Page
 
     private void OnOpenLogFolder(object sender, RoutedEventArgs e) => VM.OpenDirectory(AppPaths.LogDir);
 
-    // ---------------- 三张入口卡 ----------------
+    // ---------------- 四张入口卡 ----------------
 
     private void OnOpenTasks(object sender, RoutedEventArgs e) => VM.Navigate("tasks");
 
     private void OnOpenStats(object sender, RoutedEventArgs e) => VM.Navigate("stats");
 
     private void OnOpenLogs(object sender, RoutedEventArgs e) => VM.Navigate("logs");
+
+    /// <summary>通道管理页（与左侧菜单「会话通道 → 通道管理…」同一个 tag）。</summary>
+    private void OnOpenChannels(object sender, RoutedEventArgs e) => VM.Navigate("channel-mgmt");
 
     // ---------------- 首页大图 ----------------
 

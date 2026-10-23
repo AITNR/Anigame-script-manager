@@ -103,8 +103,8 @@
         </Grid>
 
         <!-- 图下方的内容区 -->
-        <ScrollViewer Grid.Row="2" Padding="20,18,20,20">
-            <StackPanel Spacing="14">
+        <ScrollViewer Grid.Row="2" Padding="20,14,20,20">
+            <StackPanel Spacing="12">
 
                 <!-- 小节标题行 -->
                 <StackPanel Orientation="Horizontal" Spacing="4">
@@ -112,75 +112,57 @@
                     <FontIcon Glyph="&#xE76C;" FontSize="12" VerticalAlignment="Center" Opacity="0.7" />
                 </StackPanel>
 
-                <!-- 三张主卡片（对应 Python 版的卡片式总览） -->
-                <Grid MinHeight="260">
+                <!-- 四张入口卡：只留图标 + 标题。描述文字占地方又没什么信息量，去掉后一行就够高 -->
+                <Grid ColumnSpacing="10" Height="76">
                     <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
 
-                    <Button Grid.Column="0" Margin="0,0,8,0"
+                    <Button Grid.Column="0" Padding="16,0"
                             Style="{StaticResource OverviewCardStyle}"
                             Click="OnOpenTasks">
-                        <Grid Padding="20">
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="*" />
-                                <RowDefinition Height="Auto" />
-                            </Grid.RowDefinitions>
-                            <Border Width="44" Height="44" CornerRadius="22" Background="{StaticResource YomoriAccentBrush}">
-                                <FontIcon Glyph="&#xE8FD;" Foreground="White" FontSize="20" />
+                        <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+                            <Border Width="34" Height="34" CornerRadius="9" Background="{StaticResource YomoriAccentBrush}">
+                                <FontIcon Glyph="&#xE8FD;" Foreground="White" FontSize="16" />
                             </Border>
-                            <StackPanel Grid.Row="1" VerticalAlignment="Center" Spacing="6" Margin="0,14,0,0">
-                                <TextBlock Text="任务执行" Style="{StaticResource SubtitleTextBlockStyle}" />
-                                <TextBlock Text="配置脚本路径、超时策略、并发组与监控关键词。"
-                                           TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
-                            </StackPanel>
-                            <TextBlock Grid.Row="2" Text="进入 →" FontSize="12" Opacity="0.6" />
-                        </Grid>
+                            <TextBlock Text="任务执行" FontSize="14" VerticalAlignment="Center" />
+                        </StackPanel>
                     </Button>
 
-                    <Button Grid.Column="1" Margin="4,0"
+                    <Button Grid.Column="1" Padding="16,0"
                             Style="{StaticResource OverviewCardStyle}"
                             Click="OnOpenStats">
-                        <Grid Padding="20">
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="*" />
-                                <RowDefinition Height="Auto" />
-                            </Grid.RowDefinitions>
-                            <Border Width="44" Height="44" CornerRadius="22" Background="{StaticResource YomoriAccentSoftBrush}">
-                                <FontIcon Glyph="&#xE916;" Foreground="White" FontSize="20" />
+                        <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+                            <Border Width="34" Height="34" CornerRadius="9" Background="{StaticResource YomoriAccentSoftBrush}">
+                                <FontIcon Glyph="&#xE916;" Foreground="White" FontSize="16" />
                             </Border>
-                            <StackPanel Grid.Row="1" VerticalAlignment="Center" Spacing="6" Margin="0,14,0,0">
-                                <TextBlock Text="运行耗时统计" Style="{StaticResource SubtitleTextBlockStyle}" />
-                                <TextBlock Text="按脚本查看执行次数、平均耗时与最近完成时间。"
-                                           TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
-                            </StackPanel>
-                            <TextBlock Grid.Row="2" Text="进入 →" FontSize="12" Opacity="0.6" />
-                        </Grid>
+                            <TextBlock Text="运行耗时统计" FontSize="14" VerticalAlignment="Center" />
+                        </StackPanel>
                     </Button>
 
-                    <Button Grid.Column="2" Margin="8,0,0,0"
+                    <Button Grid.Column="2" Padding="16,0"
                             Style="{StaticResource OverviewCardStyle}"
                             Click="OnOpenLogs">
-                        <Grid Padding="20">
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="*" />
-                                <RowDefinition Height="Auto" />
-                            </Grid.RowDefinitions>
-                            <Border Width="44" Height="44" CornerRadius="22" Background="{StaticResource YomoriAccentSoftBrush}">
-                                <FontIcon Glyph="&#xE8A5;" Foreground="White" FontSize="20" />
+                        <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+                            <Border Width="34" Height="34" CornerRadius="9" Background="{StaticResource YomoriAccentSoftBrush}">
+                                <FontIcon Glyph="&#xE8A5;" Foreground="White" FontSize="16" />
                             </Border>
-                            <StackPanel Grid.Row="1" VerticalAlignment="Center" Spacing="6" Margin="0,14,0,0">
-                                <TextBlock Text="运行日志" Style="{StaticResource SubtitleTextBlockStyle}" />
-                                <TextBlock Text="实时查看调度过程，出问题时在这里找原因。"
-                                           TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
-                            </StackPanel>
-                            <TextBlock Grid.Row="2" Text="进入 →" FontSize="12" Opacity="0.6" />
-                        </Grid>
+                            <TextBlock Text="运行日志" FontSize="14" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Button>
+
+                    <Button Grid.Column="3" Padding="16,0"
+                            Style="{StaticResource OverviewCardStyle}"
+                            Click="OnOpenChannels">
+                        <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+                            <Border Width="34" Height="34" CornerRadius="9" Background="{StaticResource YomoriAccentSoftBrush}">
+                                <FontIcon Glyph="&#xE713;" Foreground="White" FontSize="16" />
+                            </Border>
+                            <TextBlock Text="通道管理" FontSize="14" VerticalAlignment="Center" />
+                        </StackPanel>
                     </Button>
                 </Grid>
             </StackPanel>
