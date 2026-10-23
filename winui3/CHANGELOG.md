@@ -30,8 +30,10 @@ Python / PySide6 版（v1.0 RC1，legacy）的变更记录见仓库根的 [CHANG
   代理副本位于 `%ProgramData%` 下，目录名随产品改名而变；
   旧版部署在 `%ProgramData%\YukinoChan\agent` 的那份副本不会被新程序读取。
   旧目录可以保留作为回退，不会影响新版本运行。
-- 安装版安装目录由 `C:\Program Files\YukinoChan` 变为 `C:\Program Files\Yomori`，
-  请先卸载旧版再安装（安装包 AppId 未变，卸载入口仍在「应用和功能」里）。
+- 安装版安装目录由 `C:\Program Files\YukinoChan` 变为 `C:\Program Files\Yomori`。
+  安装包 AppId 未变，**直接运行新安装包即可**：它会先静默卸载旧版，再把文件铺到新目录，
+  不需要先进「应用和功能」手动卸载。旧目录为空时会一并删除。
+  已固定到任务栏或开始屏幕的旧快捷方式仍指向旧路径，需取消固定后重新固定。
 
 ---
 

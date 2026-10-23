@@ -52,6 +52,10 @@
 #define MyAppPublisher "AITNR"
 #define MyAppURL "https://github.com/AITNR/Anigame-script-manager"
 
+; 改名前（v2.1.1 及更早）的安装目录名。仅用于升级后收掉旧目录的空壳，
+; 不参与任何路径安装逻辑 —— 见 [Setup] 里 UsePreviousAppDir 的说明。
+#define LegacyDirName "YukinoChan"
+
 [Setup]
 AppId={{D7A2C45E-9F3B-4A61-8C2D-1E5B7F0A93C6}
 AppName={#MyAppName}
@@ -68,6 +72,14 @@ DefaultDirName={pf}\Yomori
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 DisableDirPage=auto
+
+; ⚠️ 必须显式关掉：默认值 yes 会让 Inno 把**旧安装的 InstallLocation** 当作默认目录，
+;    直接盖掉上面的 DefaultDirName。改名前旧版装在 {pf}\YukinoChan，于是新版本
+;    （AppId 不变，走升级）不声不响又装回 YukinoChan —— 目录名与产品名就此脱节，
+;    卸载项、开始菜单、任务栏固定项全指向旧路径。
+;    关掉之后：升级仍会先静默卸载旧版（同 AppId 的标准升级流程），再把文件铺到 {pf}\Yomori。
+;    代价是用户当年手动改过的安装目录不再被沿用 —— 对这个产品可接受（路径规范、极少自定义）。
+UsePreviousAppDir=no
 
 ; 装到 Program Files 就要管理员：不降权装到用户目录（那样数据与程序就分家了）
 PrivilegesRequired=admin
@@ -139,5 +151,25 @@ begin
     MsgBox('本安装程序需要管理员权限，才能把程序装到 Program Files。' + #13#10 + #13#10 +
            '请右键点击安装包，选择「以管理员身份运行」。', mbError, MB_OK);
     Result := False;
+  end;
+end;
+
+// 从旧版（装在 {pf}\YukinoChan）升级上来时，同 AppId 会让 Inno 先静默跑一遍旧卸载器，
+// 但卸载器只删它自己登记过的文件，目录本身会留下一个空壳。
+// 这里在文件全部铺完之后收掉它 —— RemoveDir 只删空目录，里面还有用户放的东西就不动。
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  LegacyDir: String;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    LegacyDir := ExpandConstant('{pf}\{#LegacyDirName}');
+    if DirExists(LegacyDir) then
+    begin
+      if RemoveDir(LegacyDir) then
+        Log('已删除旧版遗留的空安装目录：' + LegacyDir)
+      else
+        Log('旧安装目录非空，予以保留：' + LegacyDir);
+    end;
   end;
 end;

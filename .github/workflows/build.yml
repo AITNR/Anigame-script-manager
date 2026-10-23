@@ -394,6 +394,19 @@ jobs:
           $iscc = Join-Path '${{ steps.inno.outputs.inno_dir }}' 'ISCC.exe'
           if (-not (Test-Path $iscc)) { throw "找不到 ISCC.exe（Inno Setup 没装上？）：$iscc" }
 
+          # 改名后的硬性前提：装到 {pf}\Yomori，且不许被旧安装目录顶掉。
+          # UsePreviousAppDir 默认 yes，会把旧版登记过的 InstallLocation 盖在 DefaultDirName 上，
+          # 结果新版本（AppId 没变，走升级）又装回 {pf}\YukinoChan —— 目录名和产品名脱节，
+          # 卸载项 / 开始菜单 / 任务栏固定项全指向旧路径。整行精确匹配，防止被注释蒙过去。
+          $issLines = Get-Content 'winui3/tools/installer.iss'
+          if ($issLines -notcontains 'DefaultDirName={pf}\Yomori') {
+            throw 'installer.iss 的 DefaultDirName 不是 {pf}\Yomori'
+          }
+          if ($issLines -notcontains 'UsePreviousAppDir=no') {
+            throw 'installer.iss 缺 UsePreviousAppDir=no —— 从旧版升级会被装回 YukinoChan'
+          }
+          Write-Host '✅ 安装目录：{pf}\Yomori（且不让旧安装目录覆盖）'
+
           # Inno 的官方包不带 Unofficial 语言文件，中文要另外取；
           # 取不到就用默认英文向导（不给 LangFile 参数），别因此判红
           $langDir = Join-Path $env:GITHUB_WORKSPACE 'isl'
