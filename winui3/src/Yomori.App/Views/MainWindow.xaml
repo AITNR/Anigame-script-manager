@@ -124,10 +124,16 @@
 
                     <!-- ===== 右侧执行状态栏（可收起） =====
                          宽度与展开/收起两套内容的切换全在代码里做（SetSideStatusCollapsed）：
-                         XAML 里用 x:Bind 绑 bool 到 Width / Visibility 都需要转换器，不如直接设。 -->
+                         XAML 里用 x:Bind 绑 bool 到 Width / Visibility 都需要转换器，不如直接设。
+
+                         圆角只给「与内容交界」的左侧两角（8,0,0,8），右/上/下贴窗口边缘保持直角 ——
+                         和左侧 NavigationView 的 pane 完全对称：那边也只有靠内容一侧的两个角是圆的
+                         （实测截图：交界侧 12 物理像素 ÷ 1.5 缩放 = 8，与 OverlayCornerRadius 同值），
+                         贴窗口边缘的三个角同样被窗口裁成直角。 -->
                     <Border x:Name="SideStatusPanel"
                             Grid.Column="1"
                             Width="264"
+                            CornerRadius="8,0,0,8"
                             BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
                             BorderThickness="1,0,0,0"
                             Background="{ThemeResource LayerFillColorAltBrush}">
