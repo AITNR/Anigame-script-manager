@@ -8,8 +8,8 @@ values; --port must identify a TCP port that is confirmed unused by the
 preflight exclusive-bind check.
 
 The native ABI below is kept in the same order as
-winui3/src/YukinoChan.RdpNative/ycn_rdp.h and
-winui3/src/YukinoChan.App/Services/RdpNativeInterop.cs.
+winui3/src/Yomori.RdpNative/ycn_rdp.h and
+winui3/src/Yomori.App/Services/RdpNativeInterop.cs.
 """
 
 from __future__ import annotations

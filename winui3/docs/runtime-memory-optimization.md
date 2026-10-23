@@ -23,7 +23,7 @@ Working Set、Private Bytes 和 GPU committed 是不同统计，不能相加。1
 
 ## 回归验证
 
-- `dotnet run --project winui3/tests/YukinoChan.LogChecks/YukinoChan.LogChecks.csproj`：增量、轮转、短行积压续读、编码跨块、超长/无换行、状态大小与 BOM、活跃 bridge 同一路径身份。
+- `dotnet run --project winui3/tests/Yomori.LogChecks/Yomori.LogChecks.csproj`：增量、轮转、短行积压续读、编码跨块、超长/无换行、状态大小与 BOM、活跃 bridge 同一路径身份。
 - 原生 `native_memory_checks.py --dll <独立目录/ycn_rdp.dll>`：仅使用保留但不监听的本机测试端口，重复超过 8 次失败连接、连接中停止、旧 ID 操作、会话槽位回收。不连接现有用户会话，不向现有进程发操作。
 - 应用 x64 Release 构建以及原生独立目录构建；原生和托管层必须成套使用。旧 DLL 不具备新的终结回调语义，禁止只替换其中一个。
 

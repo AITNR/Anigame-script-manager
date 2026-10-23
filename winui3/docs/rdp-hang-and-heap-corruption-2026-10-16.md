@@ -2,7 +2,7 @@
 
 - **版本**：v1（2026-10-16）
 - **状态**：3 个提交已推送 `main`；**崩溃根因未获直接证据**、**真机复现路径未验证**
-- **适用范围**：`winui3/src/YukinoChan.RdpNative`（原生桥）与 `winui3/src/YukinoChan.App`（渲染层）
+- **适用范围**：`winui3/src/Yomori.RdpNative`（原生桥）与 `winui3/src/Yomori.App`（渲染层）
 - **起因**：AITNR 反馈「又卡死了」→「现在还崩溃了」→「修好了，把那些抓取的日志都可以删除了」
 - **相关**：`ui-hang-watchdog.md`（主控端整窗假死专题）、`rdp-embed-freerdp-plan.md`（内嵌渲染架构）
 
@@ -25,7 +25,7 @@
 
 ### 1.1 卡死与崩溃是同一批进程
 
-`C:\ProgramData\YukinoChan\watchdog\watchdog.log` 里的「UI 线程无响应（假死）」记录，
+`C:\ProgramData\Yomori\watchdog\watchdog.log` 里的「UI 线程无响应（假死）」记录，
 与 Windows 事件日志里 `Application Error` 的出错进程 ID **一一对应**：
 
 | 看门狗记录 | 事件日志崩溃 | 关系 |

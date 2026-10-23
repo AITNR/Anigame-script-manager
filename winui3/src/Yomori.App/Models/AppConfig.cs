@@ -1,0 +1,266 @@
+// -*- coding: utf-8 -*-
+using System;
+using System.Collections.Generic;
+using System.Text.Json.Serialization;
+using Yomori.Helpers;
+
+namespace Yomori.Models;
+
+/// <summary>全局应用配置，字段与 Python 版 config.json 完全一致。</summary>
+public sealed class AppConfig : ObservableObject
+{
+    /// <summary>进程级共享的活动任务 worker 上限；所有 ScriptRunner 共用此上限。</summary>
+    public const int MaxActiveTaskThreads = 16;
+
+    /// <summary>
+    /// WinUI 3 主题。除 light / dark 之外，仍保留 Python 版皮肤名以便旧配置平滑迁移，
+    /// 这些皮肤统一映射到 Fluent 默认主题。
+    /// </summary>
+    public static readonly IReadOnlyList<KeyValuePair<string, string>> ThemeItems = new List<KeyValuePair<string, string>>
+    {
+        new("system", "跟随系统"),
+        new("light", "浅色"),
+        new("dark", "深色"),
+    };
+
+    private static readonly HashSet<string> LegacyThemes = new() { "yukino", "campus", "fresh", "fantasy" };
+
+    private bool _shutdownAfterDone;
+    private int _shutdownDelaySeconds = 60;
+    private bool _autoExitAfterDone;
+    private bool _autoStartTasks;
+    private bool _windowsStartup;
+    private bool _enableTimeoutScreenshot = true;
+    private bool _developerMode;
+    private int _externalLogKeepFiles = ExternalLogDefaults.KeepFiles;
+    private int _eventLineLimit = ExternalLogDefaults.EventLineLimit;
+    private string _updateChannel = UpdateChannels.Stable;
+
+    public AppConfig()
+    {
+    }
+
+    public AppConfig(IEnumerable<TaskConfig> tasks)
+    {
+        Tasks = new List<TaskConfig>(tasks);
+    }
+
+    [JsonPropertyName("theme")]
+    public string Theme { get; set; } = "system";
+
+    [JsonPropertyName("shutdown_after_done")]
+    public bool ShutdownAfterDone
+    {
+        get => _shutdownAfterDone;
+        set => SetProperty(ref _shutdownAfterDone, value);
+    }
+
+    [JsonPropertyName("shutdown_delay_seconds")]
+    public int ShutdownDelaySeconds
+    {
+        get => _shutdownDelaySeconds;
+        set => SetProperty(ref _shutdownDelaySeconds, value);
+    }
+
+    [JsonPropertyName("auto_exit_after_done")]
+    public bool AutoExitAfterDone
+    {
+        get => _autoExitAfterDone;
+        set => SetProperty(ref _autoExitAfterDone, value);
+    }
+
+    [JsonPropertyName("auto_start_tasks")]
+    public bool AutoStartTasks
+    {
+        get => _autoStartTasks;
+        set => SetProperty(ref _autoStartTasks, value);
+    }
+
+    [JsonPropertyName("windows_startup")]
+    public bool WindowsStartup
+    {
+        get => _windowsStartup;
+        set => SetProperty(ref _windowsStartup, value);
+    }
+
+    [JsonPropertyName("enable_timeout_screenshot")]
+    public bool EnableTimeoutScreenshot
+    {
+        get => _enableTimeoutScreenshot;
+        set => SetProperty(ref _enableTimeoutScreenshot, value);
+    }
+
+    /// <summary>
+    /// 开发者模式：决定「运行日志」页要不要显示带 <c>[embed]</c> 标签的内嵌画面诊断行
+    /// （D3D 初始化 / 渲染路径 / GFX 管线状态 / 帧到达节奏……）。
+    ///
+    /// 只影响**页面显示**：关着的时候这些行照样写进 logs 目录里的日志文件，
+    /// 排障该翻的证据一条不少 —— 它们只是平时每 5 秒一条，会把任务调度那几条信息淹掉。
+    /// </summary>
+    [JsonPropertyName("developer_mode")]
+    public bool DeveloperMode
+    {
+        get => _developerMode;
+        set => SetProperty(ref _developerMode, value);
+    }
+
+    /// <summary>
+    /// 「检查更新」看哪条发布通道：<c>stable</c> = 正式版，<c>beta</c> = 测试版。
+    /// 只决定检查更新时比对哪一份发布，不改变程序本身的任何行为。
+    /// 取值见 <see cref="UpdateChannels"/>，未知值在 <see cref="Sanitize"/> 里回落到正式版。
+    /// </summary>
+    /// <summary>
+    /// 外部脚本日志保留多少份（**按通道各自计数**）。
+    ///
+    /// 例如 30 = 每条通道各留最近 30 天的日志，超出部分在启动时自动清理。
+    /// 默认值见 ExternalLogDefaults.KeepFiles。
+    /// </summary>
+    /// <summary>
+    /// 通道事件列表保留多少行（默认 <c>200</c>）。
+    ///
+    /// 这只是**界面滚动窗口**的大小 —— 外部日志一律完整写入独立文件，
+    /// 不会因为这里被顶掉而丢失。
+    /// </summary>
+    [JsonPropertyName("event_line_limit")]
+    public int EventLineLimit
+    {
+        get => _eventLineLimit;
+        set => SetProperty(ref _eventLineLimit, Math.Clamp(value, ExternalLogDefaults.MinEventLines, ExternalLogDefaults.MaxEventLinesLimit));
+    }
+
+    [JsonPropertyName("external_log_keep_files")]
+    public int ExternalLogKeepFiles
+    {
+        get => _externalLogKeepFiles;
+        set => SetProperty(ref _externalLogKeepFiles, Math.Max(1, value));
+    }
+    [JsonPropertyName("update_channel")]
+    public string UpdateChannel
+    {
+        get => _updateChannel;
+        set => SetProperty(ref _updateChannel, value);
+    }
+
+    [JsonPropertyName("tasks")]
+    public List<TaskConfig> Tasks { get; set; } = new();
+
+    /// <summary>RDP 跨用户会话相关设置。密码不落盘，只存账户名与"是否已保存凭据"。</summary>
+    [JsonPropertyName("rdp")]
+    public RdpConfig Rdp { get; set; } = new();
+
+    /// <summary>
+    /// 主窗口位置/尺寸，用于"记住上次窗口大小"。整段缺失时按默认尺寸启动。
+    /// </summary>
+    [JsonPropertyName("window")]
+    public WindowConfig Window { get; set; } = new();
+
+    /// <summary>
+    /// <b>只有导出文件里才有</b>：这次导出了哪些内容类别、密码是不是明文。
+    ///
+    /// 正常 config.json 不写它（<see cref="Models.ExportOptions"/> 默认值不写就是 null）。
+    /// 留着它是为了让接手的人打开文件就知道"为什么这台机器没配开机自启"，
+    /// 而不是以为是导出坏了。
+    /// </summary>
+    [JsonPropertyName("export_options")]
+    public ExportOptions? ExportOptions { get; set; }
+
+    /// <summary>规范化：主题兜底、按 order 排序并重写连续序号。</summary>
+    public void Sanitize()
+    {
+        Rdp ??= new RdpConfig();
+        Rdp.Sanitize();
+
+        Window ??= new WindowConfig();
+        Window.Sanitize();
+
+        var theme = (Theme ?? string.Empty).ToLowerInvariant();
+        var allowed = false;
+        foreach (var item in ThemeItems)
+        {
+            if (item.Key == theme)
+            {
+                allowed = true;
+                break;
+            }
+        }
+
+        Theme = allowed || LegacyThemes.Contains(theme) ? theme : "system";
+        ShutdownDelaySeconds = Math.Max(0, ShutdownDelaySeconds);
+        UpdateChannel = UpdateChannels.Normalize(UpdateChannel);
+        ExternalLogKeepFiles = Math.Max(1, ExternalLogKeepFiles);
+        EventLineLimit = ExternalLogDefaults.NormalizeEventLineLimit(EventLineLimit);
+
+        Tasks ??= new List<TaskConfig>();
+        Tasks.Sort((a, b) => a.Order.CompareTo(b.Order));
+        for (var i = 0; i < Tasks.Count; i++)
+        {
+            Tasks[i].Sanitize(i + 1);
+            Tasks[i].Order = i + 1;
+        }
+
+        MigrateLegacyChannel();
+    }
+
+    /// <summary>
+    /// 旧配置迁移：改造前只有一组全局 target_host / target_user，只能跑一路远程。
+    /// 这里把它变成一个「默认通道」，并把没指定通道的任务都指过去 —— 升级后行为不变。
+    ///
+    /// 幂等：已经有通道（用户自己建过）或从没配过目标账户时，什么都不做。
+    /// 注意只在 RDP 总开关打开时迁移：关掉开关时全部任务本来就跑本地，
+    /// 此时凭空多出一个通道只会让人困惑。
+    /// </summary>
+    private void MigrateLegacyChannel()
+    {
+        if (!Rdp.Enabled || Rdp.Channels.Count > 0)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(Rdp.TargetUser))
+        {
+            return;
+        }
+
+        var channel = new RdpChannel
+        {
+            Id = RdpChannel.LegacyDefaultId,
+            Name = Rdp.TargetUser,
+            Host = Rdp.TargetHost,
+            User = Rdp.TargetUser,
+            BridgePath = Rdp.BridgePath,
+            CredentialSaved = Rdp.CredentialSaved,
+            SessionFinish = Rdp.SessionFinish,
+            DesktopWidth = Rdp.DesktopWidth,
+            DesktopHeight = Rdp.DesktopHeight,
+            Enabled = true,
+        };
+
+        channel.Sanitize(1);
+        Rdp.Channels.Add(channel);
+
+        foreach (var task in Tasks)
+        {
+            if (string.IsNullOrWhiteSpace(task.ChannelId))
+            {
+                task.ChannelId = channel.Id;
+            }
+        }
+    }
+
+    public AppConfig CloneWithTasks(IEnumerable<TaskConfig> tasks) => new(tasks)
+    {
+        Theme = Theme,
+        ShutdownAfterDone = ShutdownAfterDone,
+        ShutdownDelaySeconds = ShutdownDelaySeconds,
+        AutoExitAfterDone = AutoExitAfterDone,
+        AutoStartTasks = AutoStartTasks,
+        WindowsStartup = WindowsStartup,
+        EnableTimeoutScreenshot = EnableTimeoutScreenshot,
+        DeveloperMode = DeveloperMode,
+        UpdateChannel = UpdateChannel,
+        ExternalLogKeepFiles = ExternalLogKeepFiles,
+        EventLineLimit = EventLineLimit,
+        Rdp = (RdpConfig)Rdp.Clone(),
+        Window = (WindowConfig)Window.Clone(),
+    };
+}

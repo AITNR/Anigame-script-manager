@@ -7,6 +7,34 @@ Python / PySide6 版（v1.0 RC1，legacy）的变更记录见仓库根的 [CHANG
 
 ---
 
+## v2.2.0 — 更名为 Yomori（2026-10-23）
+
+### Changed
+
+- **项目更名为 Yomori**（原「雪乃酱 / YukinoChan」）。新名称不再沿用受版权保护的角色名，
+  也不把产品绑定到某一款游戏。
+  - 可执行文件 `Yomori.exe`、程序集与命名空间 `Yomori.*`、解决方案 `Yomori.sln`；
+  - 运行数据目录 `%ProgramData%\Yomori\`（原 `%ProgramData%\YukinoChan\`）；
+  - AppUserModelID `com.aitnr.yomori.app`、单实例名、Toast 显示名同步更换。
+  - 原生桥接库仍名 `ycn_rdp.dll`，导出函数前缀 `ycn_` 保留 —— 它是 C ABI，
+    重命名需要重新编译 FreeRDP 桥接层，与产品名无关。
+- **移除看板娘**：右侧面板、状态机、气泡文案与 `assets/mascot/` 素材一并删除，
+  窗口恢复单列布局。`config.json` 不再写入 `window.mascot_panel`
+  （旧配置里的该键会被忽略，不需要手工清理）。运行状态仍由主页状态卡与通道概览呈现。
+- **更换应用图标**：`assets/icon.ico` 换为新 logo（16–256 共 9 档尺寸），
+  另存 `assets/logo.png` 供文档使用。
+
+### 升级注意
+
+- **升级后必须重新部署会话代理，并注销目标账户后重连一次。**
+  代理副本位于 `%ProgramData%` 下，目录名随产品改名而变；
+  旧版部署在 `%ProgramData%\YukinoChan\agent` 的那份副本不会被新程序读取。
+  旧目录可以保留作为回退，不会影响新版本运行。
+- 安装版安装目录由 `C:\Program Files\YukinoChan` 变为 `C:\Program Files\Yomori`，
+  请先卸载旧版再安装（安装包 AppId 未变，卸载入口仍在「应用和功能」里）。
+
+---
+
 ## v2.1.1 — 建连前下发的静音意图不再丢失（2026-10-22）
 
 ### Fixed
@@ -59,7 +87,7 @@ Python / PySide6 版（v1.0 RC1，legacy）的变更记录见仓库根的 [CHANG
 ### Changed
 
 - **「任务完成后自动退出」改走统一退出出口（`MainWindow.RequestExit`）。** 关闭拦截装上之后，
-  原来那句 `App.MainWindow?.Close()` 会被自己的"关闭雪乃酱？"弹窗拦住 —— 开了自动退出的用户
+  原来那句 `App.MainWindow?.Close()` 会被自己的"关闭 Yomori？"弹窗拦住 —— 开了自动退出的用户
   每次都会看到莫名其妙的确认框，而窗口若收在托盘里，那个框根本看不见、程序反而退不掉。
 
 - **安装包自己也要求管理员权限（双击即弹 UAC）。** 之前 `setup.exe` 外层清单是 Inno 默认的
@@ -84,7 +112,7 @@ Python / PySide6 版（v1.0 RC1，legacy）的变更记录见仓库根的 [CHANG
 
 ### Fixed
 
-- **安装完成后勾选「启动 雪乃酱」会弹「CreateProcess failed; code 740 请求的操作需要提升」，程序反而没起来。**
+- **安装完成后勾选「启动 Yomori」会弹「CreateProcess failed; code 740 请求的操作需要提升」，程序反而没起来。**
   根因在 Inno：带 `postinstall` 的 `[Run]` 条目**默认用 `runasoriginaluser`**（即 UAC 提权之前那个
   普通令牌），而主程序 `app.manifest` 是 `requireAdministrator` —— 拿普通令牌 `CreateProcess`
   必然被拒（740 = `ERROR_ELEVATION_REQUIRED`）。安装日志里能直接看到 `Run as: Original user`
@@ -96,7 +124,7 @@ Python / PySide6 版（v1.0 RC1，legacy）的变更记录见仓库根的 [CHANG
   通知库 handler / 通知记录却一个都不产生** —— 通知从未投递；而"不抛异常"让原有的 catch 降级路径
   永远走不到，于是失败完全无声。现已改用**经典 Toast API**
   （`Windows.UI.Notifications.ToastNotificationManager`），提权与非提权实测都能正常投递；
-  并在 HKCU 注册本程序的 AUMID 与显示名（Toast 头部显示"雪乃酱"）。同时补上状态自述：
+  并在 HKCU 注册本程序的 AUMID 与显示名（Toast 头部显示"Yomori"）。同时补上状态自述：
   启动时把"通知已就绪 / 不可用 + 原因 + HResult"写进运行日志与 crash.log；`Show()` 的返回值也改为
   如实反映是否真的投出去了（旧实现排队后先返回 true，会把失败当成功）。
 
@@ -128,7 +156,7 @@ Python / PySide6 版（v1.0 RC1，legacy）的变更记录见仓库根的 [CHANG
   ⚠️ 只影响页面显示：`logs/` 目录里的日志文件**始终完整**，排障该翻的证据一条不少。
 
 - 新增 `rdp.notify_on_channel_done`：**每条会话通道整条跑完（含失联）时在主控端弹一条该通道的收尾通知**
-  （`雪乃酱：通道「x」任务结束`）。以前这一条挂在 `notify_on_all_done` 下，现在两者独立。
+  （`Yomori：通道「x」任务结束`）。以前这一条挂在 `notify_on_all_done` 下，现在两者独立。
 - `rdp.notify_on_task_done`、`notify_on_channel_done`、`notify_on_all_done` 三个开关全部在
   「通道管理」页「执行与通知」卡片里，文案已标明“仅本机主控端”。
 - 每任务完成的通知现在也走“主控端会话锁定时落暂存、回前台补发”；
@@ -141,8 +169,8 @@ Python / PySide6 版（v1.0 RC1，legacy）的变更记录见仓库根的 [CHANG
 - **检查更新支持两条渠道**，选择记进 `config.json` 的 `update_channel`：
   「正式版」查 GitHub 的 `/releases/latest`（即 `release.yml` 手动发布的 `vX.Y.Z`）；
   「测试版」查发布列表里版本号最大的一份（含预发布，也就是 CI 每次提交推的滚动版 `test-build`）。
-  滚动预发布的 tag 里没有版本号，所以从资产文件名 `YukinoChan-winui3-<版本>-x64.zip` /
-  `YukinoChan-<版本>-setup.exe` 里解析。检查只**读**发布信息：不下载、不安装、不改任何文件，
+  滚动预发布的 tag 里没有版本号，所以从资产文件名 `Yomori-winui3-<版本>-x64.zip` /
+  `Yomori-<版本>-setup.exe` 里解析。检查只**读**发布信息：不下载、不安装、不改任何文件，
   有新版时点「前往下载」用浏览器打开下载页。新增 `Services/UpdateService.cs`（含 SemVer 版本比较、
   GitHub API 解析、限流与 404 的区分处理）。
 
@@ -164,7 +192,7 @@ Python / PySide6 版（v1.0 RC1，legacy）的变更记录见仓库根的 [CHANG
   指向不存在 / 已停用 / 没配账户的通道时**不执行**并说明原因，绝不静默改跑本地。
 - **指令桥多实例化**：`RdpBridge` 从静态类改为实例类，按通道各持一份
   `command.json` / `status.json` / `stop.json`。
-- **桥目录按账户名隔离**：`<ProgramData>\YukinoChan\rdp\<账户名>\`（见「升级注意」）。
+- **桥目录按账户名隔离**：`<ProgramData>\Yomori\rdp\<账户名>\`（见「升级注意」）。
 - **凭据按「主机 + 账户」存**：同一主机的不同账户各存一条，互不覆盖；旧键保留回落读取。
 - **停止覆盖全部通道**：`停止执行` / `紧急停止` 向每条通道各写一份 `stop.json`，
   代理在执行期间每秒检查并转成脚本引擎的停止请求。
@@ -222,7 +250,7 @@ Python / PySide6 版（v1.0 RC1，legacy）的变更记录见仓库根的 [CHANG
     XAML 编译错误 WMC0035）。
 - 原 `Views/RdpPage` 拆分为 `Views/ChannelsPage`（管理 / 预检）与 `Views/RdpChannelPage`（画面 / 进度），
   原文件已删除。
-- 旧 `YukinoChan.RdpHost`（COM ActiveX + WinForms 承载）随内嵌方案更换一并删除。
+- 旧 `Yomori.RdpHost`（COM ActiveX + WinForms 承载）随内嵌方案更换一并删除。
 - `config.json` 的 `rdp` 节点新增 `channels` 数组；旧字段保留作为迁移源与新建通道的默认值。
 - 分辨率改为**按通道**配置；独立窗口模式的 `.rdp` 文件按通道分文件（`session-<id>.rdp`）。
 
@@ -412,8 +440,8 @@ Python / PySide6 版（v1.0 RC1，legacy）的变更记录见仓库根的 [CHANG
 ⚠️ **桥目录规则变更，升级后必须重新部署会话代理**
 
 ```text
-旧：<ProgramData>\YukinoChan\rdp\
-新：<ProgramData>\YukinoChan\rdp\<账户名>\
+旧：<ProgramData>\Yomori\rdp\
+新：<ProgramData>\Yomori\rdp\<账户名>\
 ```
 
 已部署过代理的机器，升级后**重新点一次「部署会话代理」**，然后**注销目标账户再重连**

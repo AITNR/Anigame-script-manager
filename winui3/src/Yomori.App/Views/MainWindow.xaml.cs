@@ -1,0 +1,1109 @@
+// -*- coding: utf-8 -*-
+using System;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+using Microsoft.UI;
+using Microsoft.UI.Dispatching;
+using Microsoft.UI.Windowing;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
+using Windows.Foundation;
+using Windows.Graphics;
+using Yomori.Helpers;
+using Yomori.Models;
+using Yomori.Services;
+using Yomori.ViewModels;
+using Yomori.Views;
+
+namespace Yomori;
+
+public sealed partial class MainWindow : Window
+{
+    /// <summary>
+    /// 拖拽改大小/挪位置时 AppWindow.Changed 会连续触发，这里等手停下来再落盘，
+    /// 免得一次拖拽往 config.json 写几十遍。
+    /// </summary>
+    private const int PlacementSaveDebounceMs = 800;
+
+    private readonly DispatcherQueueTimer _placementSaveTimer;
+
+    // ---------------- 关闭按钮 / 状态栏 ----------------
+
+    /// <summary>状态栏图标（首次隐藏时创建；从未收进托盘的用户不会多一个图标）。</summary>
+    private TrayIcon? _tray;
+
+    /// <summary>程序自己发起的退出（自动退出 / 托盘菜单退出）。为 true 时关闭拦截一律放行。</summary>
+    private bool _exiting;
+
+    /// <summary>收到 WM_QUERYENDSESSION：系统要关机/注销，必须放行，不能拦。</summary>
+    private bool _systemShuttingDown;
+
+    /// <summary>关闭确认弹窗已经开着（连点关闭时不重复弹）。</summary>
+    private bool _closeDialogOpen;
+
+    /// <summary>窗口当前是不是"收在状态栏里"（而不是被用户最小化到任务栏）。</summary>
+    private bool _hiddenToTray;
+
+    /// <summary>隐藏前是否最大化，恢复时照原样还原。</summary>
+    private bool _wasMaximizedBeforeHide;
+
+    /// <summary>"已收进状态栏"的提示只发一次（会话内），避免每次隐藏都弹一条。</summary>
+    private bool _trayHintShown;
+
+    /// <summary>"任务跑完自动退出"的延时器（智能模式）。</summary>
+    private DispatcherQueueTimer? _autoExitTimer;
+
+    /// <summary>窗口是否收在状态栏里（供外部判断，例如单实例激活时决定要不要 Show）。</summary>
+    public bool IsHiddenToTray => _hiddenToTray;
+
+    public MainWindow()
+    {
+        InitializeComponent();
+
+        Title = "Yomori / 二游脚本助手";
+        ExtendsContentIntoTitleBar = true;
+        SetTitleBar(AppTitleBar);
+        SystemBackdrop = new MicaBackdrop();
+
+        // 记忆上次窗口大小：先把上次记下的位置/尺寸恢复到当前显示器工作区内，
+        // 之后再监听变化持续记录（恢复过程本身不触发写盘，注册顺序即是这个意思）。
+        RestoreWindowPlacement();
+
+        _placementSaveTimer = DispatcherQueue.CreateTimer();
+        _placementSaveTimer.Interval = TimeSpan.FromMilliseconds(PlacementSaveDebounceMs);
+        _placementSaveTimer.IsRepeating = false;
+        _placementSaveTimer.Tick += (_, _) => PersistWindowPlacement();
+
+        AppWindow.Changed += OnAppWindowChanged;
+
+        // 关闭按钮不再等于退出：先按策略决定"收进状态栏"还是"真退"。
+        // 注意这是**同步**事件，处理器里不能 await —— 处理方式是先 Cancel 拦下来，再去问。
+        AppWindow.Closing += OnAppWindowClosing;
+
+        try
+        {
+            var iconPath = System.IO.Path.Combine(Services.AppPaths.AssetsDir, "icon.ico");
+            if (System.IO.File.Exists(iconPath))
+            {
+                AppWindow.SetIcon(iconPath);
+            }
+        }
+        catch
+        {
+            // 图标缺失不应阻止启动
+        }
+
+        VM.ShutdownPromptRequested += OnShutdownPromptRequested;
+        VM.RequestNavigation += (_, tag) => NavigateTo(tag);
+
+        // 会话通道（M4 / 计划书 §8.1）：「会话通道」是**父项**，下面挂子菜单 ——
+        //   父项本身        = 只负责展开/收起子菜单，点击**不导航**（否则和子项重复）；
+        //   子项「多画面」  = 多画面页（全部通道的网格），唯一的菜单入口；
+        //   子项「通道名」  = 该通道单独的画面页；
+        //   子项「通道管理…」= 配置 / 凭据 / 部署代理 / 预检。
+        // 子项按「配置里启用的通道 + 本轮在跑的通道」重建，配置一改就跟着变。
+        VM.SessionsChanged += (_, _) => RebuildChannelMenuItems();
+        VM.PropertyChanged += OnViewModelPropertyChanged;
+        VM.Channels.CollectionChanged += (_, _) => RebuildChannelMenuItems();
+
+        // M5：窗口关闭时释放内嵌连接（ycn_rdp_disconnect 语义 = 会话保留；原生事件循环线程须退出，
+        // 否则非后台线程会拖住进程退出）
+        Closed += (_, _) =>
+        {
+            // 关窗时把最后一次几何同步写掉：防抖定时器很可能还来不及触发
+            _placementSaveTimer.Stop();
+            PersistWindowPlacement();
+
+            // 托盘图标必须在进程结束前摘掉：NIM_DELETE 没跑的话，
+            // 通知区域会留一个点不动的僵尸图标，直到用户把鼠标划过去才消失。
+            _autoExitTimer?.Stop();
+            _autoExitTimer = null;
+            _tray?.Dispose();
+            _tray = null;
+
+            VM.DisposeEmbedClient();
+        };
+
+        // 激活态跟踪 + 错过通知的补发：本地多用户 RDP 接管期间主控端会话被锁，
+        // 锁定会话不弹 Toast 横幅（通知只进操作中心）。
+        // 完成时 MainViewModel 会把通知落盘（PendingNotificationStore），
+        // 这里在窗口重新激活（用户切回来 / 应用重启）时消费补发。
+        Activated += OnWindowActivated;
+
+        if (Content is FrameworkElement root)
+        {
+            root.KeyDown += OnRootKeyDown;
+        }
+
+        NavigateTo("home");
+
+        // 子菜单先按当前配置铺一遍（配置里已启用的通道一启动就该出现在「会话通道」下面）
+        RebuildChannelMenuItems();
+
+        // M5/M6 自检通道：自动导航到「通道管理」页（页面 Loaded 里自动连接、画面挂在本页）
+        if (Program.EmbedVmArgs is not null)
+        {
+            DispatcherQueue.TryEnqueue(
+                Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+                () => NavigateTo(ChannelMgmtTag));
+        }
+    }
+
+    public MainViewModel VM => App.ViewModel;
+
+    /// <summary>窗口当前是否处于激活态（会话锁定时会失活）。</summary>
+    public static bool IsWindowActive { get; private set; }
+
+    private void OnWindowActivated(object sender, WindowActivatedEventArgs args)
+    {
+        IsWindowActive = args.WindowActivationState != WindowActivationState.Deactivated;
+
+        if (IsWindowActive)
+        {
+            VM.PresentPendingNotification();
+        }
+    }
+
+    // ---------------- 窗口位置 / 尺寸记忆 ----------------
+
+    /// <summary>
+    /// 按 config.json 里记录的几何恢复窗口；首次运行（没记录过）则用默认尺寸并在主屏居中。
+    /// </summary>
+    private void RestoreWindowPlacement()
+    {
+        var saved = VM.Config.Window;
+
+        // 记过位置就按那个坐标找显示器（多屏场景），否则用主屏
+        DisplayArea? area = null;
+        if (saved.X is not null && saved.Y is not null)
+        {
+            area = DisplayArea.GetFromPoint(
+                new PointInt32(saved.X.Value, saved.Y.Value),
+                DisplayAreaFallback.Nearest);
+        }
+
+        area ??= DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary);
+
+        var work = area?.WorkArea ?? default;
+        var placement = WindowPlacement.Resolve(
+            saved.X,
+            saved.Y,
+            saved.Width,
+            saved.Height,
+            new WindowPlacement.Bounds(work.X, work.Y, work.Width, work.Height));
+
+        AppWindow.MoveAndResize(new RectInt32(placement.X, placement.Y, placement.Width, placement.Height));
+
+        if (AppWindow.Presenter is not OverlappedPresenter presenter)
+        {
+            return;
+        }
+
+        // 兜住"手一抖把窗口拖到 400x300"这种再也调不回来的情况；
+        // 小屏上最小值不能超过工作区，否则窗口会被强制撑出屏幕。
+        if (work.Width > 0)
+        {
+            presenter.PreferredMinimumWidth = Math.Min(WindowPlacement.MinWidth, work.Width);
+        }
+
+        if (work.Height > 0)
+        {
+            presenter.PreferredMinimumHeight = Math.Min(WindowPlacement.MinHeight, work.Height);
+        }
+
+        if (saved.Maximized)
+        {
+            presenter.Maximize();
+        }
+    }
+
+    private void OnAppWindowChanged(AppWindow sender, AppWindowChangedEventArgs args)
+    {
+        if (!args.DidSizeChange && !args.DidPositionChange && !args.DidPresenterChange)
+        {
+            return;
+        }
+
+        // 重复调用即刷新倒计时：手停下 PlacementSaveDebounceMs 后才真正写盘
+        _placementSaveTimer.Stop();
+        _placementSaveTimer.Start();
+    }
+
+    /// <summary>
+    /// 把当前窗口几何交给 ViewModel 落盘。
+    /// 最小化状态的坐标是假的（约 -32000），跳过；最大化/全屏时只记"是不是最大化"，
+    /// 保留上一次的还原尺寸。
+    /// </summary>
+    private void PersistWindowPlacement()
+    {
+        try
+        {
+            var presenter = AppWindow.Presenter as OverlappedPresenter;
+
+            switch (presenter?.State)
+            {
+                case OverlappedPresenterState.Minimized:
+                    return;
+                case OverlappedPresenterState.Maximized:
+                    VM.SaveWindowPlacement(null, maximized: true);
+                    return;
+                default:
+                    var position = AppWindow.Position;
+                    var size = AppWindow.Size;
+                    VM.SaveWindowPlacement(
+                        new WindowPlacement.Placement(position.X, position.Y, size.Width, size.Height),
+                        maximized: false);
+                    return;
+            }
+        }
+        catch
+        {
+            // 记窗口几何失败不该影响用户操作
+        }
+    }
+
+    // ---------------- 关闭按钮 / 状态栏 ----------------
+
+    /// <summary>
+    /// 关闭拦截。**先 Cancel，再去问** —— <see cref="AppWindow.Closing"/> 是同步事件，
+    /// 处理器里不能 await，所以顺序只能是"先拦下来，再异步决定"。
+    ///
+    /// <para>放行的只有两种情况：程序自己发起的退出（<see cref="_exiting"/>）、
+    /// 以及系统要关机/注销（<see cref="_systemShuttingDown"/>，由托盘窗口的
+    /// <c>WM_QUERYENDSESSION</c> 置位）。后者绝不能拦 —— 拦了 Windows 会判定
+    /// "此应用阻止关机"，用户看到的是关机卡住。</para>
+    /// </summary>
+    private void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
+    {
+        if (_exiting || _systemShuttingDown)
+        {
+            return;
+        }
+
+        args.Cancel = true;
+
+        // 弹窗已经开着时用户又点了一次关闭（或连点）：直接忽略这次，别再排一个
+        if (_closeDialogOpen)
+        {
+            return;
+        }
+
+        _closeDialogOpen = true;
+        _ = HandleCloseRequestAsync();
+    }
+
+    /// <summary>
+    /// 按 <c>window.close_action</c> 决定这次关闭怎么处理。
+    ///
+    /// <para>三种策略直接执行；<c>ask</c> 才弹窗。弹窗里的勾选决定"要不要记住"以及"记成什么"，
+    /// 具体规则全在 <see cref="CloseDecision"/>（纯函数，冒烟里覆盖）。</para>
+    /// </summary>
+    private async Task HandleCloseRequestAsync()
+    {
+        try
+        {
+            var action = WindowConfig.NormalizeCloseAction(VM.Config.Window.CloseAction);
+            var outcome = CloseDecision.Decide(action, VM.IsRunning);
+
+            if (outcome is CloseOutcome.Exit or CloseOutcome.HideToTray)
+            {
+                ApplyCloseOutcome(outcome);
+                return;
+            }
+
+            var dialog = new CloseConfirmDialog(() => VM.IsRunning, VM.DescribeRunningForClose());
+            var result = await DialogHelper.ShowAsync(dialog);
+
+            // 取消（右上角叉 / Esc / 点空白）：什么都不做，窗口留着
+            if (result == ContentDialogResult.None)
+            {
+                return;
+            }
+
+            var clicked = result == ContentDialogResult.Secondary ? CloseOutcome.Exit : CloseOutcome.HideToTray;
+
+            // 勾了智能模式时按钮上写的是"当前状态下会发生的事"，这里按**点下去那一刻**的状态
+            // 再算一次，避免弹窗开着时任务刚好结束导致动作和文案不一致。
+            var actual = dialog.SmartMode
+                ? CloseDecision.Decide(WindowConfig.CloseActionAuto, VM.IsRunning)
+                : clicked;
+
+            var persist = CloseDecision.PersistFor(clicked, dialog.RememberChoice, dialog.SmartMode);
+            if (persist is not null)
+            {
+                VM.SaveCloseAction(persist);
+            }
+
+            ApplyCloseOutcome(actual);
+        }
+        finally
+        {
+            _closeDialogOpen = false;
+        }
+    }
+
+    private void ApplyCloseOutcome(CloseOutcome outcome)
+    {
+        switch (outcome)
+        {
+            case CloseOutcome.Exit:
+                RequestExit();
+                break;
+            case CloseOutcome.HideToTray:
+                HideToTray();
+                break;
+        }
+    }
+
+    /// <summary>
+    /// 创建状态栏图标（幂等）。失败返回 false，调用方必须回退到"最小化到任务栏"，
+    /// **绝不能静默隐藏窗口** —— 那样用户会以为程序被关掉了，其实进程还在跑任务，再也找不回来。
+    /// </summary>
+    private bool EnsureTray()
+    {
+        if (_tray is { IsInstalled: true })
+        {
+            return true;
+        }
+
+        var iconPath = Path.Combine(AppPaths.AssetsDir, "icon.ico");
+        var tray = new TrayIcon(iconPath);
+
+        tray.ShowRequested += (_, _) => RestoreFromTray();
+        tray.ExitRequested += (_, _) => RequestExit();
+        tray.CloseBehaviorRequested += (_, _) =>
+        {
+            RestoreFromTray();
+            NavigateTo("settings");
+        };
+        tray.StartStopRequested += (_, _) => OnTrayStartStop();
+
+        // 系统关机/注销：这个标记必须由托盘窗口的 WM_QUERYENDSESSION 置位，
+        // 因为 WinUI 的窗口没有可挂钩的 WndProc。
+        tray.SystemSessionEnding += (_, _) => _systemShuttingDown = true;
+
+        _tray = tray;
+
+        if (tray.TryInstall())
+        {
+            UpdateTrayState();
+            return true;
+        }
+
+        var reason = tray.LastError;
+        tray.Dispose();
+        _tray = null;
+
+        VM.AppendLog($"⚠ 无法创建状态栏图标，本次改为最小化到任务栏：{reason}");
+        return false;
+    }
+
+    /// <summary>同步托盘图标的提示与菜单文案（运行状态变化时调用）。</summary>
+    private void UpdateTrayState()
+    {
+        if (_tray is not { IsInstalled: true })
+        {
+            return;
+        }
+
+        var running = VM.IsRunning;
+        _tray.SetStartStopLabel(running);
+        _tray.Tip = running ? "Yomori — 正在执行任务" : "Yomori — 空闲";
+    }
+
+    /// <summary>收进状态栏：窗口隐藏、进程继续跑。</summary>
+    public void HideToTray()
+    {
+        if (_hiddenToTray)
+        {
+            return;
+        }
+
+        if (!EnsureTray())
+        {
+            // 托盘不可用时的退路：最小化。至少用户还能从任务栏点回来。
+            if (AppWindow.Presenter is OverlappedPresenter presenter)
+            {
+                presenter.Minimize();
+            }
+
+            return;
+        }
+
+        // 隐藏前把几何写掉：隐藏后 AppWindow 的几何不一定还能读到可信值
+        PersistWindowPlacement();
+        _wasMaximizedBeforeHide = (AppWindow.Presenter as OverlappedPresenter)?.State == OverlappedPresenterState.Maximized;
+
+        // 窗口不可见期间不要再按 1Hz 重排画面（多画面页的 LayoutSurfaces）。
+        // 隐藏时 surface 尺寸可能为 0，那一拍纯属白跑，还可能摸到失效对象 ——
+        // 与本机头号未修问题同族，这里先把它停掉。
+        SuspendSurfaceRefresh();
+
+        AppWindow.Hide();
+        _hiddenToTray = true;
+
+        UpdateTrayState();
+
+        if (!_trayHintShown)
+        {
+            _trayHintShown = true;
+            NotificationService.Show("已收进状态栏", "任务仍在继续。双击状态栏里的Yomori图标可以回到主界面。");
+        }
+    }
+
+    /// <summary>
+    /// 从状态栏恢复窗口。单实例激活、托盘双击、托盘菜单都会调到这里。
+    /// 恢复后必须做三件事：还原最大化、把窗口钳回可见区域（防显示器拔掉后跑到屏幕外）、
+    /// 重启画面重排。
+    /// </summary>
+    public void RestoreFromTray()
+    {
+        _autoExitTimer?.Stop();
+        _autoExitTimer = null;
+
+        if (!_hiddenToTray)
+        {
+            ActivateWindow();
+            return;
+        }
+
+        _hiddenToTray = false;
+
+        AppWindow.Show();
+
+        if (_wasMaximizedBeforeHide && AppWindow.Presenter is OverlappedPresenter presenter)
+        {
+            presenter.Maximize();
+        }
+
+        ClampWindowIntoView();
+        ResumeSurfaceRefresh();
+        ActivateWindow();
+    }
+
+    private void ActivateWindow()
+    {
+        try
+        {
+            // 窗口可能只是被最小化（不是收进托盘）：先还原，否则 Activate 只会闪一下任务栏
+            if (AppWindow.Presenter is OverlappedPresenter presenter &&
+                presenter.State == OverlappedPresenterState.Minimized)
+            {
+                presenter.Restore();
+            }
+
+            var hwnd = WindowHelper.GetHwnd(this);
+            if (hwnd != IntPtr.Zero)
+            {
+                TrayNative.SetForegroundWindow(hwnd);
+            }
+
+            Activate();
+        }
+        catch
+        {
+            // 抢焦点失败无所谓
+        }
+    }
+
+    /// <summary>把窗口钳制回某个显示器的可见区域内（复用 WindowPlacement 的"标题栏至少露出"规则）。</summary>
+    private void ClampWindowIntoView()
+    {
+        try
+        {
+            var position = AppWindow.Position;
+            var size = AppWindow.Size;
+
+            var area = DisplayArea.GetFromPoint(
+                new PointInt32(position.X, position.Y),
+                DisplayAreaFallback.Primary);
+
+            var work = area?.WorkArea ?? default;
+            if (work.Width <= 0 || work.Height <= 0)
+            {
+                return;
+            }
+
+            var placement = WindowPlacement.Resolve(
+                position.X,
+                position.Y,
+                size.Width,
+                size.Height,
+                new WindowPlacement.Bounds(work.X, work.Y, work.Width, work.Height));
+
+            if (placement.X != position.X || placement.Y != position.Y ||
+                placement.Width != size.Width || placement.Height != size.Height)
+            {
+                AppWindow.MoveAndResize(new RectInt32(placement.X, placement.Y, placement.Width, placement.Height));
+            }
+        }
+        catch
+        {
+            // 几何修正失败不该阻断恢复窗口
+        }
+    }
+
+    private void SuspendSurfaceRefresh()
+    {
+        try
+        {
+            if (ContentFrame.Content is RdpMultiViewPage page)
+            {
+                page.SuspendRefresh();
+            }
+        }
+        catch
+        {
+            // 停不下重排也得继续隐藏窗口
+        }
+    }
+
+    private void ResumeSurfaceRefresh()
+    {
+        try
+        {
+            if (ContentFrame.Content is RdpMultiViewPage page)
+            {
+                page.ResumeRefresh();
+            }
+        }
+        catch
+        {
+            // 重排失败不该让"恢复窗口"这一步整个失败
+        }
+    }
+
+    /// <summary>
+    /// 程序发起退出的**唯一出口**。
+    ///
+    /// <para>为什么必须统一：关闭拦截装上之后，任何一处直接 <c>Close()</c> 都会被自己的弹窗挡住 ——
+    /// 典型受害者是"任务完成后自动退出"（否则用户每次都会看到一个莫名其妙的"关闭Yomori？"）。
+    /// 这里先置 <see cref="_exiting"/>，让 <see cref="OnAppWindowClosing"/> 直接放行。</para>
+    /// </summary>
+    public void RequestExit()
+    {
+        if (_exiting)
+        {
+            return;
+        }
+
+        _exiting = true;
+
+        _autoExitTimer?.Stop();
+        _autoExitTimer = null;
+
+        try
+        {
+            PersistWindowPlacement();
+        }
+        catch
+        {
+            // 几何记不住也得退
+        }
+
+        try
+        {
+            _tray?.Dispose();
+        }
+        catch
+        {
+            // 图标摘不掉也得退（进程结束时系统会清）
+        }
+
+        _tray = null;
+
+        try
+        {
+            Close();
+        }
+        catch
+        {
+            Environment.Exit(0);
+        }
+    }
+
+    /// <summary>托盘菜单里的「开始执行 / 停止执行」。开始时把窗口叫回来，免得用户在看不见界面时误以为没反应。</summary>
+    private void OnTrayStartStop()
+    {
+        var running = VM.IsRunning;
+
+        RestoreFromTray();
+
+        if (running)
+        {
+            VM.Stop();
+        }
+        else
+        {
+            VM.Start();
+        }
+
+        UpdateTrayState();
+    }
+
+    /// <summary>
+    /// 智能模式：任务跑完（<see cref="MainViewModel.IsRunning"/> 由 true→false）且窗口仍在状态栏里，
+    /// 延迟几秒后退出。延迟是为了让"本轮结束"的汇总通知先弹出来。
+    ///
+    /// <para>三个取消条件缺一不可：窗口已被叫回来（用户正在看）、又开始跑了、策略被改成别的。
+    /// 少一个都会出现"用户盯着界面，窗口自己关了"。</para>
+    /// </summary>
+    private void ScheduleAutoExit()
+    {
+        if (_autoExitTimer is not null)
+        {
+            return;
+        }
+
+        var timer = DispatcherQueue.CreateTimer();
+        timer.Interval = TimeSpan.FromSeconds(3);
+        timer.IsRepeating = false;
+
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            _autoExitTimer = null;
+
+            if (_exiting || !_hiddenToTray || VM.IsRunning)
+            {
+                return;
+            }
+
+            if (WindowConfig.NormalizeCloseAction(VM.Config.Window.CloseAction) != WindowConfig.CloseActionAuto)
+            {
+                return;
+            }
+
+            NotificationService.Show("Yomori", "任务已结束，程序即将退出。");
+            RequestExit();
+        };
+
+        _autoExitTimer = timer;
+        timer.Start();
+    }
+
+    // ---------------- 看板娘面板：展开 / 收起 / 关闭 ----------------
+
+
+    private string _currentTag = string.Empty;
+
+    /// <summary>左侧菜单里各条通道项用的 tag 前缀（M4）。</summary>
+    private const string ChannelTagPrefix = "ch:";
+
+    /// <summary>
+    /// 「通道管理…」子项 tag —— 配置 / 凭据 / 部署代理 / 预检（<see cref="Views.ChannelsPage"/>）。
+    /// 刻意不再叫 "channels"：那个 tag 现在只是「会话通道」父项的标识，
+    /// 导航语义已让给「多画面」子项（<see cref="MultiViewTag"/>）。
+    /// </summary>
+    private const string ChannelMgmtTag = "channel-mgmt";
+
+    /// <summary>
+    /// 「多画面（全部通道）」子项 tag —— 多画面页（全部通道网格）唯一的菜单入口。
+    /// 「会话通道」父项点击只展开/收起，不导航；旧 tag "channels" 在
+    /// <see cref="NavigateTo"/> 里统一映射到这个 tag（外部入口 + 选中态都对得上）。
+    /// </summary>
+    private const string MultiViewTag = "multiview";
+
+    /// <summary>子菜单展开时的级联入场动画节奏：单项 180ms、每项错开 25ms，总延迟封顶 120ms（通道多也不拖沓）。</summary>
+    private const int MenuEntranceDurationMs = 180;
+    private const int MenuEntranceStepMs = 25;
+    private const int MenuEntranceMaxDelayMs = 120;
+
+    private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        // 通道配置整体换过（ReloadChannels 会 raise Channels）→ 子菜单跟着重建
+        if (e.PropertyName == nameof(MainViewModel.Channels))
+        {
+            RebuildChannelMenuItems();
+            return;
+        }
+
+        if (e.PropertyName == nameof(MainViewModel.IsRunning))
+        {
+            // IsRunning 理论上由 UI 线程改，但这条链上还接着托盘图标与计时器，
+            // 一旦将来有人从后台线程改它，碰控件/建计时器都会立刻炸 —— 先回 UI 线程再说。
+            if (!DispatcherQueue.HasThreadAccess)
+            {
+                DispatcherQueue.TryEnqueue(() => OnViewModelPropertyChanged(sender, e));
+                return;
+            }
+
+            UpdateTrayState();
+
+            // 智能模式：躲进状态栏之后任务跑完了 → 到点自动退出。
+            // 只有"仍然躲着"才算数；用户中途把窗口叫回来就不再自动关（见 ScheduleAutoExit）。
+            if (_hiddenToTray && !VM.IsRunning &&
+                WindowConfig.NormalizeCloseAction(VM.Config.Window.CloseAction) == WindowConfig.CloseActionAuto)
+            {
+                ScheduleAutoExit();
+            }
+        }
+    }
+
+    /// <summary>
+    /// 重建「会话通道」父项下的子菜单。
+    ///
+    /// 为什么不在 XAML 里绑集合：子项要先列配置通道、再补在跑的通道、末尾还要钉一个「通道管理…」，
+    /// 由窗口统一重建比双向同步可靠得多，也避开 NavigationView 选中态与集合变更的竞态。
+    /// </summary>
+    private void RebuildChannelMenuItems()
+    {
+        // 可能来自后台线程（会话集合变化）——碰控件一律回 UI 线程
+        if (!DispatcherQueue.HasThreadAccess)
+        {
+            DispatcherQueue.TryEnqueue(RebuildChannelMenuItems);
+            return;
+        }
+
+        var parent = ChannelsNavItem;
+
+        parent.MenuItems.Clear();
+        parent.MenuItems.Add(new NavigationViewItem
+        {
+            Tag = MultiViewTag,
+            Content = "多画面（全部通道）",
+            Icon = new SymbolIcon(Symbol.ViewAll),
+        });
+
+        foreach (var (id, name, tooltip) in EnumerateChannelMenuEntries())
+        {
+            var item = new NavigationViewItem
+            {
+                Tag = ChannelTagPrefix + id,
+                Content = name,
+                Icon = new SymbolIcon(Symbol.Link),
+            };
+
+            ToolTipService.SetToolTip(item, tooltip);
+            parent.MenuItems.Add(item);
+        }
+
+        parent.MenuItems.Add(new NavigationViewItemSeparator());
+        parent.MenuItems.Add(new NavigationViewItem
+        {
+            Tag = ChannelMgmtTag,
+            Content = "通道管理…",
+            Icon = new SymbolIcon(Symbol.Setting),
+        });
+
+        // 重建会把原来的项对象整体换掉 → 选中态需按 tag 复原，
+        // 否则用户正停在某条通道页时，菜单会"莫名其妙没选中任何一项"。
+        if (_currentTag.Length > 0)
+        {
+            SyncNavigationSelection(_currentTag);
+        }
+    }
+
+    /// <summary>
+    /// 「会话通道」父项被点击时切换子菜单的展开/收起。
+    ///
+    /// 为什么延后一拍再看状态：NavigationView 在部分版本里会自己切换 IsExpanded，
+    /// 有的版本不会（表现为"点不动"）。这里先记下点击时的状态，下一拍再比对 ——
+    /// 状态变了说明框架已经切过（不重复切，避免抵消成"点了没反应"），
+    /// 没变则由我们补上切换。两种行为下结果一致。
+    /// </summary>
+    private void ToggleChannelMenu()
+    {
+        var parent = ChannelsNavItem;
+        var wasExpanded = parent.IsExpanded;
+
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (parent.IsExpanded == wasExpanded)
+            {
+                parent.IsExpanded = !wasExpanded;
+            }
+
+            if (parent.IsExpanded)
+            {
+                PlayChannelMenuEntrance();
+            }
+        });
+    }
+
+    /// <summary>
+    /// 展开时给子项来一段级联入场动画（淡入 + 从上方轻微下滑）。
+    ///
+    /// 为什么要自己播：NavigationView 自带的只有面板高度撑开和 chevron 旋转，
+    /// 子项是"凭空出现"的，通道一多就很生硬。按索引错开、时长压到 180ms，不挡操作。
+    /// 只在用户点父项展开时播 —— 子菜单因会话变化重建（跑任务时很频繁）不播，否则菜单会一直闪。
+    /// </summary>
+    private void PlayChannelMenuEntrance()
+    {
+        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+        var duration = new Duration(TimeSpan.FromMilliseconds(MenuEntranceDurationMs));
+        var index = 0;
+
+        foreach (var entry in ChannelsNavItem.MenuItems)
+        {
+            if (entry is not UIElement element)
+            {
+                continue;
+            }
+
+            var delay = TimeSpan.FromMilliseconds(Math.Min(index * MenuEntranceStepMs, MenuEntranceMaxDelayMs));
+            index++;
+
+            var transform = new CompositeTransform { TranslateY = -12 };
+            element.RenderTransform = transform;
+            element.Opacity = 0;
+
+            var board = new Storyboard();
+
+            var fade = new DoubleAnimation
+            {
+                To = 1,
+                Duration = duration,
+                BeginTime = delay,
+                EasingFunction = ease,
+            };
+
+            Storyboard.SetTarget(fade, element);
+            Storyboard.SetTargetProperty(fade, "Opacity");
+
+            // 位移属于"依赖动画"（要 UI 线程逐帧算），不开这个开关整段会被静默跳过
+            var slide = new DoubleAnimation
+            {
+                To = 0,
+                Duration = duration,
+                BeginTime = delay,
+                EasingFunction = ease,
+                EnableDependentAnimation = true,
+            };
+
+            Storyboard.SetTarget(slide, transform);
+            Storyboard.SetTargetProperty(slide, "TranslateY");
+
+            board.Children.Add(fade);
+            board.Children.Add(slide);
+
+            // 收尾卸掉动画值：HoldEnd 会让动画值长期压住属性，之后谁再改 Opacity 都不生效
+            board.Completed += (_, _) =>
+            {
+                element.Opacity = 1;
+                transform.TranslateY = 0;
+                board.Stop();
+            };
+
+            board.Begin();
+        }
+    }
+
+    /// <summary>
+    /// 菜子里该列哪些通道：① 配置里启用中的通道（不跑任务也能点进去手动连画面看）；
+    /// ② 本轮在跑的通道（含配置里已删 / 已停用的 —— 在跑就必须看得见）。
+    /// </summary>
+    private List<(string Id, string Name, string Tooltip)> EnumerateChannelMenuEntries()
+    {
+        var entries = new List<(string, string, string)>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var channel in VM.Config.Rdp.Channels)
+        {
+            if (!channel.Enabled || string.IsNullOrWhiteSpace(channel.Id) || !seen.Add(channel.Id))
+            {
+                continue;
+            }
+
+            entries.Add((channel.Id, channel.DisplayName, $"{channel.Host} / {channel.User}"));
+        }
+
+        foreach (var session in VM.Sessions.Where(s => s.IsRemote))
+        {
+            if (!seen.Add(session.ChannelId))
+            {
+                continue;
+            }
+
+            entries.Add((
+                session.ChannelId,
+                session.DisplayName,
+                $"{session.TargetHost} / {session.TargetUser} · {session.StatusText}"));
+        }
+
+        return entries;
+    }
+
+    private void OnNavigationSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
+    {
+        if (args.SelectedItem is NavigationViewItem item && item.Tag is string tag)
+        {
+            NavigateTo(tag);
+        }
+    }
+
+    /// <summary>
+    /// 父项（「会话通道」）与叶子项都会触发这里：父项只做展开，**不导航也不改选中态**；
+    /// 叶子项才导航（<see cref="NavigateTo"/> 按 tag 去重，SelectionChanged 同时来也不会重复导航）。
+    /// </summary>
+    private void OnNavigationItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)
+    {
+        if (args.InvokedItemContainer is not NavigationViewItem item || item.Tag is not string tag || tag.Length == 0)
+        {
+            return;
+        }
+
+        // 父项与子项各开各的页会让人以为功能重合 —— 父项点击只展开/收起子菜单，
+        // 多画面入口由子项「多画面（全部通道）」独自承担。
+        if (item == ChannelsNavItem)
+        {
+            ToggleChannelMenu();
+            return;
+        }
+
+        NavigateTo(tag);
+    }
+
+    private void NavigateTo(string tag)
+    {
+        // 旧 tag "channels"（原「会话通道」父项入口，ChannelsPage「打开多画面」还在用）
+        // 统一落到「多画面」子项：父项不再作为导航目标，选中态也要落在子项上。
+        if (string.Equals(tag, "channels", StringComparison.Ordinal))
+        {
+            tag = MultiViewTag;
+        }
+
+        if (string.Equals(_currentTag, tag, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _currentTag = tag;
+
+        // 单条通道页：把通道 id 作为导航参数带过去
+        if (tag.StartsWith(ChannelTagPrefix, StringComparison.Ordinal))
+        {
+            ContentFrame.Navigate(typeof(Views.RdpChannelPage), tag[ChannelTagPrefix.Length..]);
+            ChannelsNavItem.IsExpanded = true;
+            SyncNavigationSelection(tag);
+            return;
+        }
+
+        switch (tag)
+        {
+            case "tasks":
+                ContentFrame.Navigate(typeof(Views.TasksPage));
+                break;
+            case "stats":
+                ContentFrame.Navigate(typeof(Views.StatsPage));
+                break;
+            case "logs":
+                ContentFrame.Navigate(typeof(Views.LogsPage));
+                break;
+            case MultiViewTag:
+                // 「多画面（全部通道）」子项：多画面页（父项点击不走这里，见 OnNavigationItemInvoked）
+                ContentFrame.Navigate(typeof(Views.RdpMultiViewPage));
+                break;
+            case ChannelMgmtTag:
+                ContentFrame.Navigate(typeof(Views.ChannelsPage));
+                break;
+            case "settings":
+                ContentFrame.Navigate(typeof(Views.SettingsPage));
+                break;
+            default:
+                ContentFrame.Navigate(typeof(Views.HomePage));
+                break;
+        }
+
+        SyncNavigationSelection(tag);
+    }
+
+    private void SyncNavigationSelection(string tag)
+    {
+        var target = FindNavItemByTag(NavView.MenuItems, tag)
+            ?? FindNavItemByTag(NavView.FooterMenuItems, tag);
+
+        if (target is not null)
+        {
+            NavView.SelectedItem = target;
+        }
+    }
+
+    /// <summary>按 tag 找菜单项（含父项的子项 —— 通道项现在挂在「会话通道」下面）。</summary>
+    private static NavigationViewItem? FindNavItemByTag(IEnumerable<object> items, string tag)
+    {
+        foreach (var item in items)
+        {
+            if (item is not NavigationViewItem nav)
+            {
+                continue;
+            }
+
+            if (nav.Tag is string itemTag && string.Equals(itemTag, tag, StringComparison.Ordinal))
+            {
+                return nav;
+            }
+
+            var nested = FindNavItemByTag(nav.MenuItems, tag);
+            if (nested is not null)
+            {
+                return nested;
+            }
+        }
+
+        return null;
+    }
+
+    // ---------------- 控制栏 ----------------
+
+    private void OnStartClicked(object sender, RoutedEventArgs e) => VM.Start();
+
+    private void OnPauseClicked(object sender, RoutedEventArgs e) => VM.Pause();
+
+    private void OnResumeClicked(object sender, RoutedEventArgs e) => VM.Resume();
+
+    private void OnStopClicked(object sender, RoutedEventArgs e) => VM.Stop();
+
+    private void OnEmergencyStopClicked(object sender, RoutedEventArgs e) => VM.EmergencyStop();
+
+    private void OnSaveClicked(object sender, RoutedEventArgs e) => VM.SaveConfig();
+
+    private void OnCancelShutdownClicked(object sender, RoutedEventArgs e) => VM.CancelShutdown();
+
+    private async void OnShutdownPromptRequested(object? sender, int delaySeconds)
+    {
+        // 窗口收在状态栏里时，这个倒计时对话框是**看不见**的（XamlRoot 还在，但窗口不可见），
+        // 用户只会看到机器到点直接关机。所以先把窗口叫回来。
+        RestoreFromTray();
+
+        var dialog = new Views.ShutdownCountdownDialog(delaySeconds)
+        {
+            XamlRoot = Content.XamlRoot,
+        };
+
+        // 走统一入口：排队 + 吞异常，避免和别的对话框撞上直接抛 COMException 崩进程
+        var result = await Helpers.DialogHelper.ShowAsync(dialog);
+        if (result == ContentDialogResult.Primary)
+        {
+            VM.CancelShutdown();
+        }
+    }
+
+    // ---------------- 快捷键：F8 停止 / Ctrl+Alt+F8 紧急停止 ----------------
+
+    private void OnRootKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        var ctrl = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(Windows.System.VirtualKey.Control)
+            .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+        var alt = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(Windows.System.VirtualKey.Menu)
+            .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+
+        if (e.Key == Windows.System.VirtualKey.F8)
+        {
+            if (ctrl && alt)
+            {
+                VM.EmergencyStop();
+            }
+            else
+            {
+                VM.Stop();
+            }
+
+            e.Handled = true;
+        }
+    }
+}

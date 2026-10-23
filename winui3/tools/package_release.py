@@ -3,9 +3,9 @@
 
 为什么需要它（CI 与本机都用同一份逻辑）：
 
-1. **`dotnet publish` 的输出不完整**。WinUI 3 的 `YukinoChan.pri` 与各页面的 `*.xbf`
+1. **`dotnet publish` 的输出不完整**。WinUI 3 的 `Yomori.pri` 与各页面的 `*.xbf`
    （`Views/`、`Themes/`、`embed/`）只在 **build** 输出里，publish 目录里没有；
-   `YukinoChan.RdpNative` 那批 FreeRDP 运行库（freerdp3 / winpr3 / openssl / zlib…）
+   `Yomori.RdpNative` 那批 FreeRDP 运行库（freerdp3 / winpr3 / openssl / zlib…）
    也只在 build 输出里。缺了它们，程序要么起不来、要么页面打不开 ——
    所以打包 = publish 输出（自包含时，带 .NET 运行时）+ build 输出（补齐运行期文件）。
 2. **绝不能把仓库根的 `config.json` 打进包**：那是使用者本机的真实配置
@@ -22,7 +22,7 @@
 
     # 框架依赖（体积小，需要目标机器装 .NET 8 运行时）
     python winui3/tools/package_release.py --build-dir <build 输出> \
-        --assets assets --out dist --name YukinoChan-winui3-2.1.0-x64
+        --assets assets --out dist --name Yomori-winui3-2.1.0-x64
 
     # 自包含（解压即用）
     python winui3/tools/package_release.py --build-dir <build 输出> --publish-dir <publish 输出> ...
@@ -71,9 +71,9 @@ _JUNK_SUFFIXES = (
 # 见 main() 里的注释：build 产出的是框架依赖版，混进去会让装好的程序弹
 # "You must install or update .NET to run this application"。
 _PUBLISH_AUTHORITATIVE = {
-    "yukinochan.exe",
-    "yukinochan.runtimeconfig.json",
-    "yukinochan.deps.json",
+    "yomori.exe",
+    "yomori.runtimeconfig.json",
+    "yomori.deps.json",
 }
 
 _JUNK_NAMES = {
@@ -81,8 +81,8 @@ _JUNK_NAMES = {
     "output.json",
     "xamlsavestatefile.xml",
     "multiplequalifiersperdimensionfound.txt",
-    "yukinochan.app.assemblyinfo.cs",
-    "yukinochan.app.assemblyinfoinputs.cache",
+    "yomori.app.assemblyinfo.cs",
+    "yomori.app.assemblyinfoinputs.cache",
 }
 
 # build 输出里的中间目录：不进发布包
@@ -151,10 +151,10 @@ def _verify(app_dir: Path, *, require_dotnet_runtime: bool) -> None:
         if not (app_dir / rel).exists():
             problems.append(f"{rel}（{note}）")
 
-    need("YukinoChan.exe", "主程序")
-    need("YukinoChan.dll", "主程序集")
-    need("YukinoChan.pri", "XAML 资源索引 —— 缺了界面打不开")
-    need("YukinoChan.runtimeconfig.json", ".NET 运行时配置")
+    need("Yomori.exe", "主程序")
+    need("Yomori.dll", "主程序集")
+    need("Yomori.pri", "XAML 资源索引 —— 缺了界面打不开")
+    need("Yomori.runtimeconfig.json", ".NET 运行时配置")
     need("ycn_rdp.dll", "内嵌 RDP 原生层")
     need("freerdp3.dll", "FreeRDP 运行库")
     need("freerdp-client3.dll", "FreeRDP 客户端运行库")
@@ -173,9 +173,9 @@ def _verify(app_dir: Path, *, require_dotnet_runtime: bool) -> None:
     # 外置 UI 看门狗（可选但强烈建议带上）：独立进程，主控端整窗假死时它不受影响，
     # 负责记录现场 + 抓 dump。进程内看门狗会被同一个冻结拖住，这就是要它的理由。
     # 不设为硬性缺失：CI 未构建它时不该让整个打包失败。
-    wd = app_dir / "YukinoChan.Watchdog.exe"
+    wd = app_dir / "Yomori.Watchdog.exe"
     if not wd.exists():
-        print("提示：未包含 YukinoChan.Watchdog.exe（外置 UI 看门狗）。", file=sys.stderr)
+        print("提示：未包含 Yomori.Watchdog.exe（外置 UI 看门狗）。", file=sys.stderr)
         print("      主控端假死时将没有外部证据可查。", file=sys.stderr)
 
     xbf = list(app_dir.glob("Views/*.xbf"))
@@ -209,26 +209,26 @@ def _verify_self_contained(app_dir: Path) -> list[str]:
     import json
 
     problems: list[str] = []
-    cfg_path = app_dir / "YukinoChan.runtimeconfig.json"
+    cfg_path = app_dir / "Yomori.runtimeconfig.json"
     if not cfg_path.is_file():
         return problems  # 缺文件已由 need() 报过
 
     try:
         cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as exc:
-        return [f"YukinoChan.runtimeconfig.json 读不出来（{exc}）"]
+        return [f"Yomori.runtimeconfig.json 读不出来（{exc}）"]
 
     opts = cfg.get("runtimeOptions") or {}
     included = opts.get("includedFrameworks")
     framework = opts.get("framework")
     if framework and not included:
         problems.append(
-            "YukinoChan.runtimeconfig.json 是**框架依赖**版"
+            "Yomori.runtimeconfig.json 是**框架依赖**版"
             f"（framework={framework.get('name')} {framework.get('version')}）—— "
             "自包含包必须是 includedFrameworks；多半是 build 输出覆盖了 publish 输出"
         )
     elif not included:
-        problems.append("YukinoChan.runtimeconfig.json 里既没有 includedFrameworks 也没有 framework（自包含应写 includedFrameworks）")
+        problems.append("Yomori.runtimeconfig.json 里既没有 includedFrameworks 也没有 framework（自包含应写 includedFrameworks）")
 
     return problems
 
@@ -236,7 +236,7 @@ def _verify_self_contained(app_dir: Path) -> list[str]:
 # ---------------------------------------------------------------- 说明文件
 
 _HELP_TEXT = """\
-雪乃酱 / 二游脚本助手 · WinUI 3 版
+Yomori / 二游脚本助手 · WinUI 3 版
 版本：{version}
 打包时间：{built_at}
 
@@ -244,7 +244,7 @@ _HELP_TEXT = """\
 怎么用
 ────────────────────────────────────────
 1. 解压到一个**固定目录**（不要放在临时目录里，日志与统计会写在它旁边）；
-2. 双击 YukinoChan.exe —— 首次运行会自动生成 config.json（默认配置）；
+2. 双击 Yomori.exe —— 首次运行会自动生成 config.json（默认配置）；
 3. 要接远程会话，先在左侧菜单「会话通道 → 通道管理…」里配置通道：
    目标主机 / 目标账户 / 保存凭据 / 开启远程桌面 / 部署会话代理 / 重新预检。
    详细步骤见仓库里的 winui3/USER_GUIDE.md。
@@ -351,8 +351,8 @@ def main(argv: list[str] | None = None) -> int:
     #    exe / runtimeconfig / deps.json 一律不参与覆盖。
     #
     #    build 是 `dotnet build`（build.yml 里没带 -r win-x64）→ **框架依赖**产物：
-    #      · YukinoChan.exe               = 框架依赖 apphost
-    #      · YukinoChan.runtimeconfig.json 里写 "framework": Microsoft.NETCore.App 8.0.0
+    #      · Yomori.exe               = 框架依赖 apphost
+    #      · Yomori.runtimeconfig.json 里写 "framework": Microsoft.NETCore.App 8.0.0
     #    publish 是 `--self-contained true -r win-x64` → 写的是 "includedFrameworks"。
     #
     #    早先的顺序是反的（publish 先、build 后），自包含的那份运行时配置被 build 版盖掉：

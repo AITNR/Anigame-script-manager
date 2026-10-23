@@ -2,7 +2,7 @@
 
 - **版本**：v1（2026-10-12）
 - **状态**：🔧 **第一轮已实施**（第 1 层看门狗 + 2.1 / 2.2 / 3.2 已落地并编译通过，看门狗已端到端实测），**未提交**、**未部署**、**未在真机长时间复现验证**
-- **适用范围**：`winui3/src/YukinoChan.App`（WinUI 3 主工程）
+- **适用范围**：`winui3/src/Yomori.App`（WinUI 3 主工程）
 - **起因**：AITNR 反馈「现在又卡死了，查查看为什么」—— 主控端 GUI 整窗假死，进程还活着但点不动。
 - **相关**：`rdp-embed-freerdp-plan.md`（内嵌渲染架构）、`known-limits-and-roadmap.md`（既有已知限制）
 
@@ -31,7 +31,7 @@
 
 ## 1. 现场证据（2026-10-12，PID 59404）
 
-冻结实例：`C:\Program Files\YukinoChan\YukinoChan.exe`，14:03:14 启动，Session 1。
+冻结实例：`C:\Program Files\Yomori\Yomori.exe`，14:03:14 启动，Session 1。
 
 ### 1.1 进程状态：确认假死
 
@@ -50,7 +50,7 @@
 
 ### 1.2 卡死时刻：日志断点 + 一次缺失的日志
 
-应用日志 `C:\Program Files\YukinoChan\logs\2026-10-12(2).log` 全文 21 行，**14:03:19 之后再无一行**：
+应用日志 `C:\Program Files\Yomori\logs\2026-10-12(2).log` 全文 21 行，**14:03:19 之后再无一行**：
 
 ```
 [14:03:17] [通道：zdh] 已下发远程执行指令 f994de7d2f66 …
@@ -364,8 +364,8 @@ while (DateTime.UtcNow < until) { Thread.SpinWait(1000); Thread.Sleep(1); }
 | 渲染后端开关 | `Views/ChannelsPage.xaml`「内嵌画面渲染后端」下拉框 |
 | 后端判定 | `Services/RdpD3DRenderer.cs` `ShouldUseSoftware` / `PushRenderBackend` |
 | 入口同步配置 | `Views/RdpView.xaml.cs` `Connect` / `AttachClient` |
-| 帧拷贝（阻塞点） | `Services/RdpEmbeddedClient.cs` `TryCopyFrame` → `YukinoChan.RdpNative/ycn_rdp.c` `ycn_rdp_copy_frame` |
-| 原生断开 join（阻塞点） | `YukinoChan.RdpNative/ycn_rdp.c:2204` |
+| 帧拷贝（阻塞点） | `Services/RdpEmbeddedClient.cs` `TryCopyFrame` → `Yomori.RdpNative/ycn_rdp.c` `ycn_rdp_copy_frame` |
+| 原生断开 join（阻塞点） | `Yomori.RdpNative/ycn_rdp.c:2204` |
 | 进程等待（阻塞点） | `Services/RdpSessionService.cs:1889/1938` |
 
 ---
@@ -377,9 +377,9 @@ while (DateTime.UtcNow < until) { Thread.SpinWait(1000); Thread.Sleep(1); }
 | 冻结实例 PID | 59404（14:03:14 启动，Session 1，已由用户手动结束） |
 | UI 线程 tid | 52888 |
 | 原生 RDP 线程 | 60340 / 66116（冻结期间仍在转） |
-| 应用日志 | `C:\Program Files\YukinoChan\logs\2026-10-12(2).log`（21 行，止于 14:03:19） |
+| 应用日志 | `C:\Program Files\Yomori\logs\2026-10-12(2).log`（21 行，止于 14:03:19） |
 | 成功对照日志 | `2026-10-11(4).log`（608998 字节，176 条「仍在运行」） |
-| 崩溃日志 | `C:\Program Files\YukinoChan\logs\crash.log`（干净，无本次记录） |
+| 崩溃日志 | `C:\Program Files\Yomori\logs\crash.log`（干净，无本次记录） |
 | RdpIdd.dll 崩溃 | 14:10:47 / 14:11:04，`RdpIdd.dll` 2.35.0 |
 | 安装版本 | `2.0.0-dev.35+c9fc87a8312bf2aa2c7affdebc64eba62e4b2381`（含 `0c8fc6f`） |
 ---
@@ -454,7 +454,7 @@ harness 做法：独立工程 `<Compile Include="...UiHangWatchdog.cs" />` 直�
 ### 10.6 本次未能取得的关键证据
 
 **活体 dump 没抓到。** 冻结进程在 08:52 前已被手动结束；WER 报告目录
-（`AppCrash_YukinoChan.exe_f7a03f53...`）拒绝访问，本机**未配置 `WER\LocalDumps`**，
+（`AppCrash_Yomori.exe_f7a03f53...`）拒绝访问，本机**未配置 `WER\LocalDumps`**，
 `C:\Windows\Minidump` 无当天记录。
 
 → 所以「到底哪个 LPC 调用」仍未定位。
@@ -592,7 +592,7 @@ harness 只覆盖了「UI 卡但进程健康」，真实场景是整进程冻结
 
 ### 12.2 新工程
 
-`winui3/src/YukinoChan.Watchdog/` —— 独立进程，自带 `asInvoker` manifest。
+`winui3/src/Yomori.Watchdog/` —— 独立进程，自带 `asInvoker` manifest。
 
 **为什么必须是独立工程，而不是主程序的 `--watchdog` 参数入口**：
 主程序 `app.manifest` 是 `requireAdministrator`（编译期静态、没法按参数豁免），
@@ -605,15 +605,15 @@ harness 只覆盖了「UI 卡但进程健康」，真实场景是整进程冻结
 | --- | --- |
 | `HangProbe.cs` | 探测 + 线程快照（`NtQuerySystemInformation`） |
 | `Program.cs` | 常驻循环、日志、抓 dump、目标查找 |
-| `YukinoChan.Watchdog.csproj` | 自包含 + `win-x64` |
+| `Yomori.Watchdog.csproj` | 自包含 + `win-x64` |
 | `app.manifest` | `asInvoker` |
 
 用法：
 
 ```powershell
-YukinoChan.Watchdog.exe                # 常驻监视
-YukinoChan.Watchdog.exe --once         # 自检：探测一次并打印
-YukinoChan.Watchdog.exe --pid 12345    # 只监视指定 PID（调试）
+Yomori.Watchdog.exe                # 常驻监视
+Yomori.Watchdog.exe --once         # 自检：探测一次并打印
+Yomori.Watchdog.exe --pid 12345    # 只监视指定 PID（调试）
 ```
 
 参数：探测间隔 3s、单次超时 3s、连续 2 次判定、假死 90s 后抓 dump、dump 冷却 10 分钟。
@@ -639,14 +639,14 @@ YukinoChan.Watchdog.exe --pid 12345    # 只监视指定 PID（调试）
 
 ### 12.5 又一个实测才发现的坑：目录定位不能按进程名
 
-`ResolveTargetDir()` 最初用 `Process.GetProcessesByName("YukinoChan")` 取第一个，
-结果 dump 写进了 `C:\ProgramData\YukinoChan\agent\crashdumps` ——
+`ResolveTargetDir()` 最初用 `Process.GetProcessesByName("Yomori")` 取第一个，
+结果 dump 写进了 `C:\ProgramData\Yomori\agent\crashdumps` ——
 机器上同时有主控端和每个目标账户一个的 `--rdp-agent`，进程名都一样，
 而 agent 的 PID 往往更小。已改为**必须按被监视的 PID** 取目录。
 
 ### 12.6 端到端验证（本次已做）
 
-用一个进程名同样叫 `YukinoChan` 的假死目标（真窗口 + STA 线程自旋占住）：
+用一个进程名同样叫 `Yomori` 的假死目标（真窗口 + STA 线程自旋占住）：
 
 | 用例 | 结果 |
 | --- | --- |

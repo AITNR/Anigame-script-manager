@@ -100,7 +100,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          args=(--repo "$GITHUB_REPOSITORY" --title "雪乃酱 WinUI 3 版 v$VER")
+          args=(--repo "$GITHUB_REPOSITORY" --title "Yomori WinUI 3 版 v$VER")
 
           if [ -n "$NOTES" ]; then
             printf '%s\n' "$NOTES" > notes.md

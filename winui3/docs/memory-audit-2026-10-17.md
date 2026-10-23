@@ -8,9 +8,9 @@
 范围：只读审计 + 外部采集。**未改动任何生产代码。**
 
 数据来源：
-- 安装版 `C:\Program Files\YukinoChan\logs\*.log` 里程序自己每分钟打的 `[memory]` 行；
+- 安装版 `C:\Program Files\Yomori\logs\*.log` 里程序自己每分钟打的 `[memory]` 行；
 - `winui3/tools/watch_memory.ps1` 外部采样（2026-10-17 20:12–20:16，真实双路连接）；
-- 源码静态审查（`YukinoChan.App` / `YukinoChan.RdpNative`）。
+- 源码静态审查（`Yomori.App` / `Yomori.RdpNative`）。
 
 ---
 
@@ -102,7 +102,7 @@ GPU 本地内存另计 97 MB（双路 swapchain 只有 31.6 MB，其余是合成
 - **显存占用与帧率无关**：纹理固定 3 张，不管帧率是 1 fps 还是 60 fps 都不变。
   日志里 `呈现 ≈1.0 帧/秒`（远程桌面空闲不送帧）同样只是这 3 张纹理。
 - 本机是 RTX 4060 Laptop（8 GB），系统已用专用显存 4810 MB，
-  YukinoChan 的 97 MB 约占 **2%**，不是瓶颈。
+  Yomori 的 97 MB 约占 **2%**，不是瓶颈。
 - **可压缩空间接近零**：`FlipSequential` 要求至少 2 张 backbuffer，已是下限；
   唯一还能动的是「每路一个 `ID3D11Device`」（4 路可省 3 份设备开销），但收益只有十几 MB，
   且设备生命周期风险高，不值得。
@@ -222,7 +222,7 @@ GPU 本地内存的首末差与每小时斜率。
 2. **一个从来没建成过的 WinRT 消息泵**
    上一版用 `DispatcherQueueController.CreateOnCurrentThread()` 维持进程存活，
    但真实代理里**每一次都抛 `COMException 0x80040111`（CLASS_E_CLASSNOTAVAILABLE）** ——
-   `%ProgramData%\YukinoChan\agent\startup_error.log` 里躺着 21 条同样的记录，
+   `%ProgramData%\Yomori\agent\startup_error.log` 里躺着 21 条同样的记录，
    从 10-12 到 10-17，每个启动批次一条。也就是说生产环境**一直在跑兜底分支**，
    而这个失败的尝试每次仍先把 WinRT 投影那套 DLL 拉进进程：
    `Microsoft.Windows.SDK.NET.dll`（24 MB）、`Microsoft.WinUI.dll`（7 MB）、
@@ -252,7 +252,7 @@ GPU 本地内存的首末差与每小时斜率。
 - 冒烟：代理宿主相关 7 条断言全 PASS（其余 9 条失败在 XAML/原生裸指针等**本次没碰的文件**上，
   是 7c7350c 拉代码后的既有欠账，先记账不动）。
 
-**还没验证的**（必须补）：把新代理部署到 `%ProgramData%\YukinoChan\agent` 后在真实 RDP 会话里跑一轮，
+**还没验证的**（必须补）：把新代理部署到 `%ProgramData%\Yomori\agent` 后在真实 RDP 会话里跑一轮，
 再触发一次真实任务、看任务结束回到 idle 的水位 —— 这次只验证了空载，没有跑真任务。
 
 ## 5. 结论

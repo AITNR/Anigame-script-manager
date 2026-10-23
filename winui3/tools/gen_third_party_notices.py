@@ -14,7 +14,7 @@
      · **组件清单**读 `winui3/third_party/components.json`（与 C# 界面共用的唯一数据源）；
      · 原生组件的**许可证原文**取 vcpkg 安装目录里的 `share/<pkg>/copyright`；
      · 原生组件的**版本**取 `share/<pkg>/vcpkg.spdx.json` 的 versionInfo；
-     · 托管组件的**版本**读 `YukinoChan.App.csproj` 里的 PackageReference。
+     · 托管组件的**版本**读 `Yomori.App.csproj` 里的 PackageReference。
    改依赖只需要改那个 JSON，本脚本的正文不用动。
 
 3. **拿不到 vcpkg 时要能退回**。CI 里原生层命中 `native-out` 缓存时，「取 vcpkg」与
@@ -102,7 +102,7 @@ def _default_vcpkg_inst() -> Path:
     否则会出现「编译用的是 3.32.0、声明里写的是别的版本」。
     """
     #   脚本在 <仓库>/winui3/tools/ 下，所以 parents[1] = 仓库根、parents[3] = 仓库的上级。
-    #   CMakeLists.txt 里的 ../../../../../ 数出来是同一层（从 YukinoChan.RdpNative 起往上 5 级），
+    #   CMakeLists.txt 里的 ../../../../../ 数出来是同一层（从 Yomori.RdpNative 起往上 5 级），
     #   两边任何一个改了另一个都得跟着改。
     here = Path(__file__).resolve().parent      # winui3/tools
     return (here.parents[3] / "_tools" / "vcpkg" / "installed" / "x64-windows").resolve()
@@ -237,7 +237,7 @@ def _render(
     out: list[str] = []
     _, managed = _components()
 
-    out.append("雪乃酱 / 二游脚本助手 —— 第三方组件与许可声明")
+    out.append("Yomori / 二游脚本助手 —— 第三方组件与许可声明")
     out.append(f"程序版本：{argv_version}")
     out.append(f"生成时间：{now}")
     out.append("")
@@ -344,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
     _force_utf8_stdio()
 
     here = Path(__file__).resolve().parent
-    default_csproj = here.parent / "src" / "YukinoChan.App" / "YukinoChan.App.csproj"
+    default_csproj = here.parent / "src" / "Yomori.App" / "Yomori.App.csproj"
     freeze_dir = here.parent / "third_party" / "licenses"   # <仓库>/winui3/third_party/licenses
 
     parser = argparse.ArgumentParser(description="生成第三方组件与许可声明（THIRD-PARTY-NOTICES.txt）")

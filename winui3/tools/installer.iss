@@ -1,11 +1,11 @@
 ﻿; ═══════════════════════════════════════════════════════════════════════════════
-; 雪乃酱 · 安装程序（Inno Setup 6）
+; Yomori · 安装程序（Inno Setup 6）
 ;
 ; 被 CI 调用（build.yml）：ISCC 传 MyAppVersion / SrcDir / OutDir / IconFile。
 ;   ISCC.exe winui3\tools\installer.iss /DMyAppVersion=2.1.0 /DSrcDir=<abs>\dist\app /DOutDir=<abs>\dist
 ; ⚠️ SrcDir / OutDir 请传**绝对路径** —— 相对路径会被当成「相对本脚本所在目录」解析。
 ;
-; 默认装到公共目录 Program Files\YukinoChan。主程序 app.manifest 是 requireAdministrator
+; 默认装到公共目录 Program Files\Yomori。主程序 app.manifest 是 requireAdministrator
 ; （双击即由系统提权），所以往安装目录写 config.json / logs 没问题。
 ;
 ; 数据（config.json / logs / runtime_stats）不在 [Files] 里，因此：
@@ -47,8 +47,8 @@
   #define LangFile ""
 #endif
 
-#define MyAppName "雪乃酱"
-#define MyAppExe "YukinoChan.exe"
+#define MyAppName "Yomori"
+#define MyAppExe "Yomori.exe"
 #define MyAppPublisher "AITNR"
 #define MyAppURL "https://github.com/AITNR/Anigame-script-manager"
 
@@ -64,7 +64,7 @@ AppSupportURL={#MyAppURL}/issues
 ;    runner 上装的版本（6.2.x）不认，编译直接 abort。
 
 ; 公共目录（Program Files）—— 装这里必须管理员，下面显式要求
-DefaultDirName={pf}\YukinoChan
+DefaultDirName={pf}\Yomori
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 DisableDirPage=auto
@@ -87,7 +87,7 @@ WizardStyle=modern
 Compression=lzma2/max
 SolidCompression=yes
 LZMAUseSeparateProcess=yes
-OutputBaseFilename=YukinoChan-{#MyAppVersion}-setup
+OutputBaseFilename=Yomori-{#MyAppVersion}-setup
 OutputDir={#OutDir}
 UninstallDisplayName={#MyAppName} {#MyAppVersion}
 UninstallDisplayIcon={app}\{#MyAppExe}

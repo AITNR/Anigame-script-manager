@@ -126,7 +126,7 @@ window_keywords  >  process_keywords  >  legacy wait_mode  >  direct_process
 
 - 超时现场截图：`logs/screenshots/{session}_{HHmmss}_{task}_timeout_{before,after}_kill.png`
 - 异常报告：`logs/last_abnormal_report.json`，下次启动在首页 InfoBar 主动汇报
-- 开机自启动：HKCU `Software\Microsoft\Windows\CurrentVersion\Run`，值名「雪乃酱 / 二游脚本助手」
+- 开机自启动：HKCU `Software\Microsoft\Windows\CurrentVersion\Run`，值名「Yomori / 二游脚本助手」
 - 自动关机：`shutdown /s /t {delay}`，倒计时对话框可取消（`shutdown /a`）
 - 快捷键：`F8` 停止执行，`Ctrl+Alt+F8` 紧急停止
 

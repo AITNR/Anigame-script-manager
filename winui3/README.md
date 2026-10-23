@@ -1,6 +1,6 @@
-# YukinoChan WinUI 3 版（雪乃酱 · 二游脚本统合管理器）
+# Yomori WinUI 3 版（二游脚本统合管理器）
 
-> 本目录是雪乃酱的 **C# / WinUI 3 版**，也是仓库唯一的代码主线。
+> 本目录是 Yomori 的 **C# / WinUI 3 版**，也是仓库唯一的代码主线。
 > 原先仓库根目录的 Python + PySide6 版（`main.py` / `core/` / `ui/`）已于 2026-09-28 从仓库移除，
 > 需要的话可以从 Git 历史（移除前的提交）里取回。
 
@@ -9,7 +9,7 @@
 > **v2.0 相对 Python 版新增的能力**：
 > 远程会话从「单通道 + 系统 mstsc 窗口」升级为 **多条「会话通道」并行执行** ——
 > 任务可分配给不同目标账户 / 不同机器，通道之间并行、通道内部串行；
-> 远程画面用原生 FreeRDP **内嵌**在雪乃酱窗口里（可同屏并列多路），鼠标键盘直接操作。
+> 远程画面用原生 FreeRDP **内嵌**在 Yomori 窗口里（可同屏并列多路），鼠标键盘直接操作。
 > 详见 [§七、会话通道](#七会话通道多通道并行执行) 与 [docs/rdp-multi-channel-plan.md](docs/rdp-multi-channel-plan.md)。
 
 ---
@@ -52,17 +52,17 @@ dotnet build -c Release -p:Platform=x64 # Release
 产物：
 
 ```text
-winui3/src/YukinoChan.App/bin/x64/Debug/net8.0-windows10.0.19041.0/YukinoChan.exe
-winui3/src/YukinoChan.App/bin/x64/Release/net8.0-windows10.0.19041.0/YukinoChan.exe
+winui3/src/Yomori.App/bin/x64/Debug/net8.0-windows10.0.19041.0/Yomori.exe
+winui3/src/Yomori.App/bin/x64/Release/net8.0-windows10.0.19041.0/Yomori.exe
 ```
 
 工程采用 **非打包（unpackaged）模式**（`WindowsPackageType=None` + `WindowsAppSDKSelfContained=true`），
-因此 `YukinoChan.exe` **可以直接双击运行**，不需要 MSIX 安装、不需要侧载。
+因此 `Yomori.exe` **可以直接双击运行**，不需要 MSIX 安装、不需要侧载。
 
 ### ⚠️ 程序开着时改 XAML：必须换输出目录构建
 
-**别一边开着雪乃酱一边 `dotnet build`。** 那会在复制 `YukinoChan.exe` 时失败（`MSB3027/MSB3021`，
-文件被占用），而 **XAML 资源包 `YukinoChan.pri` 的更新排在复制之后** —— 于是 `.dll` 是新的、
+**别一边开着 Yomori 一边 `dotnet build`。** 那会在复制 `Yomori.exe` 时失败（`MSB3027/MSB3021`，
+文件被占用），而 **XAML 资源包 `Yomori.pri` 的更新排在复制之后** —— 于是 `.dll` 是新的、
 `.pri` 里还是旧界面，启动后点页面直接 `InvalidCastException`（`Connect()` 把控件当别的类型转型）。
 
 程序开着时想验证改动，用独立输出目录构建，再把产物同步回 `bin`（`.exe` 除外）：
@@ -74,11 +74,11 @@ cp -rf <临时目录>/. bin/x64/Release/net8.0-windows10.0.19041.0/
 
 最省事的做法仍是：**先完全退出程序，再正常 `dotnet build`**。
 
-也可以用 Visual Studio 2022 打开 `winui3/YukinoChan.sln` 直接 F5。
+也可以用 Visual Studio 2022 打开 `winui3/Yomori.sln` 直接 F5。
 
 ### 原生层 `ycn_rdp.dll`（内嵌画面必需）
 
-应用依赖 `src/YukinoChan.RdpNative/` 编出来的 `ycn_rdp.dll`（FreeRDP 桥接层）。
+应用依赖 `src/Yomori.RdpNative/` 编出来的 `ycn_rdp.dll`（FreeRDP 桥接层）。
 **它是构建产物、没有入库**，所以全新克隆之后要自己编一次：
 
 ```bash
@@ -88,10 +88,10 @@ _tools/vcpkg/bootstrap-vcpkg.bat -disableMetrics
 _tools/vcpkg/vcpkg.exe install "freerdp[client]:x64-windows"
 
 # 2) 编桥接层（CMakeLists 默认从 <仓库>/../_tools/vcpkg 找依赖，也可用 -DVCPKG_INST 覆盖）
-cmake -S winui3/src/YukinoChan.RdpNative -B winui3/src/YukinoChan.RdpNative/build \
+cmake -S winui3/src/Yomori.RdpNative -B winui3/src/Yomori.RdpNative/build \
       -G "Visual Studio 17 2022" -A x64 \
       "-DVCPKG_INST=<vcpkg>/installed/x64-windows"
-cmake --build winui3/src/YukinoChan.RdpNative/build --config Release
+cmake --build winui3/src/Yomori.RdpNative/build --config Release
 ```
 
 产物是 `build/Release/ycn_rdp.dll` + 一批 FreeRDP 运行库（freerdp3 / winpr3 / openssl / zlib / cjson…），
@@ -143,7 +143,7 @@ CI 的每次构建都会建一个自己的预发布 tag，资产不会被下一�
 |---|---|---|
 | CI 测试版 | `2.0.0-dev.<构建号>` | `build.yml` 的版本兜底 |
 | CI 正式版 | 手填的 `X.Y.Z` | `release.yml` 的 `version` 输入 |
-| 本机 `dotnet build` | `2.0.0-dev.local` | `YukinoChan.App.csproj` 里的 `Version` 兜底 |
+| 本机 `dotnet build` | `2.0.0-dev.local` | `Yomori.App.csproj` 里的 `Version` 兜底 |
 
 ⚠️ CI 用 `-p:Version=` 传的是 **MSBuild 全局属性**，优先级高于项目文件里的赋值 ——
 所以 csproj 里那行 `<Version Condition=…>` 不会覆盖发布版本的号，只管本机编译这一种情形。
@@ -163,8 +163,8 @@ CI 的每次构建都会建一个自己的预发布 tag，资产不会被下一�
 
 | 产物 | 用法 |
 |---|---|
-| `YukinoChan-<版本>-setup.exe` | **安装版**。默认装到 `%ProgramFiles%\YukinoChan\`，带开始菜单快捷方式与卸载入口；**双击即弹 UAC**（清单里就是 `requireAdministrator`） |
-| `YukinoChan-winui3-<版本>-x64.zip` | **绿色版**。解压到**固定目录**（别放临时目录，日志会写在它旁边），双击 `YukinoChan.exe` 即用 |
+| `Yomori-<版本>-setup.exe` | **安装版**。默认装到 `%ProgramFiles%\Yomori\`，带开始菜单快捷方式与卸载入口；**双击即弹 UAC**（清单里就是 `requireAdministrator`） |
+| `Yomori-winui3-<版本>-x64.zip` | **绿色版**。解压到**固定目录**（别放临时目录，日志会写在它旁边），双击 `Yomori.exe` 即用 |
 
 安装脚本是 `winui3/tools/installer.iss`（Inno Setup 6；CI 里**钉死 6.7.3**，本机复现要先装 Inno Setup 6）。
 
@@ -215,18 +215,18 @@ UAC 被拒时会弹窗说明原因并引导「以管理员身份运行」——�
 **在本机复现 CI 的编译与打包**（产物落在 `dist/`，命令与工作流里逐字一致）：
 
 ```bash
-# 1) 编译（前提：原生层产物已在 src/YukinoChan.RdpNative/build/Release/）
-dotnet build winui3/src/YukinoChan.App/YukinoChan.App.csproj -c Release -p:Platform=x64 -p:OutDir=ci-build/
+# 1) 编译（前提：原生层产物已在 src/Yomori.RdpNative/build/Release/）
+dotnet build winui3/src/Yomori.App/Yomori.App.csproj -c Release -p:Platform=x64 -p:OutDir=ci-build/
 
 # 2) 自包含发布（省掉这一步就是框架依赖包 —— 体积小，但目标机要装 .NET 8 运行时）
-dotnet publish winui3/src/YukinoChan.App/YukinoChan.App.csproj -c Release -p:Platform=x64 \
+dotnet publish winui3/src/Yomori.App/Yomori.App.csproj -c Release -p:Platform=x64 \
   -r win-x64 --self-contained true -o ci-publish
 
 # 3) 打包 + 自检（缺 .pri / XBF / FreeRDP 运行库 / 第三方许可声明会直接报错退出）
 #    这一步还会生成 THIRD-PARTY-NOTICES.txt：原生组件的许可证原文取自 vcpkg
 #    （默认 <仓库>/../_tools/vcpkg，CI 里用 --vcpkg-inst 指到 .vcpkg/installed/x64-windows）
 python winui3/tools/package_release.py --build-dir ci-build --publish-dir ci-publish \
-  --assets assets --out dist --name YukinoChan-winui3-2.1.0-x64 --version 2.1.0
+  --assets assets --out dist --name Yomori-winui3-2.1.0-x64 --version 2.1.0
 
 # 4) 编安装程序 —— 先把编译器目录复制一份，改掉模板清单再编（Program Files 里的别动）
 cp -r "/c/Program Files (x86)/Inno Setup 6" inno-patched
@@ -235,17 +235,17 @@ inno-patched/ISCC.exe winui3/tools/installer.iss \
   /DMyAppVersion=2.1.0 /DSrcDir="$PWD/dist/app" /DOutDir="$PWD/dist" /DIconFile="$PWD/assets/icon.ico"
 
 # 5) 验收：产物清单必须是 requireAdministrator
-python winui3/tools/patch_setup_manifest.py dist/YukinoChan-2.1.0-setup.exe --expect-admin
+python winui3/tools/patch_setup_manifest.py dist/Yomori-2.1.0-setup.exe --expect-admin
 ```
 
-> **为什么不能直接发 `dotnet publish` 的输出**：WinUI 3 的 `YukinoChan.pri` 与各页面的 `*.xbf`
+> **为什么不能直接发 `dotnet publish` 的输出**：WinUI 3 的 `Yomori.pri` 与各页面的 `*.xbf`
 > 只存在于 **build** 输出（`Views/`、`Themes/`、`embed/`），FreeRDP 那批运行库也是 ——
 > publish 目录里没有它们（实测），缺了程序起不来 / 页面打不开。
 > `package_release.py` 负责把两边合并、补上 `assets/` 素材与使用说明，
 > 并在关键文件缺失或误打包 `config.json` 时**直接失败**（宁可 CI 红，也不发一个跑不起来的包）。
 
-> ⚠️ **合并顺序：build 先铺、publish 后铺，且 build 的 `YukinoChan.exe` /
-> `YukinoChan.runtimeconfig.json` / `YukinoChan.deps.json` 一律不复制。**
+> ⚠️ **合并顺序：build 先铺、publish 后铺，且 build 的 `Yomori.exe` /
+> `Yomori.runtimeconfig.json` / `Yomori.deps.json` 一律不复制。**
 > 第 1 步的 `dotnet build` 没带 `-r win-x64`，产出的是**框架依赖**版 ——
 > 它的 runtimeconfig 写 `"framework": Microsoft.NETCore.App 8.0.0`，
 > 装到没装 .NET 的机器上双击就弹 *"You must install or update .NET to run this application"*。
@@ -260,7 +260,7 @@ python winui3/tools/patch_setup_manifest.py dist/YukinoChan-2.1.0-setup.exe --ex
 
 ```text
 winui3/
-├─ YukinoChan.sln                   # 只包含 YukinoChan.App
+├─ Yomori.sln                   # 只包含 Yomori.App
 ├─ docs/                            # 设计文档（内嵌 RDP / 多会话通道 / 菜单重构计划书）
 ├─ third_party/
 │  ├─ components.json               # 第三方组件清单（唯一数据源：界面与打包脚本共用）
@@ -269,20 +269,20 @@ winui3/
 ├─ tools/gen_third_party_notices.py # 生成 THIRD-PARTY-NOTICES.txt（第三方组件清单 + 许可证原文）
 ├─ tools/installer.iss              # 安装程序脚本（Inno Setup 6）
 ├─ tools/patch_setup_manifest.py    # 把 Inno 模板 SetupLdr 的清单改成 requireAdministrator
-├─ src/YukinoChan.RdpNative/        # 原生 FreeRDP 封装（ycn_rdp.c / .h + CMakeLists.txt）
+├─ src/Yomori.RdpNative/        # 原生 FreeRDP 封装（ycn_rdp.c / .h + CMakeLists.txt）
 │  └─ ycn_rdp.c                     #   多会话上限 YCN_MAX_SESSIONS = 8
-└─ src/YukinoChan.App/
-   ├─ YukinoChan.App.csproj
+└─ src/Yomori.App/
+   ├─ Yomori.App.csproj
    ├─ app.manifest                 # asInvoker + PerMonitorV2 + UTF-8
    ├─ App.xaml / App.xaml.cs       # 应用入口、全局资源、异常兜底
-   ├─ Themes/Styles.xaml           # 雪乃酱雾蓝主题（YukinoAccent 等 Brush / 卡片 / 气泡样式）
+   ├─ Themes/Styles.xaml           # Yomori 雾蓝主题（YomoriAccent 等 Brush / 卡片样式）
    ├─ Models/
-   │  ├─ Enums.cs                  # WaitModes / TimeoutActions / ConcurrentPolicies / MascotStates
+   │  ├─ Enums.cs                  # WaitModes / TimeoutActions / ConcurrentPolicies
    │  ├─ RdpModels.cs              # RdpConfig / RdpResolutions / RdpCommand / RdpStatus / RdpTaskEvent / RdpHeartbeat
    │  ├─ RdpChannel.cs             # 会话通道模型（主机 / 账户 / 桥目录 / 收尾 / 凭据标记）
    │  ├─ RdpChannelPaths.cs        # 桥目录规则（按账户名分目录，纯函数）
    │  ├─ RdpChannelPlanner.cs      # 分组 + 启动计划 + 并发上限（纯函数）
-   │  ├─ RunSummary.cs             # 整轮汇总 / 看板娘「取最差」（纯函数）
+   │  ├─ RunSummary.cs             # 整轮汇总（纯函数）
    │  ├─ ChannelOverviewItem.cs    # 主页通道概览快照行
    │  ├─ RdpClientStateMachine.cs  # 内嵌客户端连接状态机
    │  ├─ RdpInputMapper.cs         # 鼠标 / 键盘 → RDP 输入事件
@@ -315,7 +315,6 @@ winui3/
    │  ├─ MonitoredProcess.cs       # 进程包装 + UAC 提权启动（runas）
    │  ├─ CommandLine.cs            # Windows 风格命令行拆分（CommandLineToArgvW）
    │  ├─ ScriptRunner.cs           # 任务执行引擎（核心）
-   │  ├─ MascotService.cs          # 看板娘状态机 / 素材选取 / 气泡文案
    │  ├─ SystemServices.cs         # 开机自启动（HKCU Run）、自动关机
    │  └─ ScreenshotService.cs      # 超时现场全屏截图
    ├─ Helpers/
@@ -336,7 +335,6 @@ winui3/
       ├─ RdpView.xaml(.cs)         # 内嵌画面控件（D3D 交换链 + 输入 + 帧率统计）
       ├─ RdpFullScreenCoordinator.cs / RdpFullScreenWindow.cs   # 全屏编排（两页共用）
       ├─ RdpChannelWindow.cs       # 通道「弹出独立窗口」（复用同一 client，不带钩子）
-      ├─ MascotPanel.xaml(.cs)     # 右侧看板娘 + 状态网格 + 发言气泡
       ├─ HomePage.xaml(.cs)        # 总览（含会话通道概览卡）
       ├─ TasksPage.xaml(.cs)       # 任务管理：三栏（执行通道 / 通道内任务 / 任务详情），按通道编排
       ├─ StatsPage.xaml(.cs)       # 耗时统计
@@ -345,8 +343,8 @@ winui3/
       └─ ShutdownCountdownDialog.xaml(.cs)  # 关机倒计时
 ```
 
-代码量约 **19000 行**（76 个 `.cs` / `.xaml`，不含 obj 下的自动生成文件），全部在 `YukinoChan.App`。
-> 早期那个承载 COM ActiveX 的 WinForms 类库 `YukinoChan.RdpHost` 已随「改用 FreeRDP 内嵌」一并删除，不再出现在目录里。
+代码量约 **19000 行**（76 个 `.cs` / `.xaml`，不含 obj 下的自动生成文件），全部在 `Yomori.App`。
+> 早期那个承载 COM ActiveX 的 WinForms 类库 `Yomori.RdpHost` 已随「改用 FreeRDP 内嵌」一并删除，不再出现在目录里。
 
 ---
 
@@ -358,7 +356,7 @@ Python → C# 的逐项对照（核心逻辑 / 界面 / 主题）已归档到 [d
 
 ## 六、已完整移植的执行语义
 
-监控优先级、清理顺序、超时动作、看板娘状态机等逐条对齐清单已归档到 [docs/migration-from-python.md](docs/migration-from-python.md#三已完整移植的执行语义)。
+监控优先级、清理顺序、超时动作等逐条对齐清单已归档到 [docs/migration-from-python.md](docs/migration-from-python.md#三已完整移植的执行语义)。
 
 ---
 
@@ -372,10 +370,10 @@ Python → C# 的逐项对照（核心逻辑 / 界面 / 主题）已归档到 [d
 
 - **通道之间并行**：每条通道各自下发指令、各自连自己的目标账户，互不等待；
 - **通道内部串行**：同一条通道里的任务仍按「任务执行」页的顺序一条条跑；
-- **没分配通道的任务**（下拉里选「本地执行（当前会话）」）跑在雪乃酱自己所在的会话里，
+- **没分配通道的任务**（下拉里选「本地执行（当前会话）」）跑在 Yomori 自己所在的会话里，
   和通道任务同时进行。
 
-远程画面直接**内嵌**在雪乃酱窗口里（FreeRDP + D3D 交换链），鼠标键盘可以直接操作；
+远程画面直接**内嵌**在 Yomori 窗口里（FreeRDP + D3D 交换链），鼠标键盘可以直接操作；
 也可以改成用系统自带的 `mstsc` 开独立窗口。
 
 菜单是**两级**的（计划书 [docs/channel-menu-multiview-plan.md](docs/channel-menu-multiview-plan.md)）：
@@ -421,7 +419,7 @@ Windows 会话之间不能直接通信，主控端也无法跨会话启动进程
 **每条通道一套桥目录**，互不干扰：
 
 ```text
-主控端（雪乃酱，账户 A）
+主控端（Yomori，账户 A）
   ├─ 1. 任务分组：channel_id 空 → 本地执行；= ch-xxx → 那条通道
   ├─ 2. 对每条通道各写一份 command.json，各自轮询自己的 status.json
   ├─ 3. 停止执行 / 紧急停止 → 给每条通道各写一份 stop.json；
@@ -429,11 +427,11 @@ Windows 会话之间不能直接通信，主控端也无法跨会话启动进程
   └─ 4. 画面：每条通道各持一个内嵌客户端（一个客户端同时只能挂一块画面）
 
 桥目录（每通道一份，按账户名隔离）
-  ├─ 本机默认：%ProgramData%\YukinoChan\rdp\<账户名>\
+  ├─ 本机默认：%ProgramData%\Yomori\rdp\<账户名>\
   └─ 远程目标：你填的共享路径（两台机器都能读写）
 
 目标会话（账户 B / 远程机器）
-  ├─ 1. 账户登录后，公共启动目录里的快捷方式自动拉起 YukinoChan.exe --rdp-agent
+  ├─ 1. 账户登录后，公共启动目录里的快捷方式自动拉起 Yomori.exe --rdp-agent
   ├─ 2. 代理**常驻**：循环「等指令 → 执行 → 回等待」，等待期每秒写一次 idle 心跳
   ├─ 3. 读到 command.json 立刻删掉（防重复执行），用同一套 ScriptRunner 跑任务队列
   ├─ 4. 每完成一个任务：写回 status.json 的事件（**不发通知**：目标会话里的 Toast
@@ -480,7 +478,7 @@ Windows 会话之间不能直接通信，主控端也无法跨会话启动进程
 | 通道数上限 | 一次最多 **8 条**通道并行（原生层上限）。超出的通道会被截断，开始执行时会弹一次说明，日志里也有警告 |
 | 凭据 | 用通道编辑卡里的「保存凭据」存入 Windows 凭据管理器，**按「主机 + 账户」各存一条**，密码不写进 `config.json` |
 | 会话代理 | 点「部署会话代理」放到所有用户公共启动目录（需管理员，一次性）。远程目标要在**对方机器**上部署 |
-| 指令桥目录 | **仅远程主机需要**。填双方都能读写的 UNC 或盘符路径，例如 `\\192.168.1.20\YukinoBridge`；本机多账户留空即可 |
+| 指令桥目录 | **仅远程主机需要**。填双方都能读写的 UNC 或盘符路径，例如 `\\192.168.1.20\YomoriBridge`；本机多账户留空即可 |
 
 ### 会话代理是怎么部署的
 
@@ -488,13 +486,13 @@ Windows 会话之间不能直接通信，主控端也无法跨会话启动进程
 
 ```text
 1. 复制程序到公共目录
-   源：当前运行的 YukinoChan.exe 所在目录（可能是 C:\Users\<你的账户>\... 下的开发产物）
-   目标：C:\ProgramData\YukinoChan\agent\
+   源：当前运行的 Yomori.exe 所在目录（可能是 C:\Users\<你的账户>\... 下的开发产物）
+   目标：C:\ProgramData\Yomori\agent\
    跳过：config.json / logs/ / runtime_stats/   ← 目标账户要自己生成这些
 
 2. 建快捷方式
-   C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\雪乃酱 RDP 会话代理.lnk
-   TargetPath = C:\ProgramData\YukinoChan\agent\YukinoChan.exe
+   C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\Yomori RDP 会话代理.lnk
+   TargetPath = C:\ProgramData\Yomori\agent\Yomori.exe
    Arguments  = --rdp-agent [--bridge:<桥目录>]
 ```
 
@@ -506,10 +504,10 @@ Windows 会话之间不能直接通信，主控端也无法跨会话启动进程
 
 复制到 `%ProgramData%` 就绕开了这个问题：这个目录默认对 `BUILTIN\Users` 开放读权限。
 
-复制只在程序有更新时发生（比对 `YukinoChan.exe` 的写入时间），平时点「部署」是秒过的。
+复制只在程序有更新时发生（比对 `Yomori.exe` 的写入时间），平时点「部署」是秒过的。
 238 个文件约 142MB，本地 SSD 实测 600ms 左右。
 
-> 如果你把雪乃酱装在 `%ProgramData%\YukinoChan\agent\` 下再点部署，程序会识别出"源就是目标"直接跳过复制。
+> 如果你把 Yomori 装在 `%ProgramData%\Yomori\agent\` 下再点部署，程序会识别出"源就是目标"直接跳过复制。
 
 「移除代理」会同时删掉快捷方式和那份程序副本。
 
@@ -536,12 +534,12 @@ Windows 会话之间不能直接通信，主控端也无法跨会话启动进程
 鼠标键盘点上去就能操作远端；全屏时 `Win` / `Alt+Tab` 等系统组合键会转投远端，`F11` 退出全屏。
 **画面上的双击不做任何本地切换**——它原样转投远端（双击图标、选中文字都照常）。
 
-> 早期确实走过 COM ActiveX + `SetParent` 的路（那个 WinForms 类库 `YukinoChan.RdpHost`），
+> 早期确实走过 COM ActiveX + `SetParent` 的路（那个 WinForms 类库 `Yomori.RdpHost`），
 > 在 WinUI 3 上要跟 XAML 抢 Z 序、还要处理 STA / 坐标换算 / 分辨率动态重协商，稳定性代价太大，已彻底删除。
 > 现在用原生 FreeRDP 自绘画面，不涉及子窗口 Z 序问题。
 
 **独立窗口（`mstsc`）**：通道管理页把「连接方式」改成「独立窗口」即可，
-连接时打开系统自带的远程桌面客户端 —— 最稳、永远可用，但画面不在雪乃酱里。
+连接时打开系统自带的远程桌面客户端 —— 最稳、永远可用，但画面不在 Yomori 里。
 
 | 项 | 内嵌 | 独立窗口（mstsc） |
 |---|---|---|
@@ -577,7 +575,7 @@ Windows 会话之间不能直接通信，主控端也无法跨会话启动进程
 | 自动（默认） | 跟随画面格子大小自动适配 | 不生成 `.rdp`，`mstsc /v:<主机>` 用系统默认尺寸 |
 | 1280×720 / 1366×768 / 1600×900 / 1920×1080 / 2560×1440 | 按该尺寸向服务端申请桌面 | 按该尺寸生成临时 `.rdp` 连接 |
 
-独立窗口模式下，选了具体档位会先在 `%LocalAppData%\YukinoChan\session-<通道id>.rdp` 生成一份配置，再 `mstsc <该文件>`：
+独立窗口模式下，选了具体档位会先在 `%LocalAppData%\Yomori\session-<通道id>.rdp` 生成一份配置，再 `mstsc <该文件>`：
 
 ```ini
 full address:s:192.168.1.20
@@ -630,7 +628,7 @@ prompt for credentials:i:0  # 凭据走凭据管理器，不弹输入框
 - **右：任务详情** —— 顶部一行「所属：<通道名>」，旁边的「移到通道…」可把任务改派到别的通道
   （或移回本地执行），它会被放到目标通道末尾。
 
-没分配通道的任务归「**本地执行**」，跑在雪乃酱自己所在的会话里 —— 这也是新建任务的默认值，
+没分配通道的任务归「**本地执行**」，跑在 Yomori 自己所在的会话里 —— 这也是新建任务的默认值，
 免得忘了选通道就悄悄跑远程。通道之间并行，通道内部按这里的顺序一条条跑。
 
 **跑一轮**
@@ -644,7 +642,7 @@ prompt for credentials:i:0  # 凭据走凭据管理器，不弹输入框
 5. 过程中：每跑完一个任务弹一条「任务已完成（i/n）」、每条通道整条跑完弹一条「通道「x」任务结束」
    （都由主控端发，`rdp.notify_on_task_done` / `rdp.notify_on_channel_done` 可关）；
 6. 全部结束后：日志出现 `[汇总] 共 N 块（本地 X / 通道 Y）：成功 …、异常 …。`，
-   并弹**一条**汇总通知；看板娘在**整轮结束**时才从「工作」变「休息」。
+   并弹**一条**汇总通知。
 
 > 想盯内嵌画面的渲染细节（D3D 有没有起来、走的是哪条渲染路径、帧到达节奏）就去
 > 「设置 → 开发者」打开**开发者模式** —— 关着时这些带 `[embed]` 标签的诊断行不上「运行日志」页
@@ -654,7 +652,7 @@ prompt for credentials:i:0  # 凭据走凭据管理器，不弹输入框
 
 1. 通道编辑卡的目标主机填对方的 IP 或主机名；
 2. 指令桥目录填双方都能读写的共享路径（本机多账户留空即可）；
-3. 在**对方机器**上装雪乃酱，用同样的桥目录部署会话代理（这一步只能在对方机器上做）；
+3. 在**对方机器**上装 Yomori，用同样的桥目录部署会话代理（这一步只能在对方机器上做）；
 4. 点「重新预检」确认没有阻塞项，然后正常选通道、跑任务。
 
 ### 需要注意的限制
@@ -684,9 +682,9 @@ prompt for credentials:i:0  # 凭据走凭据管理器，不弹输入框
 |---|---|
 | 提示"等待目标会话超时" | 凭据是否正确；账户是否有密码；远程桌面是否真的开启；手动开一次 `mstsc` 看能否登录 |
 | 一直停在"等待代理接管" | 检查代理是否已部署、是否显示「在线」；打开**该通道的**桥目录看 `status.json` 有没有被更新 |
-| 无法写入桥目录 | 本机默认 `<ProgramData>\YukinoChan\rdp\<账户名>` 需要写权限，用管理员运行一次即可；远程目录要确认对方也开了写权限 |
+| 无法写入桥目录 | 本机默认 `<ProgramData>\Yomori\rdp\<账户名>` 需要写权限，用管理员运行一次即可；远程目录要确认对方也开了写权限 |
 | 能连上远程主机但任务不动 | 90% 是桥目录没配或对方读不到：确认两边指向同一个共享路径，且对方代理的启动参数里带了 `--bridge:` |
-| **连上了但任务完全不执行** | 先看 `%ProgramData%\YukinoChan\rdp\<账户名>\status.json`：如果 `AgentUser` 是空的、时间停在"下发那一刻"，说明目标会话里的代理没起来 —— **重新点一次「部署会话代理」**（会把程序复制到公共目录），再注销目标账户重新连 |
+| **连上了但任务完全不执行** | 先看 `%ProgramData%\Yomori\rdp\<账户名>\status.json`：如果 `AgentUser` 是空的、时间停在"下发那一刻"，说明目标会话里的代理没起来 —— **重新点一次「部署会话代理」**（会把程序复制到公共目录），再注销目标账户重新连 |
 | 升级后"代理明明在跑却显示不在线" | 桥目录规则变了（`rdp\` → `rdp\<账户名>\`）。**重新部署一次代理**，并注销目标账户再重连 |
 | 提示需要配置「指令桥目录」 | 目标是远程主机时的正常拦截；只想切本机账户的话，把远程主机改回 `127.0.0.1`（本机多账户留空即可） |
 | 填了 IPv6 地址识别不对 | 裸 IPv6（如 `::1`）会被整体当作地址；带端口要写 `[::1]:3390` |
@@ -694,7 +692,7 @@ prompt for credentials:i:0  # 凭据走凭据管理器，不弹输入框
 | 日志说"登录失败：账户名或密码不对" | 密码没交到 mstsc 手上。重新填一次密码点「保存凭据」（写进 Windows 凭据管理器，重启程序也不用重填） |
 | 保存凭据后提示"读不回来" | 凭据管理器被组策略限制了。可以手动在「远程桌面」窗口里输入一次密码，或联系管理员放开凭据管理器 |
 | 分辨率不是我想要的 | 改档位后**重新连接一次**（已连接的会话不能动态改尺寸）；选「自动」则跟随画面格子大小 / 系统默认值 |
-| 窗口拉小后出现滚动条 | `.rdp` 里已写 `smart sizing:i:1`。若出现说明文件没生效，删掉 `%LocalAppData%\YukinoChan\session-<通道id>.rdp` 后重连一次 |
+| 窗口拉小后出现滚动条 | `.rdp` 里已写 `smart sizing:i:1`。若出现说明文件没生效，删掉 `%LocalAppData%\Yomori\session-<通道id>.rdp` 后重连一次 |
 | 提示"环境未就绪" | 按「重新预检」看具体缺哪一项（远程桌面未开 / 服务未启动 / 代理未部署） |
 | **某路画面黑屏 / 几路互相闪烁** | 一个客户端同时只能挂一块画面。先关掉那路的「弹出窗口」再重开；多画面翻页时会重排格位，属正常 |
 | **只跑了部分通道** | 看日志里的「本轮启动 N 条」与被跳过通道的原因：常见是超 8 条上限、通道被停用、没配账户、或 `channel_id` 指向了已删除的通道 |
@@ -710,8 +708,8 @@ prompt for credentials:i:0  # 凭据走凭据管理器，不弹输入框
 新版桥目录规则变了：
 
 ```text
-旧：<ProgramData>\YukinoChan\rdp\
-新：<ProgramData>\YukinoChan\rdp\<账户名>\
+旧：<ProgramData>\Yomori\rdp\
+新：<ProgramData>\Yomori\rdp\<账户名>\
 ```
 
 **已部署过会话代理的机器，升级后必须重新点一次「部署会话代理」**，
@@ -723,7 +721,7 @@ prompt for credentials:i:0  # 凭据走凭据管理器，不弹输入框
 - 旧配置里没有 `channels` 时会自动迁移出一个默认通道（继承原来的目标账户 / 桥目录 / 分辨率 / 收尾方式），
   **任务会自动指向它**，不需要手工重配；
 - 一个通道内的任务仍然串行，只有**通道之间**才是并行 —— 如果原来靠 `concurrent_group` 做并发，行为不变；
-- 内嵌画面改用原生 FreeRDP 实现，`src/YukinoChan.RdpHost/`（旧 COM ActiveX 方案）已删除；
+- 内嵌画面改用原生 FreeRDP 实现，`src/Yomori.RdpHost/`（旧 COM ActiveX 方案）已删除；
   旧配置里的 `rdp.embed_remote_desktop` 键仅为兼容而保留，读进来恒为 `false`；
 - 左侧菜单的通道项从「平级分组（执行中的通道）」改成**「会话通道」父项下的子菜单**（没有配置项要迁移）：
   父项 = 多画面，子项 = 各通道单独画面 + 「通道管理…」；
@@ -738,7 +736,6 @@ prompt for credentials:i:0  # 凭据走凭据管理器，不弹输入框
 | 配置文件 | `config.json` | 位于程序根目录（向上回溯到有 `config.json` / `assets/` 的那一层） |
 | 日志目录 | `logs/` | 同上，按日期分文件 |
 | 统计目录 | `runtime_stats/` | 脚本耗时历史，按账户分家 |
-| 看板娘素材 | `assets/mascot/` | 缺失时看板娘区域留空，程序仍能跑 |
 | 更新渠道 | `config.json` 的 `update_channel` | `stable` = 正式版（默认）；`beta` = 测试版。见「设置 → 关于」 |
 | 开发者模式 | `config.json` 的 `developer_mode` | `false`（默认）= 「运行日志」页隐藏带 `[embed]` 标签的内嵌画面诊断行；`true` = 显示。见「设置 → 开发者」 |
 

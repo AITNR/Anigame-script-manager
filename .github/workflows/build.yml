@@ -2,14 +2,14 @@
 # 可复用构建流程（被 ci.yml / release.yml 调用，自身不直接触发）
 #
 # 为什么要分「原生层」和「打包」两个 job：
-#   1) 应用依赖 YukinoChan.RdpNative 编出来的 ycn_rdp.dll（FreeRDP 桥接层），
+#   1) 应用依赖 Yomori.RdpNative 编出来的 ycn_rdp.dll（FreeRDP 桥接层），
 #      而那是**构建产物、没有入库**（.gitignore 掉了），GitHub 上必须自己编；
 #   2) 它走 vcpkg 源码编译 FreeRDP，首次约 20-40 分钟 —— 所以做了两级缓存：
 #        · 原生源码（CMakeLists / ycn_rdp.c / ycn_rdp.h）没变 → 直接复用 DLL，跳过 vcpkg；
 #        · 源码变了 → vcpkg 依赖仍在缓存里，只需要重新编译链接（分钟级）。
 #
 # 打包为什么不直接用 `dotnet publish` 的输出：
-#   WinUI 3 的 YukinoChan.pri 与各页面的 *.xbf（Views/、Themes/、embed/）只在 **build**
+#   WinUI 3 的 Yomori.pri 与各页面的 *.xbf（Views/、Themes/、embed/）只在 **build**
 #   输出里；FreeRDP 那批运行库（freerdp3 / winpr3 / openssl / zlib / cjson）也是。
 #   publish 目录里没有它们（实测），缺了程序起不来 / 页面打不开 ——
 #   所以由 winui3/tools/package_release.py 把两边合并并做关键文件自检。
@@ -56,7 +56,7 @@ permissions:
 
 env:
   # 本机开发环境用的 vcpkg 就钉在这个提交上，它的 freerdp port 正是 3.32.0
-  # （YukinoChan.RdpNative 是对着这个版本开发与真机验证的）。
+  # （Yomori.RdpNative 是对着这个版本开发与真机验证的）。
   # 换提交 = 换 FreeRDP 版本，必须重新真机验收内嵌画面。
   VCPKG_COMMIT: 10541e317a660f4165ba4ac2851ab54a8d4577b1
   NUGET_PACKAGES: ${{ github.workspace }}\.nuget
@@ -77,7 +77,7 @@ jobs:
           # ⚠️ 目录名不能以 . 开头：upload-artifact 默认**跳过隐藏文件**，
           #    早先用 .native-out 时上传报「No files were found」，CI 就在这卡了一轮。
           path: native-out
-          key: ycn-native-${{ runner.os }}-${{ hashFiles('winui3/src/YukinoChan.RdpNative/CMakeLists.txt', 'winui3/src/YukinoChan.RdpNative/ycn_rdp.c', 'winui3/src/YukinoChan.RdpNative/ycn_rdp.h') }}
+          key: ycn-native-${{ runner.os }}-${{ hashFiles('winui3/src/Yomori.RdpNative/CMakeLists.txt', 'winui3/src/Yomori.RdpNative/ycn_rdp.c', 'winui3/src/Yomori.RdpNative/ycn_rdp.h') }}
 
       - name: 取 vcpkg（钉住提交，不用 vcpkg 默认分支）
         if: steps.native-cache.outputs.cache-hit != 'true'
@@ -182,7 +182,7 @@ jobs:
           Write-Host "使用生成器：$gen"
           # 正斜杠交给 cmake（CMakeLists 侧还有 file(TO_CMAKE_PATH) 兜一层）
           $inst = (Resolve-Path '.vcpkg/installed/x64-windows').Path.Replace('\', '/')
-          cmake -S winui3/src/YukinoChan.RdpNative -B .native-build -G $gen -A x64 "-DVCPKG_INST=$inst"
+          cmake -S winui3/src/Yomori.RdpNative -B .native-build -G $gen -A x64 "-DVCPKG_INST=$inst"
           cmake --build .native-build --config Release --parallel
 
       - name: 收集 DLL
@@ -218,7 +218,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: native-out
-          key: ycn-native-${{ runner.os }}-${{ hashFiles('winui3/src/YukinoChan.RdpNative/CMakeLists.txt', 'winui3/src/YukinoChan.RdpNative/ycn_rdp.c', 'winui3/src/YukinoChan.RdpNative/ycn_rdp.h') }}
+          key: ycn-native-${{ runner.os }}-${{ hashFiles('winui3/src/Yomori.RdpNative/CMakeLists.txt', 'winui3/src/Yomori.RdpNative/ycn_rdp.c', 'winui3/src/Yomori.RdpNative/ycn_rdp.h') }}
 
       - name: 上传原生层产物
         uses: actions/upload-artifact@v4
@@ -263,28 +263,28 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.NUGET_PACKAGES }}
-          key: nuget-${{ runner.os }}-${{ hashFiles('winui3/src/YukinoChan.App/YukinoChan.App.csproj') }}
+          key: nuget-${{ runner.os }}-${{ hashFiles('winui3/src/Yomori.App/Yomori.App.csproj') }}
           restore-keys: nuget-${{ runner.os }}-
 
-      # 放回 csproj 期望的位置：它按 ..\YukinoChan.RdpNative\build\Release\ 拷 ycn_rdp.dll，
+      # 放回 csproj 期望的位置：它按 ..\Yomori.RdpNative\build\Release\ 拷 ycn_rdp.dll，
       # 而 CopyRdpRuntimeDlls 目标也从这里取 FreeRDP 运行库
       - name: 取原生层产物
         uses: actions/download-artifact@v4
         with:
           name: native-dlls
-          path: winui3/src/YukinoChan.RdpNative/build/Release
+          path: winui3/src/Yomori.RdpNative/build/Release
 
       - name: 编译（Release / x64）
         shell: pwsh
         run: |
           $outDir = (Join-Path $env:GITHUB_WORKSPACE 'ci-build').Replace('\', '/') + '/'
-          dotnet build winui3/src/YukinoChan.App/YukinoChan.App.csproj `
+          dotnet build winui3/src/Yomori.App/Yomori.App.csproj `
             -c Release -p:Platform=x64 -p:Version=${{ steps.ver.outputs.version }} -p:OutDir=$outDir
 
           # 外置 UI 看门狗：独立进程，抓主控端假死现场。
           # 为什么单独一个工程：主控端 manifest 是 requireAdministrator（编译期静态、
           # 没法按参数豁免），共用同一个 exe 会让看门狗每次启动都弹 UAC。
-          dotnet build winui3/src/YukinoChan.Watchdog/YukinoChan.Watchdog.csproj `
+          dotnet build winui3/src/Yomori.Watchdog/Yomori.Watchdog.csproj `
             -c Release -p:Platform=x64 -p:Version=${{ steps.ver.outputs.version }} -p:OutDir=$outDir
 
       - name: 发布（自包含，带 .NET 运行时）
@@ -292,7 +292,7 @@ jobs:
         shell: pwsh
         run: |
           $pub = Join-Path $env:GITHUB_WORKSPACE 'ci-publish'
-          dotnet publish winui3/src/YukinoChan.App/YukinoChan.App.csproj `
+          dotnet publish winui3/src/Yomori.App/Yomori.App.csproj `
             -c Release -p:Platform=x64 -p:Version=${{ steps.ver.outputs.version }} `
             -r win-x64 --self-contained true -o $pub
 
@@ -304,7 +304,7 @@ jobs:
           PYTHONIOENCODING: utf-8
           PYTHONUTF8: '1'
         run: |
-          $name = "YukinoChan-winui3-${{ steps.ver.outputs.version }}-x64"
+          $name = "Yomori-winui3-${{ steps.ver.outputs.version }}-x64"
           $argv = @(
             'winui3/tools/package_release.py',
             '--build-dir', 'ci-build',
@@ -375,7 +375,7 @@ jobs:
         if: inputs.self_contained
         shell: pwsh
         run: |
-          $cfg = 'dist/app/YukinoChan.runtimeconfig.json'
+          $cfg = 'dist/app/Yomori.runtimeconfig.json'
           if (-not (Test-Path $cfg)) { throw "缺少 $cfg —— 打包自检怎么放过的？" }
           $j = Get-Content $cfg -Raw | ConvertFrom-Json
           if (-not $j.runtimeOptions.includedFrameworks) {
@@ -421,7 +421,7 @@ jobs:
           & $iscc @isccArgs
           if ($LASTEXITCODE -ne 0) { throw "ISCC 编译失败（exit $LASTEXITCODE）" }
 
-          "setup_name=YukinoChan-${{ steps.ver.outputs.version }}-setup.exe" >> $env:GITHUB_OUTPUT
+          "setup_name=Yomori-${{ steps.ver.outputs.version }}-setup.exe" >> $env:GITHUB_OUTPUT
 
       # 兜底断言：前面的模板补丁要是没生效（换版本、路径不对、ISCC 用了别处的模板），
       # 这里就当场判红 —— 免得发出去一个「双击不要求管理员」的安装包。
@@ -431,7 +431,7 @@ jobs:
           PYTHONIOENCODING: utf-8
           PYTHONUTF8: '1'
         run: |
-          $setup = Join-Path $env:GITHUB_WORKSPACE 'dist/YukinoChan-${{ steps.ver.outputs.version }}-setup.exe'
+          $setup = Join-Path $env:GITHUB_WORKSPACE 'dist/Yomori-${{ steps.ver.outputs.version }}-setup.exe'
           if (-not (Test-Path $setup)) { throw "找不到安装包：$setup" }
 
           # 被 mt.exe / UpdateResource 毁掉的残骸只有 ~950KB（引导器本身），

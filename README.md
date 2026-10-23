@@ -1,6 +1,6 @@
-# 雪乃酱 · 二游脚本统合管理器
+# Yomori · 二游脚本统合管理器
 
-Windows 桌面应用，使用 C# 与 WinUI 3（Windows App SDK）开发。当前版本 **v2.1.1**。
+Windows 桌面应用，使用 C# 与 WinUI 3（Windows App SDK）开发。当前版本 **v2.2.0**。
 
 用途：统一管理多个 Windows 账户下的每日自动化任务 —— 配置执行环境、按通道编排任务、监控执行状态，
 并在任务结束后按配置完成收尾（保持会话 / 断开 / 注销 / 关机）。
@@ -71,7 +71,7 @@ Windows 会话中，每个会话拥有各自的桌面、鼠标与输入焦点。
 4. 点击「**部署会话代理**」（一次性操作，需管理员权限），然后点击「重新预检」，直至无阻塞项。
 
 > **会话代理的部署原因**：Windows 上跨会话启动进程只能由目标会话一侧发起。程序会将自身复制到
-> `C:\ProgramData\YukinoChan\agent\`（所有账户可读），并在公共启动目录创建快捷方式，目标账户下次登录时代理被拉起并常驻，
+> `C:\ProgramData\Yomori\agent\`（所有账户可读），并在公共启动目录创建快捷方式，目标账户下次登录时代理被拉起并常驻，
 > 等待指令。**部署完成后需注销目标账户并重新连接一次** —— 已处于登录状态的会话不会自动出现代理。
 
 预检区域显示以下检查结果：账户是否存在、远程桌面是否开启、代理是否在线。目标账户至少成功登录过一次，代理才能被拉起。
@@ -157,14 +157,14 @@ dotnet build -c Release -p:Platform=x64
 产物为 `unpackaged` 模式，双击即可运行，无需 MSIX 安装或侧载：
 
 ```text
-winui3/src/YukinoChan.App/bin/x64/Release/YukinoChan.exe
+winui3/src/Yomori.App/bin/x64/Release/Yomori.exe
 ```
 
 两点注意事项：
 
 - **内嵌画面依赖原生层 `ycn_rdp.dll`**（FreeRDP 桥接层）。该文件为构建产物，未纳入版本库，全新克隆后需自行编译一次，
   步骤见 [winui3/README.md](winui3/README.md) 第三节。
-- **程序运行期间不要直接执行 `dotnet build`**：exe 被占用会导致资源包 `YukinoChan.pri` 未更新，启动后切换页面可能崩溃。
+- **程序运行期间不要直接执行 `dotnet build`**：exe 被占用会导致资源包 `Yomori.pri` 未更新，启动后切换页面可能崩溃。
   须先完全退出程序再构建。
 
 ---
@@ -198,14 +198,14 @@ winui3/src/YukinoChan.App/bin/x64/Release/YukinoChan.exe
 ## 10. 仓库结构
 
 ```text
-winui3/       C# / WinUI 3 主工程（YukinoChan.sln、src/、docs/、tools/）
-assets/       看板娘素材与图标 —— 同时作为程序定位根目录的标记，请勿删除
+winui3/       C# / WinUI 3 主工程（Yomori.sln、src/、docs/、tools/）
+assets/       应用图标（icon.ico）与 logo 源图 —— 同时作为程序定位根目录的标记，请勿删除
 config.json   运行时配置（任务、会话通道、窗口几何）
 docs/         文档截图
 ```
 
 数据目录（`config.json` / `logs/` / `runtime_stats/`）均位于程序根目录下。程序通过「同级目录存在 `config.json` 或 `assets/`」
-向上回溯定位根目录，因此 `assets/mascot/` 需随程序一同分发。
+向上回溯定位根目录，因此 `assets/` 需随程序一同分发。
 
 ---
 

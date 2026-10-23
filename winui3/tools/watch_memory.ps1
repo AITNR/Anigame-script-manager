@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-  外部采样 YukinoChan 进程的内存 / 线程 / 句柄曲线，用来判定「是不是泄漏」。
+  外部采样 Yomori 进程的内存 / 线程 / 句柄曲线，用来判定「是不是泄漏」。
 
 .DESCRIPTION
   程序自己每分钟打一行 [memory] 采样，但它只有瞬时值，看不出趋势；而且它跑在提权
@@ -26,7 +26,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$ProcessName = 'YukinoChan',
+    [string]$ProcessName = 'Yomori',
     [int]$IntervalSeconds = 15,
     [int]$DurationMinutes = 30,
     [string]$OutFile = ''

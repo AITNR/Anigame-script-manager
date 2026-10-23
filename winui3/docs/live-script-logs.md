@@ -32,8 +32,8 @@
 ## 验证
 
 ```powershell
-dotnet run --project winui3/tests/YukinoChan.LogChecks/YukinoChan.LogChecks.csproj -c Release
-dotnet build winui3/src/YukinoChan.App/YukinoChan.App.csproj -c Release -p:Platform=x64 -p:RuntimeIdentifier=win-x64
+dotnet run --project winui3/tests/Yomori.LogChecks/Yomori.LogChecks.csproj -c Release
+dotnet build winui3/src/Yomori.App/Yomori.App.csproj -c Release -p:Platform=x64 -p:RuntimeIdentifier=win-x64
 ```
 
 回归工程直接链接生产的采集器、桥协议与通道状态代码，覆盖完整/半行、中文、跨块编码、轮转、截断、增量去重、批次隔离、容量和普通完成事件。编译及合成脚本通过后，真实目标账户的权限、部署副本和三种脚本当前版本仍须通过现场运行验证；读取现有日志样本不等同于跨账户执行成功。

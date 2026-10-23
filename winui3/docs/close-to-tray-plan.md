@@ -1,8 +1,8 @@
-# 雪乃酱 · 关闭按钮行为与状态栏托盘 计划书
+# Yomori · 关闭按钮行为与状态栏托盘 计划书
 
 - **版本**：v1 已实施（2026-10-20）
 - **状态**：M1–M4 代码已完成并通过 Debug/Release 编译；**真机 GUI 验收（M5）待做**，清单见 §10。
-- **适用范围**：`repo/winui3/src/YukinoChan.App`（主控端界面；代理无窗口，不涉及）
+- **适用范围**：`repo/winui3/src/Yomori.App`（主控端界面；代理无窗口，不涉及）
 - **取代**：`task-resume-plan.md`（断点续跑，已作废并删除，本方案不再包含任何续跑内容）
 
 ### 已拍板（2026-10-20 与 AITNR 确认）
@@ -63,7 +63,7 @@
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│  关闭雪乃酱？                                             │
+│  关闭 Yomori？                                             │
 │                                                           │
 │  当前正在执行 2 个任务，退出会中止它们。                    │
 │  （没有任务在跑时，这行换成：当前没有任务在执行。）          │
@@ -188,7 +188,7 @@ WinUI 3 **没有** WinForms 的 `NotifyIcon`，也没有自带托盘 API，只�
 |---|---|
 | 左键单击 / 双击 | 恢复主窗口（`Show` + `SetForegroundWindow` + 必要时 `SW_RESTORE`） |
 | 右键 | 菜单：显示主界面 / 开始执行（执行中显示为"停止执行"）/ 关闭行为设置… / 退出 |
-| 悬停 | Tooltip：「雪乃酱 — 正在执行 2 个任务」或「雪乃酱 — 空闲」 |
+| 悬停 | Tooltip：「Yomori — 正在执行 2 个任务」或「Yomori — 空闲」 |
 
 - 菜单项"开始执行"调用 `VM.Start()`；"停止执行"调用 `VM.Stop()`。两者在隐藏状态下都得能跑（它们本来就不依赖窗口可见性）。
 - "退出"走 `RequestExit()`，**不走关闭弹窗**（用户已经在托盘菜单里明确点了退出）。
@@ -242,7 +242,7 @@ RequestExit()
 ```
 
 - 所有"要退出"的地方都走它：弹窗的【退出】、托盘菜单的【退出】、`auto` 模式到点、`AutoExitAfterDone`。
-- `AutoExitAfterDone` 现在直接 `App.MainWindow?.Close()`（:5451）→ 改成 `App.MainWindow?.RequestExit()`。不改的话，开了"任务完成后自动退出"的用户每次都会看到"关闭雪乃酱？"弹窗，属于明显的回归。
+- `AutoExitAfterDone` 现在直接 `App.MainWindow?.Close()`（:5451）→ 改成 `App.MainWindow?.RequestExit()`。不改的话，开了"任务完成后自动退出"的用户每次都会看到"关闭 Yomori？"弹窗，属于明显的回归。
 - 退出时若本地任务在跑：不弹二次确认（弹窗里已经警告过），按现有 `CleanupForStop` 语义随进程结束清理；远程通道**不**发 `stop.json`（既有行为：主控端退出不影响代理）。
 
 ### 6.4 单实例（本方案的强制依赖）
@@ -251,8 +251,8 @@ RequestExit()
 
 做法：
 
-1. `Main` 里 `new Mutex(true, @"Local\YukinoChan.MainWindow", out createdNew)`；`Local\` 不用 `Global\`（跨会话没必要，还多一个特权要求）。
-2. `!createdNew` → 发 `RegisterWindowMessageW("YukinoChan.Activate")` 给已有窗口，然后 `Environment.Exit(0)`。
+1. `Main` 里 `new Mutex(true, @"Local\Yomori.MainWindow", out createdNew)`；`Local\` 不用 `Global\`（跨会话没必要，还多一个特权要求）。
+2. `!createdNew` → 发 `RegisterWindowMessageW("Yomori.Activate")` 给已有窗口，然后 `Environment.Exit(0)`。
 3. 找已有窗口：`EnumWindows` + `GetWindowThreadProcessId` 匹配同名 exe 的进程（`NativeMethods` 里两个 API 都有现成的），或者按 WinUI 的窗口类名找。
 4. 已有实例收到该消息 → `DispatcherQueue.TryEnqueue` 回 UI 线程 → 恢复窗口 + 激活。
 

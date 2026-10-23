@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Reflection;
-using YukinoChan.Models;
-using YukinoChan.Services;
+using Yomori.Models;
+using Yomori.Services;
 
 var tests = new (string Name, Func<Task> Run)[]
 {
@@ -158,7 +158,7 @@ sealed class RunnerFixture : IDisposable
 {
     public RunnerFixture()
     {
-        Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "YukinoChan.RunnerMemoryChecks", Guid.NewGuid().ToString("N"));
+        Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "Yomori.RunnerMemoryChecks", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(Path);
         LogDir = System.IO.Path.Combine(Path, "logs");
         StatsDir = System.IO.Path.Combine(Path, "stats");

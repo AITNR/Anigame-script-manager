@@ -1,4 +1,4 @@
-namespace YukinoChan.Models
+namespace Yomori.Models
 {
     public static class AppConfig
     {
@@ -6,7 +6,7 @@ namespace YukinoChan.Models
     }
 }
 
-namespace YukinoChan.Services
+namespace Yomori.Services
 {
     public static class ScreenshotService
     {

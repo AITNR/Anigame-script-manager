@@ -12,30 +12,30 @@
     <Compile Include="Program.cs" />
     <Compile Include="TestStubs.cs" />
 
-    <Compile Include="..\..\src\YukinoChan.App\Helpers\ObservableObject.cs" Link="Production\Helpers\ObservableObject.cs" />
-    <Compile Include="..\..\src\YukinoChan.App\Helpers\KeywordHelper.cs" Link="Production\Helpers\KeywordHelper.cs" />
-    <Compile Include="..\..\src\YukinoChan.App\Helpers\FormatHelper.cs" Link="Production\Helpers\FormatHelper.cs" />
+    <Compile Include="..\..\src\Yomori.App\Helpers\ObservableObject.cs" Link="Production\Helpers\ObservableObject.cs" />
+    <Compile Include="..\..\src\Yomori.App\Helpers\KeywordHelper.cs" Link="Production\Helpers\KeywordHelper.cs" />
+    <Compile Include="..\..\src\Yomori.App\Helpers\FormatHelper.cs" Link="Production\Helpers\FormatHelper.cs" />
 
-    <Compile Include="..\..\src\YukinoChan.App\Models\Enums.cs" Link="Production\Models\Enums.cs" />
-    <Compile Include="..\..\src\YukinoChan.App\Models\TaskConfig.cs" Link="Production\Models\TaskConfig.cs" />
-    <Compile Include="..\..\src\YukinoChan.App\Models\ExternalLogModels.cs" Link="Production\Models\ExternalLogModels.cs" />
-    <Compile Include="..\..\src\YukinoChan.App\Models\MonitorSpec.cs" Link="Production\Models\MonitorSpec.cs" />
-    <Compile Include="..\..\src\YukinoChan.App\Models\RdpModels.cs" Link="Production\Models\RdpModels.cs" />
-    <Compile Include="..\..\src\YukinoChan.App\Models\RdpChannel.cs" Link="Production\Models\RdpChannel.cs" />
-    <Compile Include="..\..\src\YukinoChan.App\Models\RdpChannelPaths.cs" Link="Production\Models\RdpChannelPaths.cs" />
-    <Compile Include="..\..\src\YukinoChan.App\Models\WindowConfig.cs" Link="Production\Models\WindowConfig.cs" />
-    <Compile Include="..\..\src\YukinoChan.App\Models\ExportOptions.cs" Link="Production\Models\ExportOptions.cs" />
+    <Compile Include="..\..\src\Yomori.App\Models\Enums.cs" Link="Production\Models\Enums.cs" />
+    <Compile Include="..\..\src\Yomori.App\Models\TaskConfig.cs" Link="Production\Models\TaskConfig.cs" />
+    <Compile Include="..\..\src\Yomori.App\Models\ExternalLogModels.cs" Link="Production\Models\ExternalLogModels.cs" />
+    <Compile Include="..\..\src\Yomori.App\Models\MonitorSpec.cs" Link="Production\Models\MonitorSpec.cs" />
+    <Compile Include="..\..\src\Yomori.App\Models\RdpModels.cs" Link="Production\Models\RdpModels.cs" />
+    <Compile Include="..\..\src\Yomori.App\Models\RdpChannel.cs" Link="Production\Models\RdpChannel.cs" />
+    <Compile Include="..\..\src\Yomori.App\Models\RdpChannelPaths.cs" Link="Production\Models\RdpChannelPaths.cs" />
+    <Compile Include="..\..\src\Yomori.App\Models\WindowConfig.cs" Link="Production\Models\WindowConfig.cs" />
+    <Compile Include="..\..\src\Yomori.App\Models\ExportOptions.cs" Link="Production\Models\ExportOptions.cs" />
 
-    <Compile Include="..\..\src\YukinoChan.App\Services\AppPaths.cs" Link="Production\Services\AppPaths.cs" />
-    <Compile Include="..\..\src\YukinoChan.App\Services\CommandLine.cs" Link="Production\Services\CommandLine.cs" />
-    <Compile Include="..\..\src\YukinoChan.App\Services\ExternalLogFilter.cs" Link="Production\Services\ExternalLogFilter.cs" />
-    <Compile Include="..\..\src\YukinoChan.App\Services\ExternalLogTail.cs" Link="Production\Services\ExternalLogTail.cs" />
-    <Compile Include="..\..\src\YukinoChan.App\Services\FileLogger.cs" Link="Production\Services\FileLogger.cs" />
-    <Compile Include="..\..\src\YukinoChan.App\Services\MonitoredProcess.cs" Link="Production\Services\MonitoredProcess.cs" />
-    <Compile Include="..\..\src\YukinoChan.App\Services\ProcessHelper.cs" Link="Production\Services\ProcessHelper.cs" />
-    <Compile Include="..\..\src\YukinoChan.App\Services\NativeMethods.cs" Link="Production\Services\NativeMethods.cs" />
-    <Compile Include="..\..\src\YukinoChan.App\Services\RuntimeStatsManager.cs" Link="Production\Services\RuntimeStatsManager.cs" />
-    <Compile Include="..\..\src\YukinoChan.App\Services\ScriptRunner.cs" Link="Production\Services\ScriptRunner.cs" />
+    <Compile Include="..\..\src\Yomori.App\Services\AppPaths.cs" Link="Production\Services\AppPaths.cs" />
+    <Compile Include="..\..\src\Yomori.App\Services\CommandLine.cs" Link="Production\Services\CommandLine.cs" />
+    <Compile Include="..\..\src\Yomori.App\Services\ExternalLogFilter.cs" Link="Production\Services\ExternalLogFilter.cs" />
+    <Compile Include="..\..\src\Yomori.App\Services\ExternalLogTail.cs" Link="Production\Services\ExternalLogTail.cs" />
+    <Compile Include="..\..\src\Yomori.App\Services\FileLogger.cs" Link="Production\Services\FileLogger.cs" />
+    <Compile Include="..\..\src\Yomori.App\Services\MonitoredProcess.cs" Link="Production\Services\MonitoredProcess.cs" />
+    <Compile Include="..\..\src\Yomori.App\Services\ProcessHelper.cs" Link="Production\Services\ProcessHelper.cs" />
+    <Compile Include="..\..\src\Yomori.App\Services\NativeMethods.cs" Link="Production\Services\NativeMethods.cs" />
+    <Compile Include="..\..\src\Yomori.App\Services\RuntimeStatsManager.cs" Link="Production\Services\RuntimeStatsManager.cs" />
+    <Compile Include="..\..\src\Yomori.App\Services\ScriptRunner.cs" Link="Production\Services\ScriptRunner.cs" />
   </ItemGroup>
 
   <ItemGroup>

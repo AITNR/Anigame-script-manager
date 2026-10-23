@@ -17,7 +17,7 @@
     python patch_setup_manifest.py "<inno 目录>/SetupLdr.e32" "<inno 目录>/SetupLdr.e64"
 
     # 只校验编好的安装包确实要求管理员（不改文件；CI 用来兜底）
-    python patch_setup_manifest.py dist/YukinoChan-2.1.0-setup.exe --expect-admin
+    python patch_setup_manifest.py dist/Yomori-2.1.0-setup.exe --expect-admin
 
 退出码：0 = 成功/符合预期；1 = 有文件失败或不符合预期。
 """

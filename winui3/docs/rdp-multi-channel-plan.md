@@ -1,8 +1,8 @@
-# 雪乃酱 · 多会话通道并行执行 计划书
+# Yomori · 多会话通道并行执行 计划书
 
 - **版本**：草案 v1（2026-09-26）
 - **状态**：⚠️ 仅为规划文档，未动工。所有代码改动以本计划书评审通过为前提。
-- **适用范围**：`repo/winui3/` 下的 WinUI 3 工程（`YukinoChan.App`），含原生工程 `YukinoChan.RdpNative`
+- **适用范围**：`repo/winui3/` 下的 WinUI 3 工程（`Yomori.App`），含原生工程 `Yomori.RdpNative`
 - **前置**：内嵌 RDP（FreeRDP）已完成并真机可用，见 `rdp-embed-freerdp-plan.md`
 
 ### 已拍板的四项决策（2026-09-26 与 AITNR 确认）
@@ -46,7 +46,7 @@
 | 位置                                        | 现状                                                                                    | 本轮改造                                        |
 | ----------------------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------- |
 | `Services/RdpBridge.cs`                   | **静态类**：`BridgeDir` / `CommandPath` / `StatusPath` / `LastError` 全是 static，全局只有一座桥 | **实例类**：每通道一个 `RdpBridge`（§5）               |
-| `Services/RdpCredentialStore.cs`          | 凭据键 = `YukinoChan/RDP/<host>`，同一主机多账户**必然互相覆盖**                                      | 键改为 `host + "\|" + user`，旧键兼容读取（§6）         |
+| `Services/RdpCredentialStore.cs`          | 凭据键 = `Yomori/RDP/<host>`，同一主机多账户**必然互相覆盖**                                      | 键改为 `host + "\|" + user`，旧键兼容读取（§6）         |
 | `ViewModels/MainViewModel.cs`             | 单通道字段：`_embedClient`、`_rdpCurrentCommandId`、`_lastRdpEventSeq`、`RdpProgress`… 一堆    | 下沉为每通道一个 `RdpChannelSession`（§7）            |
 | `MainViewModel.PollRdpStatus`             | 一个 1Hz 定时器读一座桥                                                                        | 每通道一个定时器（或统一节拍循环遍历所有活跃通道）                   |
 | `MainViewModel.ConnectAndRunAsync` (1995) | 拿全局 `RdpSettings` 走一遍：写指令 → 连接 → 等会话 → 等代理 → 开轮询                                     | 抽成 `RdpChannelSession.RunAsync()`，N 个并行跑     |
@@ -69,7 +69,7 @@
 > **会话通道** = 一条「主控端 ↔ 目标会话」的完整通道：目标主机 + 目标账户 + 凭据 + 指令桥目录 + 画面连接实例 + 运行状态。
 
 ```text
-                      ┌──────────── 主控端（雪乃酱，账户 A）────────────┐
+                      ┌──────────── 主控端（Yomori，账户 A）────────────┐
                       │                                              │
   任务列表 ──分组──►  │  Ch-1  主机 127.0.0.1 / Player2 ──内嵌画面──┐  │
                       │  Ch-2  主机 192.168.1.20 / GamePC\P1 ─────┐ │  │
@@ -126,7 +126,7 @@
         "name": "1 号机 · Player2",    // 菜单项文案
         "host": "127.0.0.1",
         "user": "Player2",
-        "bridge_path": "",            // 留空 = <ProgramData>\YukinoChan\rdp\<user>
+        "bridge_path": "",            // 留空 = <ProgramData>\Yomori\rdp\<user>
         "credential_saved": true,
         "session_finish": "keep",     // keep / disconnect / logoff（按通道）
         "desktop_width": 1280,
@@ -148,7 +148,7 @@
 
 1. `rdp.channels` 缺失或为空，且旧 `rdp.target_user` 非空 → 用旧字段生成**一个默认通道**（`id` 取 `default`、name 取 `目标账户 target_user`），`credential_saved` / `session_finish` / 分辨率一并继承。
 2. 所有任务的 `channel_id` 为空且 RDP 总开关开着 → 指向该默认通道（保住"原来能跑"的行为）。
-3. 旧桥目录 `<ProgramData>\YukinoChan\rdp\` 下若已有 `status.json`，迁移到 `rdp\<user>\`（并提示"代理需重新部署一次"，因为旧快捷方式的默认目录规则变了 —— 见 §5.3）。
+3. 旧桥目录 `<ProgramData>\Yomori\rdp\` 下若已有 `status.json`，迁移到 `rdp\<user>\`（并提示"代理需重新部署一次"，因为旧快捷方式的默认目录规则变了 —— 见 §5.3）。
 4. 迁移只写内存 + 下次保存落盘，不做破坏性删除。
 
 ### 4.3 可单测的纯函数（进 `_smoke`）
@@ -213,7 +213,7 @@ public sealed class RdpBridge
 
 公共启动目录的快捷方式**只有一个**、对所有用户共用，参数固定 —— 所以不可能靠快捷方式给每个账户传不同的 `--bridge:`。
 
-**规则**：桥目录默认 = `<ProgramData>\YukinoChan\rdp\<用户名 slug>\`
+**规则**：桥目录默认 = `<ProgramData>\Yomori\rdp\<用户名 slug>\`
 - Agent 启动时：`RdpBridge.Configure(ExtractBridgePath(args) ?? AgentBridgeDir(base, Environment.UserName))`；
 - 主控端：`RdpChannelPaths.BridgeDirFor(channel, base)` 用同一个 `user` 算 —— **两边天然对齐，零配置**；
 - 远程场景（对方是另一台机器）：通道里显式填 UNC 共享目录，走 `--bridge:` 老路径，规则不变；
@@ -225,7 +225,7 @@ public sealed class RdpBridge
 
 ## 6. 凭据：按「主机 + 用户」存
 
-`RdpCredentialStore` 的 target 从 `YukinoChan/RDP/<host>` 改为 `YukinoChan/RDP/<host>|<user>`：
+`RdpCredentialStore` 的 target 从 `Yomori/RDP/<host>` 改为 `Yomori/RDP/<host>|<user>`：
 
 - `Write(host, user, pwd)` / `Read(host, user)` / `Delete(host, user)` / `Exists(host, user)`；
 - **兼容**：新 key 读不到时回落到旧 key（旧条目只记 host），读到即算命中，下次保存时写新 key 并删旧 key；
@@ -470,7 +470,7 @@ public void Start()
 6. ~~重编 DLL 需要工具链，环境具备吗？~~ → **已探明具备**（2026-09-26 实查本机）：
    - VS 2022 装在 `C:\Program Files (x86)\Microsoft Visual Studio\2022`；
    - CMake 用 VS 自带那份：`C:\Program Files (x86)\Microsoft Visual Studio\2022\<SKU>\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe`；
-   - `YukinoChan.RdpNative/build/CMakeFiles/3.31.6-msvc6` 表明此前正是用它编的（CMake 3.31.6 + MSVC）。
+   - `Yomori.RdpNative/build/CMakeFiles/3.31.6-msvc6` 表明此前正是用它编的（CMake 3.31.6 + MSVC）。
    
    → **M0 直接改宏重编即可**，无需降级方案。重编后记得把 `ycn_rdp.dll` 同步到 App 输出目录与会话代理副本目录（见 §11 R2）。
 
@@ -498,7 +498,7 @@ public void Start()
   _smoke/RdpChannelSessionCheck.cs  含「本地组镜像」段（面板在远程/并行下有值）✅
 
 改造
-  YukinoChan.RdpNative/ycn_rdp.c    YCN_MAX_SESSIONS 4 → 8（M0，需重编并同步 DLL）✅
+  Yomori.RdpNative/ycn_rdp.c    YCN_MAX_SESSIONS 4 → 8（M0，需重编并同步 DLL）✅
   Services/RdpBridge.cs             静态 → 实例 + stop.json ✅
   Services/RdpCredentialStore.cs    键改为 host|user（旧键兼容）✅
   Services/RdpSessionService.cs     调用点传 bridge 实例；.rdp 文件名带通道 id；部署三档策略 ✅
@@ -526,7 +526,7 @@ public void Start()
 | M0 | ✅ | ① 原生 `YCN_MAX_SESSIONS` 4 → **8**（`ycn_rdp.c`），用 VS 自带 CMake 重编 `ycn_rdp.dll`，由 csproj 的 `CopyToOutputDirectory` 自动带进输出目录；② `Models/RdpChannel.cs`（通道模型）、`Models/RdpChannelPaths.cs`（桥目录规则）、`Models/RdpChannelPlanner.cs`（分组 + 启动计划 + `RdpNativeLimits.MaxSessions=8`）；③ `TaskConfig.channel_id`、`RdpConfig.channels`、`AppConfig.MigrateLegacyChannel()` 幂等迁移；④ `_smoke/RdpChannelCheck.cs` 34 项断言 |
 | M1 | ✅ | `RdpBridge` 静态类 → **实例类**（`For(dir)` / `ForChannel(channel)` / `Agent` 缓存工厂）；默认桥目录 = `RdpChannelPaths.AgentBridgeDir(Environment.UserName)`；全部调用点改造（`MainViewModel` / `RdpSessionService` / `RdpAgentRunner` / `App.xaml.cs` / `_smoke`） |
 | M1.5 | ✅ | `stop.json` 停止通道：`RdpBridge.WriteStop/TryReadStop/IsStopRequested/ClearStop`、`RdpStopRequest` 模型；Agent 在每秒计时回调里检查并把请求转成 `ScriptRunner.RequestStop/RequestEmergencyStop`；主控端 `Stop()` / `EmergencyStop()` 同时下发 |
-| M2 | ✅ | 凭据键 `YukinoChan/RDP/<host>` → **`<host>\|<账户>`**（账户名去域前缀 + 小写归一化）；旧键回落读取时校验条目里的账户名，不匹配就不认；`SaveCredential/DeleteCredential/TryLoadPassword/HasCredential/ResolvePassword` 全部带上账户参数；冒烟新增"同主机两账户互不覆盖 / 按账户删不影响另一个"断言 |
+| M2 | ✅ | 凭据键 `Yomori/RDP/<host>` → **`<host>\|<账户>`**（账户名去域前缀 + 小写归一化）；旧键回落读取时校验条目里的账户名，不匹配就不认；`SaveCredential/DeleteCredential/TryLoadPassword/HasCredential/ResolvePassword` 全部带上账户参数；冒烟新增"同主机两账户互不覆盖 / 按账户删不影响另一个"断言 |
 | M3 | ✅ | ① **`Services/RdpChannelSession.cs`（新，纯逻辑可单测）**：把 VM 里那套单通道字段（指令归属 / 事件序号 / 进度 / 心跳 / 收尾幂等标志）整体下沉成**每通道一份**，判定链收进 `Tick()`，返回 `RdpChannelTick`（新事件 / 完成信号 / 异常 / 失联边沿）由 VM 落成日志与通知；② `Start()` 改为 **`RdpChannelPlanner.Plan()` 驱动**：本地组 + 各通道并行启动（`RunChannelsAsync` → `Task.WhenAll`），未启动的逐条说明原因；③ `FinishRunPart()` 用 `_pendingRuns` 计数（本地算一块、每条通道各算一块），**整轮结束**才停轮询 / 刷统计 / 放行"完成后自动退出"；④ `ConnectAndRunAsync` 收敛为"用设置页配置合成伪通道 → 走同一条 `RunChannelAsync`"，单通道行为回归不变；⑤ `PollRdpStatus` 逐通道读取判定，`Stop/EmergencyStop` 向**全部**通道下发 stop.json；⑥ `.rdp` 文件名按通道 id 分隔（`session-<id>.rdp`），并发不再互相覆盖；⑦ 冒烟新增 `_smoke/RdpChannelSessionCheck.cs`（35 项：归属 / 事件去重 / 完成 / 失联恢复 / Begin 复位 / 多通道隔离 / 停止归属） |
 | M4 | ✅ | ① **`Views/ChannelsPage.xaml(.cs)`（新，替代原 `RdpPage`，D4）**：保留全局开关 / 连接方式 / 分辨率 / 音频 / GFX / 超时 / 部署代理 / 移除代理 / 打开桥目录 / 预检条，新增**通道列表**（`ListView` 绑 `VM.Channels`，选中回写 `SelectedChannel`）+ **通道编辑卡**（名称 / 主机 / 账户 / 桥目录 / 分辨率 / 收尾方式 / 启用 / 保存·清除凭据）+ 每通道预检结果；文本字段**失焦即落盘**（`OnChannelHostLostFocus` → `PersistChannelEdits`），下拉类改动 `OnChannelFieldCommitted` 即时落盘；② **`Views/RdpChannelPage.xaml(.cs)`**：通道头（名称 / 目标 / 桥目录 + 连接预览 / 打开桥目录）+ 该通道进度条与心跳 + `RdpView` 画面（或占位说明）+ 该通道事件列表；`OnNavigatedTo` 按参数绑定 session，`SyncEmbedView()` 只在"本通道是内嵌宿主"且未挂同一实例时 `AttachClient`，`OnNavigatedFrom` 只 `DetachClient`（切页不断会话）；③ **`MainWindow` 动态菜单**：静态项文案「远程会话」→「会话通道」、`tag` `rdp` → `channels`；`SessionsChanged` 事件驱动 `RebuildChannelMenuItems()`，在 `channels` 项后插 `NavigationViewItemHeader`「执行中的通道」+ 各 `ch:<id>` 项；`NavigateTo` 加 `ch:` 分支 → `RdpChannelPage(channelId)`；④ **任务页**：详情「基础设置」加「执行通道」`ComboBox`（`SelectedValuePath="Id"`），左侧任务项模板加 `{x:Bind ChannelDisplay}` 行；⑤ **VM**：`Channels` 镜像集合 / `SelectedChannel` / `HasSelectedChannel` / `ChannelReadinessText` / `ReloadChannels()` / `AddChannel·DuplicateChannel·RemoveChannel` / `SaveChannelCredential(password)` / `ClearChannelCredential` / `DeployChannelAgent` / `OpenChannelBridgeFolder` / `PersistChannelEdits`；`SessionsChanged` 事件 + `RaiseSessionsChanged()`；⑥ **模型**：新增 `ChannelChoice`，`TaskConfig.ChannelDisplay`（`[JsonIgnore]`，运行期由 `RefreshChannelChoices()` 反查填充）；⑦ 冒烟新增 8 项 `[M4]` 源码级断言（菜单 tag / 导航分支 / 通道列表与增删复制 / 每通道预检 / 失焦落盘 / 通道页按通道绑定 / 管理页不抢画面 / 任务页下拉与列表通道名） |
 | M5 | ✅ | ① **`Models/RunSummary.cs`（新，纯函数可单测）**：`RunPartResult`（一块执行的收尾结果）+ `HasAnyAbnormal` / `SuccessCount` / `AbnormalCount` / `ComposeHeadline`（一行式，形如 `共 3 块（本地 1 / 通道 2）：成功 2、异常 1。`）/ `ComposeLines`（多行明细，**异常块排前面**）/ `ComposeMascotText`；② **看板娘"取最差"改成整轮结束才定**：`ReportSessionCompletion` 与 `OnRunnerFinished` 改为只往 `_runParts` 登记结果（异常仍立刻报 Error —— 粘性状态天然挡住后续正常块），`FinishRunPart` 归零时调 `FinalizeRunSummary()` 一次性定终态；③ **整轮汇总**：`[汇总]` 日志（标题行 + 逐块明细）+ 一条汇总通知（`NotifyOnAllDone` 时才发，走与按块通知同一套"锁屏落暂存、激活补发"），**单块不发**（与按块反馈重复）；④ **日志前缀统一**：新增 `AppendChannelLog(session, msg)`，VM 里 24 处 `[{tag}]` / `[{session.DisplayName}]` 全部归并成 `[通道：<展示名>]`；⑤ **主页通道概览**：`Models/ChannelOverviewItem.cs`（快照 record，含 `NavTag` / `StateGlyph`）+ `VM.ChannelOverview`（`ObservableCollection`）+ `VM.RefreshChannelOverview()` + `VM.HasChannelOverview`；`HomePage` 加概览卡（跑过任务才出现），页面 1Hz 重建快照、离开页面停表，点一行走 `ch:<id>` 跳转；⑥ **同主机多通道提示**（D5）：`DescribeSameHostConflict` → `VM.ChannelSameHostHint` / `HasSameHostHint`，管理页预检区一个 Warning InfoBar；按 **id** 比对（配置对象在 `ReloadChannels` 里会整体重建，引用比对会失效）；⑦ **并发上限截断显式点名**：`Start()` 对 `Reason` 含"并发上限"的跳过项单独写醒目日志 + 弹一次说明对话框；⑧ 冒烟新增 `_smoke/RunSummaryCheck.cs`（24 项）+ 12 项 `[M5]` 源码级断言 |
@@ -557,7 +557,7 @@ public void Start()
 
 ### ⚠️ 升级注意（真机必读）
 
-桥目录规则变了：`<ProgramData>\YukinoChan\rdp\` → `<ProgramData>\YukinoChan\rdp\<账户名>\`。
+桥目录规则变了：`<ProgramData>\Yomori\rdp\` → `<ProgramData>\Yomori\rdp\<账户名>\`。
 **已部署会话代理的机器需要重新部署一次代理**（主控端的「部署会话代理」按钮），
 否则新版主控端在新目录里读写，而旧代理还在旧目录里转 —— 表现就是"代理明明在跑，却一直显示不在线"。
 
@@ -567,11 +567,11 @@ public void Start()
 
 ```
 复制会话代理程序失败：The process cannot access the file
-'C:\ProgramData\YukinoChan\agent\CoreMessagingXP.dll' because it is being used by another process.
+'C:\ProgramData\Yomori\agent\CoreMessagingXP.dll' because it is being used by another process.
 ```
 
 会话代理是**常驻进程**，持有着副本目录里的 DLL，`File.Copy(overwrite: true)` 直接被拒；
-而 `MainViewModel` 把**任何**失败都追加一句"请以管理员身份重新启动雪乃酱"，把归因带偏。
+而 `MainViewModel` 把**任何**失败都追加一句"请以管理员身份重新启动 Yomori"，把归因带偏。
 
 **试过但走不通的方案**：把旧副本目录整体改名挪开再重建。
 实测结论（已固化成冒烟断言）：**只要目录内有文件被持有句柄，`Directory.Move` 就返回
