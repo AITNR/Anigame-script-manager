@@ -22,14 +22,15 @@
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
 
-            <Border
+            <!-- 标题栏左侧徽标：直接用应用 logo。
+                 位图在代码里加载（AssetsDir/logo.png）—— unpackaged 运行时 XAML 里的
+                 ms-appx 相对路径取不到 exe 同级目录，必须走绝对路径。 -->
+            <Image
+                x:Name="TitleBarLogo"
                 Grid.Column="0"
                 Width="22" Height="22" Margin="14,0,10,0"
-                Background="{StaticResource YomoriAccentBrush}"
-                CornerRadius="11">
-                <TextBlock Text="雪" Foreground="White" FontSize="12"
-                           HorizontalAlignment="Center" VerticalAlignment="Center" />
-            </Border>
+                Stretch="Uniform"
+                AutomationProperties.Name="Yomori" />
 
             <TextBlock Grid.Column="1"
                        Text="Yomori / 二游脚本助手"

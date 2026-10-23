@@ -11,6 +11,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
+using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.Foundation;
 using Windows.Graphics;
 using Yomori.Helpers;
@@ -90,6 +91,14 @@ public sealed partial class MainWindow : Window
             if (System.IO.File.Exists(iconPath))
             {
                 AppWindow.SetIcon(iconPath);
+            }
+
+            // 标题栏左侧徽标。用 png 而不是 icon.ico：22px 下多尺寸 ico 的选档由
+            // Windows 自己决定，容易挑到细节糊掉的那一档；png 交给 XAML 缩放更可控。
+            var logoPath = System.IO.Path.Combine(Services.AppPaths.AssetsDir, "logo.png");
+            if (System.IO.File.Exists(logoPath))
+            {
+                TitleBarLogo.Source = new BitmapImage(new Uri(logoPath, UriKind.Absolute));
             }
         }
         catch

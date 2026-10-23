@@ -25,7 +25,7 @@
             </InfoBar>
 
             <TextBlock Text="总览" Style="{StaticResource TitleTextBlockStyle}" />
-            <TextBlock Text="选择一张卡片开始操作；Yomori会在右侧全程陪着你。"
+            <TextBlock Text="选择一张卡片开始操作；执行期间的进度会汇总到上方概览。"
                        Style="{StaticResource BodyTextBlockStyle}"
                        Opacity="0.7" />
 
