@@ -779,7 +779,26 @@ public static class RdpSessionService
     /// </summary>
     public static string AgentProgramDirSpare => Path.Combine(AgentPayloadRoot, "agent_b");
 
-    public static string AgentProgramPath => Path.Combine(AgentProgramDir, "Yomori.exe");
+    /// <summary>精简代理的主程序名（独立工程 <c>src/Yomori.Agent</c> 的产物）。</summary>
+    internal const string AgentExeName = "Yomori.Agent.exe";
+
+    /// <summary>
+    /// 旧式代理的主程序名：整目录复制时代，代理就是主控端自己的 exe。
+    /// 只用于「识别并清掉旧部署」，新部署一律用 <see cref="AgentExeName"/>。
+    /// </summary>
+    internal const string LegacyAgentExeName = "Yomori.exe";
+
+    /// <summary>
+    /// 随包分发的精简代理目录：安装目录下的 <c>agent\</c>（打包脚本铺、安装包带）。
+    ///
+    /// 为什么不在部署时现场编译/挑文件：代理副本必须是「目标账户读得到、**不依赖主控端目录**」
+    /// 的一整套程序，现场挑文件的规则一旦和主控端的依赖图脱节，就会变成
+    /// 「主控端好用、目标账户 FileNotFound」这种最难查的故障。发布时由 CI 用独立的
+    /// 工程（不含 WinUI）产出一份完整可运行的程序，部署只负责搬运。
+    /// </summary>
+    public static string ShippedAgentDir => Path.Combine(AppPaths.BaseDir, "agent");
+
+    public static string AgentProgramPath => Path.Combine(AgentProgramDir, AgentExeName);
 
     /// <summary>副本候选目录，按优先级排列（internal 供冒烟断言"两槽不同"）。</summary>
     internal static string[] PayloadSlotDirs() => new[] { AgentProgramDir, AgentProgramDirSpare };
@@ -834,9 +853,11 @@ public static class RdpSessionService
         string? chosen = null;
         var agentStopped = false;
 
+        var sourceExeName = Path.GetFileName(sourceExe);
+
         foreach (var slot in PayloadSlotDirs())
         {
-            var exe = Path.Combine(slot, "Yomori.exe");
+            var exe = Path.Combine(slot, sourceExeName);
 
             // ① 业务 DLL / 配置 / PRI 内容一致才复用；manifest 改写后的 EXE 时间不代表版本。
             if (AgentPayloadIdentity.Matches(sourceExe, exe))
@@ -886,6 +907,33 @@ public static class RdpSessionService
                 }
             }
 
+            // ③.5 形态变了（旧部署是整目录复制的 Yomori.exe，新部署是精简的 Yomori.Agent.exe）
+            //      → 必须整目录重建。只覆盖不但降不下占用，反而更糟：
+            //      旧副本里那 150MB 界面栈不在新载荷清单里，永远不会被覆盖，会一直躺着。
+            if (NeedsShapeRebuild(slot, sourceExeName))
+            {
+                if (!TryDeleteDirectory(slot, out var deleteError))
+                {
+                    failure = deleteError;
+                    tried.Add(slot);
+                    continue;
+                }
+
+                if (CopyPayload(sourceDir, slot, out var rebuildError))
+                {
+                    chosen = slot;
+                    var rebuilt = DescribeSlot(slot);
+                    notes.Add(rebuilt.Length > 0
+                        ? rebuilt + "；旧的全量副本已按精简载荷重建"
+                        : "旧的全量副本已按精简载荷重建");
+                    break;
+                }
+
+                failure = rebuildError;
+                tried.Add(slot);
+                continue;
+            }
+
             // ④ 没被锁 → 原地覆盖
             if (CopyPayload(sourceDir, slot, out var copyError))
             {
@@ -902,7 +950,7 @@ public static class RdpSessionService
 
         if (chosen is not null)
         {
-            targetExe = Path.Combine(chosen, "Yomori.exe");
+            targetExe = Path.Combine(chosen, sourceExeName);
             OpenAgentDataDirs(chosen);
             return true;
         }
@@ -999,23 +1047,92 @@ public static class RdpSessionService
     /// 只看主程序一个文件就够：代理进程一跑起来，它的 exe 映像必然被持有，
     /// 而这个文件覆盖不了，整个部署就没有意义。只探一个也把对运行中代理的
     /// 干扰降到最低（探测要拿一次独占写句柄）。
+    ///
+    /// 两种文件名都要探：旧部署跑的是 <c>Yomori.exe</c>，新部署是 <c>Yomori.Agent.exe</c>，
+    /// 升级当口可能正好是旧的那份在跑。
     /// </summary>
     internal static bool IsPayloadLocked(string dir)
     {
-        var exe = Path.Combine(dir, "Yomori.exe");
-        if (!File.Exists(exe))
+        foreach (var name in new[] { AgentExeName, LegacyAgentExeName })
+        {
+            var exe = Path.Combine(dir, name);
+            if (!File.Exists(exe))
+            {
+                continue;
+            }
+
+            try
+            {
+                using var probe = new FileStream(exe, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            }
+            catch
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 这个槽里的旧副本是不是「另一种形态」，需要整目录重建而不是覆盖。
+    ///
+    /// 判定只看主程序名：旧部署 = 主控端 exe 的整目录副本（<c>Yomori.exe</c> 在），
+    /// 新部署 = 精简代理（<c>Yomori.Agent.exe</c> 在）。两者同名文件极少，
+    /// 覆盖式更新会让旧形态独有的文件（WinUI / WindowsAppSDK / ONNX 那些）永久留存 ——
+    /// 而这次改工程的全部目的就是把它们清掉。
+    /// </summary>
+    internal static bool NeedsShapeRebuild(string dir, string sourceExeName)
+    {
+        var expected = Path.Combine(dir, sourceExeName);
+        if (File.Exists(expected))
         {
             return false;
         }
 
+        // 目标目录里一个能跑的主程序都没有 → 当空壳处理，重建。
+        // 有别的形态的主程序 → 也是重建。
+        return true;
+    }
+
+    /// <summary>
+    /// 递归删除副本目录。先清只读属性：旧代理副本可能被 mt.exe 改写过资源，
+    /// 个别文件带只读位，直接 Delete 会半途失败留下不完整的目录。
+    /// </summary>
+    private static bool TryDeleteDirectory(string dir, out string error)
+    {
+        error = string.Empty;
+
         try
         {
-            using var probe = new FileStream(exe, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-            return false;
-        }
-        catch
-        {
+            if (!Directory.Exists(dir))
+            {
+                return true;
+            }
+
+            foreach (var file in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
+            {
+                try
+                {
+                    var attributes = File.GetAttributes(file);
+                    if ((attributes & FileAttributes.ReadOnly) != 0)
+                    {
+                        File.SetAttributes(file, attributes & ~FileAttributes.ReadOnly);
+                    }
+                }
+                catch
+                {
+                    // 清不掉属性就让下面的删除自己报错，别在这里吞掉原因
+                }
+            }
+
+            Directory.Delete(dir, recursive: true);
             return true;
+        }
+        catch (Exception ex)
+        {
+            error = $"清空旧代理副本失败：{dir}\n{ex.Message}";
+            return false;
         }
     }
 
@@ -1055,7 +1172,7 @@ public static class RdpSessionService
         }
 
         var killed = 0;
-        foreach (var process in Process.GetProcessesByName("Yomori"))
+        foreach (var process in EnumerateAgentProcesses())
         {
             try
             {
@@ -1083,6 +1200,36 @@ public static class RdpSessionService
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// 代理副本里可能出现的进程名。
+    ///
+    /// 两个都要认：新部署跑 <c>Yomori.Agent.exe</c>，旧部署跑主控端那一份 <c>Yomori.exe</c>。
+    /// 升级当口正是「旧的那份还在跑、新的要覆盖」的时刻，只认一个就会漏杀，
+    /// 表现为「部署成功但重启后还是旧程序」。
+    /// <para>⚠️ 按名字取到的进程**必须**再经 <see cref="IsAgentProcess"/> 按路径过滤：
+    /// <c>Yomori</c> 这个名字也匹配用户正开着的主控端窗口，直接 Kill 就是把人家的界面干掉。</para>
+    /// </summary>
+    private static IEnumerable<Process> EnumerateAgentProcesses()
+    {
+        foreach (var name in new[] { "Yomori.Agent", "Yomori" })
+        {
+            Process[] batch;
+            try
+            {
+                batch = Process.GetProcessesByName(name);
+            }
+            catch
+            {
+                continue;
+            }
+
+            foreach (var process in batch)
+            {
+                yield return process;
+            }
+        }
     }
 
     /// <summary>
@@ -1170,15 +1317,27 @@ public static class RdpSessionService
     public static bool DeployAgent(out string message, string? bridgePath = null, string? targetUser = null)
     {
         message = string.Empty;
-        var sourceExe = Environment.ProcessPath;
+
+        // 代理载荷的来源有两种，优先用随包分发的精简版：
+        //   ① <BaseDir>\agent\Yomori.Agent.exe —— 正式安装版 / CI 产物走这条。
+        //      独立工程产出的纯后台程序，没有 WinUI / WindowsAppSDK / ONNX，
+        //      约 73MB 而不是整套程序的 228MB（见 src/Yomori.Agent/Yomori.Agent.csproj）。
+        //   ② 没有 agent\ 子目录时回退旧行为：复制主控端整个目录、按 --rdp-agent 拉起
+        //      Yomori.exe。开发期直接 dotnet build 就是这个情形（没有发布步骤就没有 agent\）。
+        //      这只是兜底 —— 它正是这次要摆脱的 228MB，别把它当常态。
+        var shippedAgentExe = Path.Combine(ShippedAgentDir, AgentExeName);
+        var usingShippedAgent = File.Exists(shippedAgentExe);
+
+        var sourceExe = usingShippedAgent ? shippedAgentExe : Environment.ProcessPath;
         if (string.IsNullOrEmpty(sourceExe))
         {
-            sourceExe = Path.Combine(AppPaths.BaseDir, "Yomori.exe");
+            sourceExe = Path.Combine(AppPaths.BaseDir, LegacyAgentExeName);
         }
 
         if (!File.Exists(sourceExe))
         {
-            message = $"找不到Yomori主程序：{sourceExe}";
+            message = $"找不到会话代理载荷：{sourceExe}\n"
+                + $"安装目录下应有 agent\\{AgentExeName}；缺失说明安装包不完整，请重新安装。";
             return false;
         }
 
@@ -1193,15 +1352,28 @@ public static class RdpSessionService
 
         var arguments = RdpTargets.BuildAgentArguments(bridgePath);
 
-        // ❗❗ 主控端 manifest 已是 requireAdministrator（双击即管理员），
-        //    代理副本是同一个 exe，直接这么发它也会弹 UAC —— 而它由公共启动目录快捷方式
-        //    在目标账户登录时**无人值守**拉起，没人能点，代理就再也起不来。
-        //    所以先把代理副本那份 exe 的内嵌 manifest 改回 asInvoker。
+        // ❗❗ 提权这件事按载荷分两种，别混：
+        //    ① 精简代理（Yomori.Agent.exe）：它自己的 manifest 就是 asInvoker，这里会直接
+        //       判成「本就不要求管理员」，mt.exe 一次都不跑 —— 独立工程顺带削掉了
+        //       这段「改不成就中止部署」的脆弱逻辑。
+        //    ② 回退成全量副本时：代理就是主控端那个 exe，而主控端 manifest 是
+        //       requireAdministrator（编译期静态，没法按参数豁免）。它由公共启动目录快捷方式
+        //       在目标账户登录时**无人值守**拉起，没人能点 UAC —— 不改写就永远起不来。
+        //    两种情况都走同一个入口，让它自己判断现状，省得调用方维护分支。
         if (!TryDowngradeAgentManifest(exe, out var manifestNote))
         {
             message = $"{manifestNote}\n"
                 + "代理副本的提权豁免没做成，为避免部署出一个起不来的代理，本次部署已中止。";
             return false;
+        }
+
+        if (!usingShippedAgent)
+        {
+            payloadNote = JoinNotes(new List<string>
+            {
+                payloadNote,
+                "本次没有使用精简代理载荷（安装目录缺少 agent\\），已回退为复制整个程序目录"
+            });
         }
 
         var shortcut = AgentShortcutPath;
@@ -1564,7 +1736,7 @@ public static class RdpSessionService
     {
         try
         {
-            foreach (var process in Process.GetProcessesByName("Yomori"))
+            foreach (var process in EnumerateAgentProcesses())
             {
                 using (process)
                 {

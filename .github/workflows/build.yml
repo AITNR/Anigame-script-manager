@@ -263,7 +263,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.NUGET_PACKAGES }}
-          key: nuget-${{ runner.os }}-${{ hashFiles('winui3/src/Yomori.App/Yomori.App.csproj') }}
+          key: nuget-${{ runner.os }}-${{ hashFiles('winui3/src/Yomori.App/Yomori.App.csproj', 'winui3/src/Yomori.Agent/Yomori.Agent.csproj') }}
           restore-keys: nuget-${{ runner.os }}-
 
       # 放回 csproj 期望的位置：它按 ..\Yomori.RdpNative\build\Release\ 拷 ycn_rdp.dll，
@@ -296,7 +296,25 @@ jobs:
             -c Release -p:Platform=x64 -p:Version=${{ steps.ver.outputs.version }} `
             -r win-x64 --self-contained true -o $pub
 
-      - name: 打包（补齐 .pri / XBF / FreeRDP 运行库 / 图标 + 自检）
+      # 会话代理是**独立工程**，不引 WinUI / WindowsAppSDK：它只跑桥协议 + 任务执行，
+      # 一辈子不开窗。复用主控端 exe 的代价是部署时必须把整个程序目录复制到
+      # %ProgramData%\Yomori\agent（每台目标机 228MB，其中 128MB 是界面栈和 ONNX）。
+      # 这里单独发布一份纯后台程序，约 73MB，铺进安装目录的 agent\。
+      # 自包含开关与主控端保持一致：包装成"解压即用"，代理也不能要求另装运行时。
+      - name: 发布会话代理（不含界面栈）
+        shell: pwsh
+        run: |
+          $pub = Join-Path $env:GITHUB_WORKSPACE 'ci-agent'
+          $extra = @()
+          if ('${{ inputs.self_contained }}' -eq 'true') { $extra += @('-r', 'win-x64', '--self-contained', 'true') }
+          dotnet publish winui3/src/Yomori.Agent/Yomori.Agent.csproj `
+            -c Release -p:Platform=x64 -p:Version=${{ steps.ver.outputs.version }} @extra -o $pub
+          if ($LASTEXITCODE -ne 0) { throw '代理工程发布失败' }
+          if (-not (Test-Path (Join-Path $pub 'Yomori.Agent.exe'))) { throw '代理载荷里没有 Yomori.Agent.exe' }
+          $mb = ((Get-ChildItem $pub -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
+          Write-Host ("代理载荷 {0:N1} MB（主控端整套约 228MB）" -f $mb)
+
+      - name: 打包（补齐 .pri / XBF / FreeRDP 运行库 / 图标 / 代理载荷 + 自检）
         id: pack
         shell: pwsh
         env:
@@ -309,6 +327,7 @@ jobs:
             'winui3/tools/package_release.py',
             '--build-dir', 'ci-build',
             '--assets', 'assets',
+            '--agent-dir', 'ci-agent',
             '--out', 'dist',
             '--name', $name,
             # 第三方组件（FreeRDP / WinPR / OpenSSL 等）的许可证原文从 CI 自己的

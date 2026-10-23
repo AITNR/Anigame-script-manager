@@ -143,7 +143,7 @@ def _copy_tree(
 
 # ---------------------------------------------------------------- 自检
 
-def _verify(app_dir: Path, *, require_dotnet_runtime: bool) -> None:
+def _verify(app_dir: Path, *, require_dotnet_runtime: bool, agent_included: bool = False) -> None:
     """关键文件自检：缺任何一个都算打包失败。"""
     problems: list[str] = []
 
@@ -166,6 +166,35 @@ def _verify(app_dir: Path, *, require_dotnet_runtime: bool) -> None:
     need("libssl-3-x64.dll", "OpenSSL libssl（FreeRDP 依赖）")
     need("libcrypto-3-x64.dll", "OpenSSL libcrypto（FreeRDP 依赖）")
     need("assets/icon.ico", "应用图标（也是程序根目录的定位标记）")
+
+    # 会话代理载荷（agent\ 子目录）：目标账户登录后跑的就是它。
+    # 缺了不影响主控端自身启动，但「部署代理」一定失败 —— 那是远程通道的全部前提，
+    # 所以按硬性缺失处理。给了 --agent-dir 就必须真的铺进来。
+    if agent_included:
+        need("agent/Yomori.Agent.exe", "会话代理主程序")
+        need("agent/Yomori.Agent.dll", "会话代理程序集")
+
+        # ⚠️ 这条断言才是 agent\ 存在的意义：代理是纯后台进程，不碰 XAML / WinRT。
+        #    一旦哪天有人把它改回「复用主控端整套依赖」，这里会先红 ——
+        #    而不是等目标机上白占 150MB 才发现。
+        jank = [
+            name
+            for name in (
+                "Microsoft.WinUI.dll",
+                "Microsoft.UI.Xaml.dll",
+                "Microsoft.Windows.SDK.NET.dll",
+                "onnxruntime.dll",
+                "DirectML.dll",
+                "unins000.exe",
+            )
+            if (app_dir / "agent" / name).exists()
+        ]
+        if jank:
+            problems.append(
+                "agent/ 里混入了主控端才有的组件：" + "、".join(jank)
+                + "（代理是纯后台进程，这些它一次都用不到，只会让每台目标机多占上百 MB）"
+            )
+
     # 第三方组件与许可声明。FreeRDP / WinPR / OpenSSL 都是 Apache-2.0，§4 要求分发时
     # 随附许可证副本 —— 这个文件缺了就是不合规的包，按硬性缺失处理（与"跑不起来"同级）。
     need("THIRD-PARTY-NOTICES.txt", "第三方组件与许可声明（Apache-2.0 要求随包分发）")
@@ -186,6 +215,13 @@ def _verify(app_dir: Path, *, require_dotnet_runtime: bool) -> None:
         if not (app_dir / "System.Private.CoreLib.dll").exists():
             problems.append("System.Private.CoreLib.dll（自包含模式应带 .NET 运行时）")
         problems.extend(_verify_self_contained(app_dir))
+
+        # 代理同样要能"解压即用"：目标账户那台机器（其实是同一台）不该被要求另装运行时。
+        if agent_included and not (app_dir / "agent" / "System.Private.CoreLib.dll").exists():
+            problems.append(
+                "agent/System.Private.CoreLib.dll（自包含包的代理也必须是自包含的，"
+                "否则目标账户登录后代理起不来，远程通道全断）"
+            )
 
     if (app_dir / "config.json").exists():
         problems.append("config.json（不该出现在发布包里 —— 会泄露使用者本机配置）")
@@ -255,6 +291,8 @@ Yomori / 二游脚本助手 · WinUI 3 版
 {package_kind}
 
 目录约定：
+  Yomori.exe       主控端（界面）
+  agent/           会话代理载荷（目标账户登录后跑的就是它；纯后台，无界面）
   assets/          应用图标等资源（删掉会导致程序找不到自己的根目录）
   logs/            运行日志（首次运行后生成）
   runtime_stats/   耗时统计（首次运行后生成）
@@ -317,6 +355,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--build-dir", required=True, help="dotnet build 的输出目录")
     parser.add_argument("--publish-dir", help="dotnet publish 的输出目录（自包含时给）")
     parser.add_argument("--assets", required=True, help="仓库根的 assets 目录")
+    parser.add_argument(
+        "--agent-dir",
+        default=None,
+        help="会话代理的 dotnet publish 输出（src/Yomori.Agent），会铺到 <app>/agent；"
+        "不给则包里没有代理载荷，安装版部署远程通道会失败",
+    )
     parser.add_argument("--out", required=True, help="输出目录（会生成 <out>/app 与 <out>/<name>.zip）")
     parser.add_argument("--name", required=True, help="ZIP 文件名（不含扩展名）")
     parser.add_argument("--version", default="0.0.0", help="写进说明文件的版本号")
@@ -332,6 +376,7 @@ def main(argv: list[str] | None = None) -> int:
 
     build_dir = Path(args.build_dir).resolve()
     publish_dir = Path(args.publish_dir).resolve() if args.publish_dir else None
+    agent_dir = Path(args.agent_dir).resolve() if args.agent_dir else None
     assets_dir = Path(args.assets).resolve()
     out_dir = Path(args.out).resolve()
     app_dir = out_dir / "app"
@@ -341,6 +386,8 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"{label}目录不存在：{path}")
     if publish_dir is not None and not publish_dir.is_dir():
         raise SystemExit(f"publish 输出目录不存在：{publish_dir}")
+    if agent_dir is not None and not agent_dir.is_dir():
+        raise SystemExit(f"代理发布目录不存在：{agent_dir}")
 
     if app_dir.exists():
         shutil.rmtree(app_dir)
@@ -374,6 +421,12 @@ def main(argv: list[str] | None = None) -> int:
     # 资源目录：必须在 exe 同级（AppPaths 靠它认定程序根目录）
     copied += _copy_tree(assets_dir, app_dir / "assets", skip_junk=False)
 
+    # 会话代理载荷：独立工程 src/Yomori.Agent 的发布产物，铺到 agent\。
+    # 部署逻辑（RdpSessionService.DeployAgent）按 <BaseDir>\agent\Yomori.Agent.exe 找它，
+    # 找到了就只搬这约 73MB 的纯后台程序，而不是整套 228MB 的主控端。
+    if agent_dir is not None:
+        copied += _copy_tree(agent_dir, app_dir / "agent", skip_junk=False)
+
     import datetime
 
     built_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -385,7 +438,11 @@ def main(argv: list[str] | None = None) -> int:
     _write_help(app_dir, args.version, package_kind, built_at)
     _write_third_party_notices(app_dir, args.version, args.vcpkg_inst)
 
-    _verify(app_dir, require_dotnet_runtime=publish_dir is not None)
+    _verify(
+        app_dir,
+        require_dotnet_runtime=publish_dir is not None,
+        agent_included=agent_dir is not None,
+    )
 
     total_mb = sum(f.stat().st_size for f in app_dir.rglob("*") if f.is_file()) / 1024 / 1024
     print(f"已铺好 {app_dir}")

@@ -222,11 +222,17 @@ dotnet build winui3/src/Yomori.App/Yomori.App.csproj -c Release -p:Platform=x64 
 dotnet publish winui3/src/Yomori.App/Yomori.App.csproj -c Release -p:Platform=x64 \
   -r win-x64 --self-contained true -o ci-publish
 
-# 3) 打包 + 自检（缺 .pri / XBF / FreeRDP 运行库 / 第三方许可声明会直接报错退出）
+# 2.5) 发布会话代理（独立工程，不含界面栈）。产物会被铺进安装目录的 agent\，
+#      部署到目标账户时只搬这约 73MB，而不是整套主控端的约 228MB。
+#      自包含开关要与主控端一致。
+dotnet publish winui3/src/Yomori.Agent/Yomori.Agent.csproj -c Release -p:Platform=x64 \
+  -r win-x64 --self-contained true -o ci-agent
+
+# 3) 打包 + 自检（缺 .pri / XBF / FreeRDP 运行库 / 代理载荷 / 第三方许可声明会直接报错退出）
 #    这一步还会生成 THIRD-PARTY-NOTICES.txt：原生组件的许可证原文取自 vcpkg
 #    （默认 <仓库>/../_tools/vcpkg，CI 里用 --vcpkg-inst 指到 .vcpkg/installed/x64-windows）
 python winui3/tools/package_release.py --build-dir ci-build --publish-dir ci-publish \
-  --assets assets --out dist --name Yomori-winui3-2.1.0-x64 --version 2.1.0
+  --agent-dir ci-agent --assets assets --out dist --name Yomori-winui3-2.1.0-x64 --version 2.1.0
 
 # 4) 编安装程序 —— 先把编译器目录复制一份，改掉模板清单再编（Program Files 里的别动）
 cp -r "/c/Program Files (x86)/Inno Setup 6" inno-patched
@@ -271,6 +277,8 @@ winui3/
 ├─ tools/patch_setup_manifest.py    # 把 Inno 模板 SetupLdr 的清单改成 requireAdministrator
 ├─ src/Yomori.RdpNative/        # 原生 FreeRDP 封装（ycn_rdp.c / .h + CMakeLists.txt）
 │  └─ ycn_rdp.c                     #   多会话上限 YCN_MAX_SESSIONS = 8
+├─ src/Yomori.Agent/            # 会话代理（独立进程，不含界面栈）
+│  └─ Yomori.Agent.csproj           #   链接 App 的 Models/Services，产物铺进安装目录 agent\
 └─ src/Yomori.App/
    ├─ Yomori.App.csproj
    ├─ app.manifest                 # asInvoker + PerMonitorV2 + UTF-8

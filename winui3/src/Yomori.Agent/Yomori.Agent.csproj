@@ -1,0 +1,58 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- 会话代理专用工程：**只装代理跑得到的那条链**，不碰 WinUI / WindowsAppSDK。
+         为什么单独一个工程（2026-10-23）：
+         代理原先复用主控端同一个 exe，部署时把整个程序目录原样复制到
+         %ProgramData%\Yomori\agent —— 单份 228MB，而代理全程不开窗、不碰 XAML，
+         其中约 128MB 是 WinUI 界面栈（36MB）、WindowsAppSDK（48MB）、
+         ONNX/DirectML（39MB）和安装器残留（4.4MB），一辈子用不到一次。
+         代理是「每个目标账户一份、全天常驻」的东西，不能靠「反正能用」糊过去。
+
+         WinExe：由任务计划 / 启动项无人值守拉起，绝不允许闪一个控制台窗口。
+         net8.0-windows（**不带平台版本**）：带了 10.0.x 就会自动引
+         Microsoft.Windows.SDK.NET 投影（23.7MB），而代理这条链一个 WinRT 类型都不碰
+         —— 全项目只有 NotificationService（Windows.UI.Notifications）和
+         DialogHelper（Microsoft.Windows.Storage.Pickers）需要它，两个都不在本工程里。 -->
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RootNamespace>Yomori</RootNamespace>
+    <AssemblyName>Yomori.Agent</AssemblyName>
+    <!-- 代理副本的快捷方式要能显示图标：ApplicationIcon 是编译期写进 RT_GROUP_ICON 的，
+         MainWindow 里那句 AppWindow.SetIcon 只服务于主控端窗口，管不到这里。 -->
+    <ApplicationIcon>..\..\..\assets\icon.ico</ApplicationIcon>
+    <Platforms>x86;x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x86;win-x64;win-arm64</RuntimeIdentifiers>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Version Condition="'$(Version)' == '' Or '$(Version)' == '1.0.0'">2.0.0-dev.local</Version>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!-- 不产出 pdb：代理是分发到目标账户的常驻进程，符号文件既没用又白占体积。
+         真要排查崩溃，用同版本 CI 产物里的 pdb 配上即可。 -->
+    <DebugType>none</DebugType>
+    <NoWarn>$(NoWarn);CA1416;CS1591;NU1701</NoWarn>
+  </PropertyGroup>
+
+  <!-- 源文件复用 Yomori.App，不复制一份：代理跑的就是同一套桥协议 / 任务执行 / 日志代码，
+       复制会立刻分叉。这里按「链接源码 + 排除界面文件」的方式共享，
+       以后谁在 Services 里新写一个引 WinUI 的服务，本工程的编译就会红 —— 这正是我们要的提醒：
+       那种文件不属于代理。 -->
+  <ItemGroup>
+    <Compile Include="..\Yomori.App\Models\**\*.cs" LinkBase="Models" />
+    <Compile Include="..\Yomori.App\Services\**\*.cs" LinkBase="Services"
+             Exclude="..\Yomori.App\Services\NotificationService.cs;..\Yomori.App\Services\RdpD3DRenderer.cs;..\Yomori.App\Services\SingleInstance.cs" />
+    <Compile Include="..\Yomori.App\Helpers\**\*.cs" LinkBase="Helpers"
+             Exclude="..\Yomori.App\Helpers\DialogHelper.cs;..\Yomori.App\Helpers\WindowHelper.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 超时现场截图（代理侧 ExecuteTimeout 分支要用） -->
+    <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
+    <!-- GBK(936) 等代码页：读 netsh / cmdkey / 旧游戏控制台的输出 -->
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
+  </ItemGroup>
+
+</Project>
