@@ -182,7 +182,7 @@
             <Border Padding="16" Style="{StaticResource YomoriCardStyle}">
                 <StackPanel Spacing="12">
                     <TextBlock Text="关于" FontWeight="SemiBold" />
-                    <TextBlock Text="Yomori / 二游脚本助手 —— 让每日清体力变得更省心。"
+                    <TextBlock Text="Yomori —— 让每日清体力变得更省心。"
                                TextWrapping="Wrap" Opacity="0.8" />
                     <TextBlock Text="本程序不提供任何游戏内自动化逻辑，只负责把已有脚本按预设顺序稳定地跑完。"
                                TextWrapping="Wrap" FontSize="12" Opacity="0.6" />

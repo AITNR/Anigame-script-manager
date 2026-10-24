@@ -237,7 +237,7 @@ def _render(
     out: list[str] = []
     _, managed = _components()
 
-    out.append("Yomori / 二游脚本助手 —— 第三方组件与许可声明")
+    out.append("Yomori —— 第三方组件与许可声明")
     out.append(f"程序版本：{argv_version}")
     out.append(f"生成时间：{now}")
     out.append("")

@@ -49,20 +49,15 @@
                 </Border.Background>
             </Border>
 
-            <!-- 图上的应用名（参考版式：标题压在横幅左上角） -->
-            <StackPanel Margin="36,30,0,0"
-                        HorizontalAlignment="Left"
-                        VerticalAlignment="Top"
-                        Spacing="2">
-                <TextBlock Text="Yomori"
-                           FontSize="38"
-                           FontWeight="SemiBold"
-                           Foreground="White" />
-                <TextBlock Text="二游脚本助手"
-                           FontSize="20"
-                           Foreground="White"
-                           Opacity="0.9" />
-            </StackPanel>
+            <!-- 图上的应用名（参考版式：标题压在横幅左上角）。
+                 2026-10-24：去掉副标题，只留 Yomori。 -->
+            <TextBlock Margin="36,30,0,0"
+                       Text="Yomori"
+                       HorizontalAlignment="Left"
+                       VerticalAlignment="Top"
+                       FontSize="38"
+                       FontWeight="SemiBold"
+                       Foreground="White" />
 
             <!-- 没设置图片（或默认图也丢了）时的占位 -->
             <StackPanel x:Name="BannerPlaceholder"

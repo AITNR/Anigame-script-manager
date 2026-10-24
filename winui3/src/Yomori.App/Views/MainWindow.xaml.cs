@@ -67,7 +67,7 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
 
-        Title = "Yomori / 二游脚本助手";
+        Title = "Yomori";
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
         SystemBackdrop = new MicaBackdrop();

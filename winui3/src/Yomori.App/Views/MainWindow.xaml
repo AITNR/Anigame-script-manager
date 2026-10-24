@@ -33,7 +33,7 @@
                 AutomationProperties.Name="Yomori" />
 
             <TextBlock Grid.Column="1"
-                       Text="Yomori / 二游脚本助手"
+                       Text="Yomori"
                        Style="{StaticResource CaptionTextBlockStyle}"
                        VerticalAlignment="Center"
                        Opacity="0.85" />

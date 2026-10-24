@@ -376,7 +376,7 @@ def _verify_self_contained(app_dir: Path) -> list[str]:
 # ---------------------------------------------------------------- 说明文件
 
 _HELP_TEXT = """\
-Yomori / 二游脚本助手 · WinUI 3 版
+Yomori · WinUI 3 版
 版本：{version}
 打包时间：{built_at}
 
