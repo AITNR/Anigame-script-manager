@@ -56,6 +56,7 @@ public sealed partial class TasksPage : Page
         // 两个处理函数对「没在拖」是空转，重复触发无害（EndDrag 后 _dragTask 为 null）。
         TaskList.AddHandler(UIElement.PointerMovedEvent, new PointerEventHandler(OnTaskGripPointerMoved), true);
         TaskList.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler(OnTaskGripPointerReleased), true);
+        TaskList.AddHandler(UIElement.PointerCaptureLostEvent, new PointerEventHandler(OnDragCaptureLost), true);
 
         // 页面离开可视树就退订。Frame 可能缓存页面，所以 Loaded 时要重新挂上，
         // 否则从别的页返回时选中态再也不跟着 VM 走。
@@ -147,11 +148,10 @@ public sealed partial class TasksPage : Page
 
     /// <summary>
     /// 拖动用到的全部状态：
-    /// 被拖的任务 / 抓手元素 / 该任务的容器（ListViewItem）/ 施加在容器上的位移 /
+    /// 被拖的任务 / 该任务的容器（ListViewItem）/ 施加在容器上的位移 /
     /// 指针 id / 是否已过起拖阈值 / 按下时的 Y / 抓取点在行内的偏移 / 最近一次指针 Y。
     /// </summary>
     private TaskConfig? _dragTask;
-    private FrameworkElement? _dragGrip;
     private FrameworkElement? _dragContainer;
     private TranslateTransform? _dragTranslate;
     private uint _dragPointerId;
@@ -180,13 +180,17 @@ public sealed partial class TasksPage : Page
         }
 
         _dragTask = task;
-        _dragGrip = grip;
         _dragPointerId = e.Pointer.PointerId;
         _dragStartY = e.GetCurrentPoint(TaskList).Position.Y;
         _lastPointerY = _dragStartY;
         _dragActive = false;
 
-        grip.CapturePointer(e.Pointer);
+        // 捕获落在 ListView 上，**不落在抓手/Border 上**：
+        // 拖动过程中实时重排会挪动集合，ListView 可能把那一行的容器回收/重建，
+        // 抓手元素随之失效 → 捕获丢失 → PointerCaptureLost → 拖动当场断开
+        // （用户实测：其他行让位的瞬间"直接刷新到新位置并断开拖动"）。
+        // ListView 自己不会被回收，捕获挂在它身上就稳。
+        TaskList.CapturePointer(e.Pointer);
         e.Handled = true;
     }
 
@@ -234,8 +238,18 @@ public sealed partial class TasksPage : Page
         EndDrag(e);
     }
 
-    /// <summary>指针被系统抢走（滚动、窗口失焦、Esc）时收尾，别把行留在半透明/位移状态。</summary>
-    private void OnTaskGripPointerCaptureLost(object sender, PointerRoutedEventArgs e) => EndDrag(null);
+    /// <summary>
+    /// 捕获真丢了（Esc、窗口失焦、被别的元素抢走）才收尾。
+    ///
+    /// ⚠️ 拖动中「容器被回收」不再走这里 —— 捕获在 ListView 上，容器挪动不影响它。
+    /// </summary>
+    private void OnDragCaptureLost(object sender, PointerRoutedEventArgs e)
+    {
+        if (_dragTask is not null)
+        {
+            EndDrag(null);
+        }
+    }
 
     // ---------------- 拖动的三段内部逻辑 ----------------
 
@@ -317,6 +331,11 @@ public sealed partial class TasksPage : Page
             && _lastPointerY > TopOf(next) + next.ActualHeight / 2)
         {
             VM.MoveTaskInScopeTo(_dragTask, below);
+
+            // 挪完立刻按「当前」布局重新回贴一次：布局还没跑时读到的是旧槽位，
+            // 算出来正好还是指针所在的位置；等布局跑完 LayoutUpdated 再兜一次。
+            // 不在这里补这一下，用户会看到行先跳到新槽位再被拽回来。
+            FollowPointer();
             return;
         }
 
@@ -326,6 +345,7 @@ public sealed partial class TasksPage : Page
             && _lastPointerY < TopOf(previous) + previous.ActualHeight / 2)
         {
             VM.MoveTaskInScopeTo(_dragTask, above);
+            FollowPointer();
         }
     }
 
@@ -344,22 +364,25 @@ public sealed partial class TasksPage : Page
 
         if (_dragContainer is not null && ReferenceEquals(TaskList.ItemFromContainer(_dragContainer), _dragTask))
         {
+            return;   // 位移还挂在正确的行上
+        }
+
+        var target = TaskList.ContainerFromItem(_dragTask) as FrameworkElement;
+        if (target is null)
+        {
+            // 容器还没来得及建出来（Move 之后这一帧）：**先别摘**旧的那份。
+            // 摘了就这一帧没有位移，行会闪回槽位；等下一帧布局完这里会重新收一遍。
             return;
         }
 
-        if (_dragContainer is not null)
+        if (_dragContainer is not null && !ReferenceEquals(_dragContainer, target))
         {
             _dragContainer.RenderTransform = null;
             _dragContainer.Opacity = 1;
             Canvas.SetZIndex(_dragContainer, 0);
         }
 
-        _dragContainer = TaskList.ContainerFromItem(_dragTask) as FrameworkElement;
-        if (_dragContainer is null)
-        {
-            return;
-        }
-
+        _dragContainer = target;
         _dragContainer.RenderTransform = _dragTranslate;
         _dragContainer.Opacity = 0.92;
         Canvas.SetZIndex(_dragContainer, 100);
@@ -380,16 +403,17 @@ public sealed partial class TasksPage : Page
             Canvas.SetZIndex(_dragContainer, 0);
         }
 
-        if (_dragGrip is not null && e is not null)
-        {
-            _dragGrip.ReleasePointerCapture(e.Pointer);
-        }
-
+        // 先清状态再放捕获：ReleasePointerCapture 会同步抛 PointerCaptureLost，
+        // 那时若 _dragTask 还在，就会又走一遍 EndDrag。
         _dragTask = null;
-        _dragGrip = null;
         _dragContainer = null;
         _dragTranslate = null;
         _dragActive = false;
+
+        if (e is not null)
+        {
+            TaskList.ReleasePointerCapture(e.Pointer);
+        }
     }
 
     private double TopOf(FrameworkElement element) =>

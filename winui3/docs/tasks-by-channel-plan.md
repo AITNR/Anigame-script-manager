@@ -266,7 +266,7 @@ public int ScopeOrder { get; set; }   // 通道内显示序号，由 RefreshScop
 | ② | ListView 内置重排（`CanReorderItems` + `CanDragItems` + `ReorderMode`） | **同样按不动**（本页面上这套机制不生效） |
 | ③ | 页面自己接管指针（当前实现） | 按下即 `CapturePointer` + `Handled`，移动/松开都归自己 |
 
-**六条纪律**：
+**八条纪律**：
 
 1. **`PointerPressed` 里必须 `e.Handled = true`** —— 否则 `ListViewItem` 随后又把指针抢回去，
    `PointerMoved` 一条都收不到（这就是 ①② 失败的同一条根因）。
@@ -280,6 +280,12 @@ public int ScopeOrder { get; set; }   // 通道内显示序号，由 RefreshScop
 5. **一次指针事件最多挪一位** —— `Move` 之后布局还没跑完，同一 tick 里连读容器位置读到的是旧值。
 6. **`SyncDragContainer` 要核对位移挂在谁身上** —— 容器按位置复用，`Move` 之后可能被回收给
    别的行；发现 `ItemFromContainer` 不等于被拖任务，就把位移摘下来挂回正确的那只。
+   若 `ContainerFromItem` 这一帧还查不到新容器，**先别摘旧的**，否则这一帧没有位移、行会闪回槽位。
+7. **指针捕获挂在 ListView 上，别挂在抓手 / 行容器上** —— 实时重排会挪集合，ListView 可能把
+   那一行的容器回收重建，抓手随之失效 → 捕获丢失 → 拖动当场断开。用户实测症状就是这个：
+   「其他行让位的瞬间就直接刷新到新位置、拖动断了」。ListView 自己不会被回收，挂在它身上才稳。
+8. **每次 `Move` 之后立刻再 `FollowPointer()` 一次** —— 布局还没跑时读到的是旧槽位，算出来正好
+   还是指针位置；不补这一下会看到行先跳到新槽位再被拽回来。
 
 已知副作用：点抓手不再顺带选中这一行（按下被 Handled 掉了）。抓手只有二十来像素宽，
 点行内文字照常选中，可以接受。

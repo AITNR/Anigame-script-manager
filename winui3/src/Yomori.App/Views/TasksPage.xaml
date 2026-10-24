@@ -177,11 +177,7 @@
                                             Background="Transparent"
                                             Padding="2,0,4,0"
                                             VerticalAlignment="Stretch"
-                                            PointerPressed="OnTaskGripPointerPressed"
-                                            PointerMoved="OnTaskGripPointerMoved"
-                                            PointerReleased="OnTaskGripPointerReleased"
-                                            PointerCaptureLost="OnTaskGripPointerCaptureLost"
-                                            PointerCanceled="OnTaskGripPointerCaptureLost">
+                                            PointerPressed="OnTaskGripPointerPressed">
                                         <FontIcon Glyph="&#xE76F;" FontSize="14" Opacity="0.45" />
                                         <ToolTipService.ToolTip>
                                             <ToolTip Content="按住拖动，调整这条通道内的执行顺序（只影响本通道）。" />
