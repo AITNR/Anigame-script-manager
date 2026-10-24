@@ -928,6 +928,8 @@ public sealed partial class MainWindow : Window
         var taskText = vm.PanelCurrentTask;
         var progressText = vm.PanelProgressText;
         var elapsedText = vm.PanelElapsedText;
+        var abnormalReason = vm.PanelAbnormalReason;
+        var abnormalMore = vm.PanelAbnormalMoreText;
 
         var done = 0;
         var total = 0;
@@ -957,6 +959,8 @@ public sealed partial class MainWindow : Window
             .Append(anyActive ? '1' : '0')
             .Append(anyAbnormal ? '1' : '0')
             .Append('\n')
+            .Append(abnormalReason).Append('\n')
+            .Append(abnormalMore).Append('\n')
             .Append(rowCount);
 
         for (var i = 0; i < rowCount; i++)
@@ -996,6 +1000,8 @@ public sealed partial class MainWindow : Window
         SideDotAbnormal.Visibility = anyAbnormal ? Visibility.Visible : Visibility.Collapsed;
         SideDotIdle.Visibility = anyActive || anyAbnormal ? Visibility.Collapsed : Visibility.Visible;
 
+        RefreshSideAbnormalBox(vm);
+
         SideEmptyHint.Visibility = rowCount == 0 ? Visibility.Visible : Visibility.Collapsed;
 
         for (var i = 0; i < SideStatusRows.Count; i++)
@@ -1016,6 +1022,68 @@ public sealed partial class MainWindow : Window
                 session.IsStale ? $"{session.StatusText}（失联）" : session.StatusText,
                 session.IsActive);
         }
+    }
+
+    /// <summary>
+    /// 状态栏的「异常原因」块。
+    ///
+    /// <para>调用方（<see cref="RefreshSideStatus"/>）已经做过整屏签名比对，
+    /// 所以这里可以直接写控件，不必再逐项比 —— 唯一的例外是 ToolTip：
+    /// <c>ToolTipService.SetToolTip</c> 每次都会重建悬浮窗口，
+    /// 项目里反复设置它掀掉过进程（多画面页 1Hz 全量重设那三次），
+    /// 因此它单独按文本去重、且复用同一个 TextBlock 实例。</para>
+    /// </summary>
+    private void RefreshSideAbnormalBox(MainViewModel vm)
+    {
+        var reason = vm.PanelAbnormalReason;
+        var show = vm.PanelHasAbnormal && !string.IsNullOrWhiteSpace(reason);
+
+        SideAbnormalBox.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        if (!show)
+        {
+            return;
+        }
+
+        SideAbnormalReason.Text = reason;
+
+        var more = vm.PanelAbnormalMoreText;
+        SideAbnormalMore.Text = more;
+        SideAbnormalMore.Visibility = string.IsNullOrEmpty(more) ? Visibility.Collapsed : Visibility.Visible;
+
+        SetSideAbnormalTip(vm.PanelAbnormalDetail);
+    }
+
+    /// <summary>异常原因悬浮提示里那个 TextBlock（一次创建、之后只改 Text）。</summary>
+    private TextBlock? _sideAbnormalTip;
+
+    /// <summary>上一次设进悬浮提示的文本（内容没变就不重设）。</summary>
+    private string _sideAbnormalTipText = string.Empty;
+
+    /// <summary>把全部异常原因挂成悬浮提示 —— 状态栏最多显示 4 行，剩下的靠它看完。</summary>
+    private void SetSideAbnormalTip(string detail)
+    {
+        if (string.Equals(detail, _sideAbnormalTipText, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _sideAbnormalTipText = detail;
+
+        if (string.IsNullOrEmpty(detail))
+        {
+            ToolTipService.SetToolTip(SideAbnormalBox, null);
+            return;
+        }
+
+        _sideAbnormalTip ??= new TextBlock
+        {
+            MaxWidth = 420,
+            FontSize = 12,
+            TextWrapping = TextWrapping.Wrap,
+        };
+
+        _sideAbnormalTip.Text = detail;
+        ToolTipService.SetToolTip(SideAbnormalBox, _sideAbnormalTip);
     }
 
     // ---------------- 导航 ----------------

@@ -1,4 +1,5 @@
 // -*- coding: utf-8 -*-
+using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -14,7 +15,19 @@ namespace Yomori.Models;
 /// <param name="IsRemote">true = 远程通道；false = 主控端本地执行组。</param>
 /// <param name="Abnormal">该块是否出现过异常。</param>
 /// <param name="Summary">一行结束说明（远程优先取代理的 Finished 事件正文）。</param>
-public sealed record RunPartResult(string Label, bool IsRemote, bool Abnormal, string Summary);
+/// <param name="Reasons">
+/// 该块异常的**原因明细**（每个出问题的任务一行，例如「任务「日常」脚本不存在，已跳过」）。
+/// 以前只留 <paramref name="Summary"/>，而远程 Summary 恒为「已完成（有异常）」——
+/// 界面上等于只说了一句"有异常"、不说为什么。
+/// </param>
+/// <param name="Stopped">该块是被用户手动停止打断的（不算异常，但终态要说"已停止"）。</param>
+public sealed record RunPartResult(
+    string Label,
+    bool IsRemote,
+    bool Abnormal,
+    string Summary,
+    IReadOnlyList<string>? Reasons = null,
+    bool Stopped = false);
 
 /// <summary>
 /// 整轮执行的汇总（纯函数，可脱离 WinUI 单测，见 <c>_smoke/RdpChannelCheck.cs</c>）。
@@ -82,5 +95,88 @@ public static class RunSummary
             .OrderByDescending(p => p.Abnormal)
             .Select(p => $"· {p.Label}：{(p.Abnormal ? "异常" : "成功")} —— {p.Summary}")
             .ToList();
+    }
+
+    /// <summary>
+    /// 异常原因明细的最大条数 —— 界面与日志共用。超出的截断，
+    /// 免得一个跑了几百个任务的通道把状态栏顶成一堵墙（完整原因永远在运行日志里）。
+    /// </summary>
+    public const int MaxReasons = 12;
+
+    /// <summary>
+    /// 整轮的异常原因明细，一行一条，**带块标签**（`通道「3 号机」：任务「日常」脚本不存在，已跳过`）。
+    ///
+    /// <para>存在的理由：状态面板此前只会显示「已完成（有异常）」，用户看不出是哪条通道、
+    /// 哪个任务、为什么 —— 界面上等于只说了"出了问题"这一件事。
+    /// 这里把各块收集到的原因拍平，状态栏直接显示第一条，日志与悬浮提示显示全部。</para>
+    ///
+    /// <para>只取 <see cref="RunPartResult.Abnormal"/> 为真的块：被手动停止的块不该进这里
+    /// （那是用户自己的操作，不是故障）。</para>
+    /// </summary>
+    public static IReadOnlyList<string> ComposeReasons(IReadOnlyList<RunPartResult>? parts)
+    {
+        if (parts is null || parts.Count == 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        var lines = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var part in parts.Where(p => p.Abnormal))
+        {
+            if (part.Reasons is { Count: > 0 })
+            {
+                foreach (var reason in part.Reasons)
+                {
+                    if (string.IsNullOrWhiteSpace(reason))
+                    {
+                        continue;
+                    }
+
+                    var line = $"{part.Label}：{reason.Trim()}";
+                    if (seen.Add(line))
+                    {
+                        lines.Add(line);
+                    }
+
+                    if (lines.Count >= MaxReasons)
+                    {
+                        return lines;
+                    }
+                }
+
+                continue;
+            }
+
+            // 该块异常但一条原因都没收集到：别编，也别把「已完成（有异常）」当原因再念一遍。
+            var fallback = DescribeMissingReason(part);
+            if (seen.Add(fallback))
+            {
+                lines.Add(fallback);
+            }
+
+            if (lines.Count >= MaxReasons)
+            {
+                return lines;
+            }
+        }
+
+        return lines;
+    }
+
+    /// <summary>异常块没有明细时的兜底说明 —— 必须指出"去哪儿看"，别让用户对着界面发呆。</summary>
+    private static string DescribeMissingReason(RunPartResult part)
+    {
+        var summary = string.IsNullOrWhiteSpace(part.Summary) ? string.Empty : part.Summary.Trim();
+
+        // Summary 里的收尾语（「已完成（有异常）」/「全部任务结束」）本身没有信息量，
+        // 当成原因重复一遍只会让用户以为是另一条线索。
+        var informative = summary.Length > 0
+            && !summary.Contains("有异常", StringComparison.Ordinal);
+
+        return informative
+            ? $"{part.Label}：{summary}"
+            : $"{part.Label}：没有上报具体原因（详见「运行日志」里该通道的输出）";
     }
 }

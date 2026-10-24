@@ -330,6 +330,15 @@ public sealed class ScriptRunner
 
     public int TaskErrorCount { get; private set; }
 
+    /// <summary>
+    /// 本轮是否被停止请求打断。
+    ///
+    /// <para>存在的理由：<see cref="Finished"/> 的参数是"停止或出错"，
+    /// 停止分支同样传 true。回调方若只看那个参数，会把"用户点了停止"写成"异常"
+    /// —— 远程代理以前就是这么把停止报成「已完成（有异常）」的。</para>
+    /// </summary>
+    public bool WasStopped => _stopRequested;
+
     public IReadOnlyList<AbnormalEvent> AbnormalEvents => _abnormalEvents;
 
     public event EventHandler<string>? Logged;

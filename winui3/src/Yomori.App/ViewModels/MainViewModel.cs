@@ -1131,11 +1131,9 @@ public sealed class MainViewModel : ObservableObject
         ResetSessions(plan);
 
         _runStoppedOrError = false;
-        _runTaskErrorCount = 0;
-        _runParts.Clear();
+        ResetRunSummaryState();
         _runStartedAt = DateTimeOffset.Now;
         _runEndedAt = null;
-        _lastRunAbnormal = false;
         _pendingRuns = plan.ToLaunch.Count + (plan.LocalTasks.Count > 0 ? 1 : 0);
 
         if (_pendingRuns == 0)
@@ -1440,7 +1438,12 @@ public sealed class MainViewModel : ObservableObject
             {
                 StatusText = "已完成（有异常）";
                 var count = Math.Max(1, _runTaskErrorCount);
-                summary = $"发生 {count} 次任务异常";
+
+                // 有原因就说原因：「发生 1 次任务异常」这种句子不含任何线索，
+                // 用户在汇总通知/日志里看到它仍然不知道是哪个任务、为什么。
+                summary = _localAbnormalReasons.Count > 0
+                    ? _localAbnormalReasons[0]
+                    : $"发生 {count} 次任务异常";
             }
         }
         else
@@ -1452,7 +1455,16 @@ public sealed class MainViewModel : ObservableObject
         // 与远程通道同构：只登记这块自己的结果，终态交给整轮汇总 ——
         // 多通道并行时"本地跑完了"不等于"整轮结束"。
         // 主动停止不算异常（它不该把整轮判成"有异常"，只影响是否放行自动退出）。
-        _runParts.Add(new RunPartResult("本地执行", false, stoppedOrError && !stopped, summary));
+        var localReasons = _localAbnormalReasons.ToList();
+        _localAbnormalReasons.Clear();
+
+        _runParts.Add(new RunPartResult(
+            "本地执行",
+            false,
+            stoppedOrError && !stopped,
+            summary,
+            stopped ? null : localReasons,
+            stopped));
 
         // 本地执行组同步落终态：单块跑本地时，面板/概览就是靠它显示"已完成"
         LocalGroup?.UpdateLocal(
@@ -1937,6 +1949,23 @@ public sealed class MainViewModel : ObservableObject
 
     /// <summary>上一轮是否有块异常收尾（多块结束时状态面板要显示"已完成（有异常）"）。</summary>
     private bool _lastRunAbnormal;
+
+    /// <summary>上一轮是否有块被用户手动停止（终态显示"已停止"，不算异常）。</summary>
+    private bool _lastRunStopped;
+
+    /// <summary>
+    /// 上一轮的异常原因明细（一行一条，带块标签）。状态栏显示第一条、悬浮提示与运行日志显示全部。
+    ///
+    /// 为什么不从各块现场取：整轮结束后各通道会被重置成 idle，
+    /// 现场数据会被 1Hz 心跳覆盖 —— 收尾那一刻定下来存着，界面随时可取。
+    /// </summary>
+    private readonly List<string> _lastRunAbnormalReasons = new();
+
+    /// <summary>
+    /// 本轮本地执行组的异常原因（由 <c>TaskCompleted</c> 逐条攒，本地组收尾时并入整轮）。
+    /// 之前这里只留了一个计数 <c>_runTaskErrorCount</c>，原因在收尾时就丢了。
+    /// </summary>
+    private readonly List<string> _localAbnormalReasons = new();
 
     /// <summary>
     /// 设置页单通道入口用的伪通道 id。配置里的通道 id 是 8 位十六进制，
@@ -3816,7 +3845,13 @@ public sealed class MainViewModel : ObservableObject
 
             if (!IsRunning)
             {
-                return _lastRunAbnormal ? "已完成（有异常）" : "已完成";
+                if (_lastRunAbnormal)
+                {
+                    return "已完成（有异常）";
+                }
+
+                // 被手动停止的一轮：说"已完成"是在骗人（进度条还停在一半）
+                return _lastRunStopped ? "已停止" : "已完成";
             }
 
             return $"执行中（{_sessions.Count} 块并行）";
@@ -3898,6 +3933,23 @@ public sealed class MainViewModel : ObservableObject
     public bool PanelHasAbnormal => _lastRunAbnormal;
 
     /// <summary>
+    /// 异常原因的第一条（状态栏正文）。空串 = 没有可显示的原因。
+    ///
+    /// <para>「已完成（有异常）」只是结论。用户看到它之后的下一个问题是"哪儿异常了"，
+    /// 所以状态栏必须跟一句具体原因（哪条通道、哪个任务、为什么）。</para>
+    /// </summary>
+    public string PanelAbnormalReason =>
+        _lastRunAbnormalReasons.Count > 0 ? _lastRunAbnormalReasons[0] : string.Empty;
+
+    /// <summary>除第一条之外还剩几条（状态栏次级提示）。空串 = 只有一条。</summary>
+    public string PanelAbnormalMoreText => _lastRunAbnormalReasons.Count > 1
+        ? $"另有 {_lastRunAbnormalReasons.Count - 1} 条，详见运行日志"
+        : string.Empty;
+
+    /// <summary>全部异常原因（换行拼接），给状态栏的悬浮提示用。</summary>
+    public string PanelAbnormalDetail => string.Join(Environment.NewLine, _lastRunAbnormalReasons);
+
+    /// <summary>
     /// 面板四项都是计算属性，值来自各通道会话 —— 任何一个块的状态变了都要整体通知一次。
     /// （属性名要写全：计算属性没法用"某个字段变了"来推断。）
     /// </summary>
@@ -3908,6 +3960,9 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(PanelElapsedText));
         OnPropertyChanged(nameof(PanelProgressText));
         OnPropertyChanged(nameof(PanelHasAbnormal));
+        OnPropertyChanged(nameof(PanelAbnormalReason));
+        OnPropertyChanged(nameof(PanelAbnormalMoreText));
+        OnPropertyChanged(nameof(PanelAbnormalDetail));
     }
 
     /// <summary>是否正在连接 / 等待目标会话。</summary>
@@ -4373,8 +4428,7 @@ public sealed class MainViewModel : ObservableObject
         {
             // 从设置页单独点「连接并执行」时也要把本轮状态归零（不然上一轮的异常标志会残留）
             _runStoppedOrError = false;
-            _runTaskErrorCount = 0;
-            _runParts.Clear();
+            ResetRunSummaryState();
         }
 
         var session = EnsureSession(channel);
@@ -5094,11 +5148,24 @@ public sealed class MainViewModel : ObservableObject
 
         // 收尾方式按通道自己的配置（多通道下每条通道可以不一样）
         var finishMode = session.Channel?.SessionFinish ?? RdpSettings.SessionFinish;
-        var abnormal = tick.Abnormal;
+
+        // 「手动停止」不是异常：代理对停止请求同样以 abnormal 收尾
+        // （旧副本更是直接把停止写成「已完成（有异常）」）。
+        // 主控端自己下发过停止请求，就按"停止"记 —— 与本地执行组的判定保持一致。
+        var stopped = session.StopRequested;
+        var abnormal = tick.Abnormal && !stopped;
+
+        if (stopped)
+        {
+            summary = "已手动停止（本轮未跑完）";
+        }
+
+        // 异常时把"哪个任务、为什么"一并收回：状态栏与运行日志都要能说出来
+        var reasons = abnormal ? CollectSessionAbnormalReasons(session, status) : null;
 
         // 只登记这块**自己的**结果，暂不定终态 ——
         // 还有别的块在跑时看板娘必须继续"工作"，终态由 FinalizeRunSummary 取最差统一决定。
-        _runParts.Add(new RunPartResult($"通道「{tag}」", true, abnormal, summary));
+        _runParts.Add(new RunPartResult($"通道「{tag}」", true, abnormal, summary, reasons, stopped));
 
         if (RdpSettings.NotifyOnChannelDone)
         {
@@ -5120,6 +5187,64 @@ public sealed class MainViewModel : ObservableObject
         AppendChannelLog(session, $"远程执行结束：{summary}（会话处理方式：{SessionFinishModes.Label(finishMode)}）。");
 
         FinishRunPart();
+    }
+
+    /// <summary>
+    /// 从一条通道本轮的事件流里捞出异常任务的结束原因。
+    ///
+    /// <para>代理的 Finished 事件正文只有「已完成（有异常）」这一句 —— 那是结论、不是原因。
+    /// 真正的原因在带 <c>IsAbnormal</c> 的 TaskDone 事件里（`启动失败，已跳过` /
+    /// `脚本不存在，已跳过` / `超时处理：…`），任务名单独放在 <c>TaskName</c> 上。</para>
+    ///
+    /// <para>优先读主控端累积的 <see cref="RdpChannelSession.Events"/>（它跨 idle 心跳保留），
+    /// 拿不到再退回本次 tick 的快照；两者都没有就明说"没有具体原因"，
+    /// 而不是拿收尾语冒充原因。</para>
+    /// </summary>
+    private static IReadOnlyList<string> CollectSessionAbnormalReasons(RdpChannelSession session, RdpStatus? status)
+    {
+        IEnumerable<RdpTaskEvent> source = session.Events.Count > 0
+            ? session.Events
+            : status?.Events ?? new List<RdpTaskEvent>();
+
+        var reasons = new List<string>();
+        string? finished = null;
+
+        foreach (var ev in source)
+        {
+            if (!ev.IsAbnormal)
+            {
+                continue;
+            }
+
+            if (ev.Kind == RdpEventKinds.Finished)
+            {
+                finished ??= ev.Message;
+                continue;
+            }
+
+            if (ev.Kind != RdpEventKinds.TaskDone)
+            {
+                continue;
+            }
+
+            var name = string.IsNullOrWhiteSpace(ev.TaskName) ? "（未知任务）" : ev.TaskName.Trim();
+            var detail = string.IsNullOrWhiteSpace(ev.Message) ? "异常结束" : ev.Message.Trim();
+            var line = $"任务「{name}」{detail}";
+
+            if (!reasons.Contains(line) && reasons.Count < RunSummary.MaxReasons)
+            {
+                reasons.Add(line);
+            }
+        }
+
+        if (reasons.Count == 0)
+        {
+            reasons.Add(string.IsNullOrWhiteSpace(finished)
+                ? "代理没有上报具体原因（详见「运行日志」里该通道的输出）"
+                : $"代理只报告了「{finished.Trim()}」，没有具体任务原因（详见「运行日志」里该通道的输出）");
+        }
+
+        return reasons;
     }
 
     /// <summary>
@@ -5201,13 +5326,28 @@ public sealed class MainViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 整轮结束定终态：看板娘**取最差**（任一异常 → Error，否则 Rest）+ 一条汇总通知 + 逐块汇总日志。
+    /// 把"上一轮 / 本轮"的汇总状态整体归零（两个启动入口共用）。
+    /// 任何一项漏掉都会让上一轮的"有异常"残留到新的一轮（设置页单通道入口踩过）。
+    /// </summary>
+    private void ResetRunSummaryState()
+    {
+        _runTaskErrorCount = 0;
+        _runParts.Clear();
+        _localAbnormalReasons.Clear();
+        _lastRunAbnormalReasons.Clear();
+        _lastRunAbnormal = false;
+        _lastRunStopped = false;
+    }
+
+    /// <summary>
+    /// 整轮结束定终态：**取最差**（任一异常 → 有异常）+ 一条汇总通知 + 逐块汇总日志 + 异常原因明细。
     ///
     /// 为什么不在各块收尾时直接定：多通道并行时各块完成时间不同，
-    /// A 跑完就给看板娘"休息"会让用户以为整轮结束（而 B 其实还在跑）。
+    /// A 跑完就落终态会让用户以为整轮结束（而 B 其实还在跑）。
     /// 所以各块只往 <see cref="_runParts"/> 里登记结果，真正的终态在这里一次性决定。
     ///
-    /// 单块（只有本地、或只有一条通道）时不发汇总 —— 它和上面按块的收尾反馈完全重复。
+    /// 单块（只有本地、或只有一条通道）时不发汇总通知 —— 它和按块的收尾反馈完全重复；
+    /// 但**异常原因明细照写日志**：那正是用户缺的信息，越少块越不该省。
     /// </summary>
     private void FinalizeRunSummary()
     {
@@ -5217,11 +5357,26 @@ public sealed class MainViewModel : ObservableObject
         if (parts.Count == 0)
         {
             _lastRunAbnormal = false;
+            _lastRunStopped = false;
+            _lastRunAbnormalReasons.Clear();
             return;
         }
 
         // 多块时状态面板要显示"已完成（有异常）"—— 这里定下来，面板是计算属性、不自己判
         _lastRunAbnormal = RunSummary.HasAnyAbnormal(parts);
+        _lastRunStopped = parts.Any(p => p.Stopped);
+
+        // 异常原因一次性定下来：状态栏读它、运行日志写它、悬浮提示展开它。
+        // 只写「已完成（有异常）」等于只说"出问题了"，用户仍然不知道是哪条通道、哪个任务、为什么。
+        _lastRunAbnormalReasons.Clear();
+        if (_lastRunAbnormal)
+        {
+            _lastRunAbnormalReasons.AddRange(RunSummary.ComposeReasons(parts));
+            foreach (var line in _lastRunAbnormalReasons)
+            {
+                AppendLog("[异常] " + line);
+            }
+        }
 
         if (parts.Count > 1)
         {
@@ -5291,9 +5446,33 @@ public sealed class MainViewModel : ObservableObject
     {
         AppendLog($"任务完成：{info.Name}（{FormatHelper.FormatSeconds(info.ElapsedSeconds)}）{info.Status}");
 
+        // 异常任务的结束原因就地留一份：本地组收尾时并进整轮汇总，
+        // 让状态栏的「有异常」能说出是哪个任务、为什么（原来只剩一个计数）。
+        if (info.IsAbnormal)
+        {
+            AddLocalAbnormalReason(
+                $"任务「{info.Name}」{(string.IsNullOrWhiteSpace(info.Status) ? "异常结束" : info.Status.Trim())}");
+        }
+
         if (RdpSettings.NotifyLocalTaskDone)
         {
             NotificationService.ShowTaskDone(info.Name, info.Index, info.Total, info.ElapsedSeconds, info.IsAbnormal);
         }
     });
+
+    /// <summary>记一条本地异常原因（去重、有上限）。并发组下可能从工作线程回调，但外部已 <c>Post</c> 到 UI 线程。</summary>
+    private void AddLocalAbnormalReason(string reason)
+    {
+        if (string.IsNullOrWhiteSpace(reason) || _localAbnormalReasons.Contains(reason))
+        {
+            return;
+        }
+
+        if (_localAbnormalReasons.Count >= RunSummary.MaxReasons)
+        {
+            return;
+        }
+
+        _localAbnormalReasons.Add(reason);
+    }
 }

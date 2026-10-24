@@ -235,9 +235,14 @@ public sealed class RdpAgentRunner
         };
 
         var hadError = false;
-        runner.Finished += (_, abnormal) =>
+        runner.Finished += (_, stoppedOrError) =>
         {
-            hadError = abnormal;
+            // 「停止」不是「异常」：ScriptRunner 在停止分支同样 RaiseFinished(true)，
+            // 只看这个参数会把用户点停止也写成「已完成（有异常）」——
+            // 真机日志里出现过：紧急停止 → 两个通道都报「已完成（有异常）」，
+            // 界面上只写了"有异常"、没有任何原因，用户根本看不出那是自己按的停止。
+            // 真异常以 HadTaskError 为准（启动失败 / 脚本缺失 / 超时强退 / 过早退出都会置它）。
+            hadError = stoppedOrError && runner.HadTaskError;
 
             // 统计是在 RaiseFinished 之前刚写好的（ScriptRunner 先 SaveStatsQuietly 再 RaiseFinished），
             // 所以这里正好能在会话收尾之前把合并后的历史发布到桥目录，供主控端的"耗时统计"页汇总。
@@ -262,7 +267,14 @@ public sealed class RdpAgentRunner
             }
 
             FlushLiveLogs(); // Flush before Finished/logoff: the controller may stop polling immediately.
-            var summary = hadError ? "已完成（有异常）" : "全部任务已完成";
+
+            // 文案要区分三件事：真异常 / 被停止 / 正常跑完。
+            // 以前停止也写成「已完成（有异常）」，主控端状态栏只能照抄 —— 于是"停止"变成了"故障"。
+            var stopped = runner.WasStopped;
+            var summary = hadError
+                ? "已完成（有异常）"
+                : stopped ? "已停止（本轮未跑完）" : "全部任务已完成";
+
             // 异常与否写进事件：常驻代理会把 Phase 从 done 迅速改成 idle，主控端来不及看相位，
             // 只能靠这条 Finished 事件的 abnormal 标记来区分"正常结束"与"有异常结束"。
             Append(RdpEventKinds.Finished, summary, abnormal: hadError);

@@ -200,6 +200,15 @@ public sealed class RdpChannelSession
     /// <summary>重发到上限仍无回执 —— 目标代理多半是旧版本，不再白费力气。</summary>
     public bool StopGiveUp { get; private set; }
 
+    /// <summary>
+    /// 本轮主控端下发过停止请求（不论代理是否回执）。
+    ///
+    /// <para>收尾时用它把"用户点停止"和"真的出故障"分开：代理对停止请求同样以
+    /// <c>abnormal=true</c> 收尾（旧副本甚至直接写「已完成（有异常）」），
+    /// 不区分开就会把用户自己的操作报成异常。</para>
+    /// </summary>
+    public bool StopRequested => StopPending || StopAcked;
+
     public string ElapsedText => FormatHelper.FormatSeconds(ElapsedSeconds);
 
     public string TaskDisplay => string.IsNullOrEmpty(CurrentTask) ? "－" : CurrentTask;
