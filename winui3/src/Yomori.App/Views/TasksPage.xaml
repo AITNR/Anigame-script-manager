@@ -148,8 +148,11 @@
                               SelectionMode="Single"
                               SelectionChanged="OnSelectionChanged"
                               AllowDrop="True"
-                              DragOver="OnTaskListDragOver"
-                              Drop="OnTaskListDrop">
+                              CanDragItems="True"
+                              CanReorderItems="True"
+                              ReorderMode="Enabled"
+                              DragItemsStarting="OnTaskItemsDragStarting"
+                              DragItemsCompleted="OnTaskItemsDragCompleted">
                         <ListView.ItemTemplate>
                             <DataTemplate x:DataType="models:TaskConfig">
                                 <Grid Padding="8,6" ColumnSpacing="8">
@@ -161,14 +164,16 @@
                                     </Grid.ColumnDefinitions>
 
                                     <!-- 拖动抓手：按住它拖可以调整**这条通道内**的顺序。
-                                         ⚠️ 只给抓手 CanDrag，不给整个 ListView 开 CanDragItems ——
-                                         否则鼠标在右侧开关上按住稍微一挪就会被当成拖拽，把开关拨不动。
+                                         真正的拖动/落点由 ListView 内置重排负责（CanReorderItems +
+                                         ReorderMode），这个 Border 只干两件事：画出抓手、
+                                         用 Tag="TaskGrip" 让 DragItemsStarting 认出「这次是从抓手起拖的」
+                                         （不是的会被 cancel，否则在右侧开关上按住一挪就拖行）。
+                                         ⚠️ 别再给这里挂 CanDrag 自己做 DragStarting/Drop ——
+                                         实测拖不动：指针被 ListViewItem 的按下/选择逻辑接走了。
                                          码位 U+E76F（两条横线）已渲染核对；E700 是汉堡菜单、
                                          E784 是两条竖线（像暂停）、E9E9 是滑杆（像调参），别混用。 -->
                                     <Border Grid.Column="0"
-                                            CanDrag="True"
-                                            DragStarting="OnTaskGripDragStarting"
-                                            DropCompleted="OnTaskGripDropCompleted"
+                                            Tag="TaskGrip"
                                             Background="Transparent"
                                             Padding="2,0,4,0"
                                             VerticalAlignment="Stretch">

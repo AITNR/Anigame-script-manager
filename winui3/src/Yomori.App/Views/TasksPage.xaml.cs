@@ -7,6 +7,8 @@ using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
 using Yomori.Helpers;
 using Yomori.Models;
@@ -49,6 +51,13 @@ public sealed partial class TasksPage : Page
 
         _vmPropertyChanged = OnViewModelPropertyChanged;
         VM.PropertyChanged += _vmPropertyChanged;
+
+        // 拖动排序要判断「这次按下是不是抓手」。ListViewItem 会把 PointerPressed 标成
+        // Handled，普通订阅收不到，所以必须 handledEventsToo: true。
+        TaskList.AddHandler(
+            UIElement.PointerPressedEvent,
+            new PointerEventHandler(OnTaskListPointerPressed),
+            handledEventsToo: true);
 
         // 页面离开可视树就退订。Frame 可能缓存页面，所以 Loaded 时要重新挂上，
         // 否则从别的页返回时选中态再也不跟着 VM 走。
@@ -114,9 +123,12 @@ public sealed partial class TasksPage : Page
     /// </summary>
     private void OnScopeEnabledToggled(object sender, RoutedEventArgs e)
     {
-        if (sender is ToggleSwitch { DataContext: ChannelScope scope })
+        // ⚠️ 必须读控件自己的 IsOn，不能读 scope.Enabled —— Toggled 早于 TwoWay 绑定回写，
+        //    这时 scope.Enabled 还是**旧值**。读旧值的症状：把开关拨到"开"，配置却仍是停用，
+        //    行上还挂着「通道已停用 —— 本轮不会下发」（2026-10-24 用户实测就是这个）。
+        if (sender is ToggleSwitch toggle && toggle.DataContext is ChannelScope scope)
         {
-            VM.SetScopeEnabled(scope, scope.Enabled);
+            VM.SetScopeEnabled(scope, toggle.IsOn);
         }
     }
 
@@ -135,95 +147,67 @@ public sealed partial class TasksPage : Page
 
     // ---------------- 中：拖放排序（抓手拖动） ----------------
 
-    /// <summary>正在拖的那条任务：DragStarting 记下，Drop 时用它定位。</summary>
-    private TaskConfig? _draggingTask;
+    /// <summary>
+    /// 这次按住的是不是抓手。ListView 的拖放是**整行都能起拖**的（<c>CanDragItems</c>），
+    /// 所以要在 <c>DragItemsStarting</c> 里把「不是从抓手按下的」那些取消掉，
+    /// 否则在右侧开关上按住稍微一挪就开始拖动行，开关拨不动。
+    /// </summary>
+    private bool _dragFromGrip;
 
     /// <summary>
-    /// 抓手开始拖：只记下任务、声明这是"移动"。
+    /// 记录按下的位置是不是抓手。
     ///
-    /// <c>Data.SetText</c> 不能省 —— Data 空着的拖放会被某些场合直接判定为无效而取消。
-    /// 顺手关掉默认那个「+」角标：它是"复制"的暗示，这里语义是移动。
+    /// ① 用 <c>AddHandler(..., handledEventsToo: true)</c>：ListViewItem 会把 PointerPressed
+    ///    标成 Handled，普通订阅收不到；
+    /// ② 只在这里判源、不另挂抓手的 PointerPressed：冒泡顺序是「源元素 → 祖先」，
+    ///    两处都挂反而要靠顺序猜，容易写成"先置真再被清零"。
     /// </summary>
-    private void OnTaskGripDragStarting(UIElement sender, DragStartingEventArgs args)
+    private void OnTaskListPointerPressed(object sender, PointerRoutedEventArgs e)
     {
-        if (sender is not FrameworkElement { DataContext: TaskConfig task })
+        var node = e.OriginalSource as DependencyObject;
+        var fromGrip = false;
+
+        while (node is not null && !ReferenceEquals(node, TaskList))
+        {
+            if (node is FrameworkElement { Tag: "TaskGrip" })
+            {
+                fromGrip = true;
+                break;
+            }
+
+            node = VisualTreeHelper.GetParent(node);
+        }
+
+        _dragFromGrip = fromGrip;
+    }
+
+    /// <summary>
+    /// 只有从抓手起拖才放行。
+    ///
+    /// 为什么最后用了 ListView **内置**的拖放重排（<c>CanReorderItems</c> + <c>ReorderMode</c>）：
+    /// 一开始是给抓手挂 <c>CanDrag="True"</c> 自己做 DragStarting/DragOver/Drop，实测**拖不动** ——
+    /// 指针被 ListViewItem 的按下/选择逻辑接走，子元素的拖拽手势根本不启动。
+    /// 内置重排是平台自己实现的那一套，还能白拿一条插入位置指示线。
+    /// </summary>
+    private void OnTaskItemsDragStarting(object sender, DragItemsStartingEventArgs args)
+    {
+        if (!_dragFromGrip)
         {
             args.Cancel = true;
             return;
         }
 
-        _draggingTask = task;
+        _dragFromGrip = false;
         args.Data.RequestedOperation = DataPackageOperation.Move;
-        args.Data.SetText(task.DisplayName);
-    }
-
-    private void OnTaskListDragOver(object sender, DragEventArgs e)
-    {
-        if (_draggingTask is null)
-        {
-            return;
-        }
-
-        e.AcceptedOperation = DataPackageOperation.Move;
-
-        // 默认拖影右上角那个「+」角标是"复制"的暗示，这里是移动。
-        // （DragUIOverride 只挂在 DragEventArgs 上，DragStartingEventArgs 没有这个属性）
-        e.DragUIOverride.IsGlyphVisible = false;
+        args.Data.SetText("reorder");
     }
 
     /// <summary>
-    /// 拖拽结束（含中途按 Esc 取消、放在无效位置）：清掉"正在拖"的标记。
-    /// 不清的话下一次从资源管理器拖文件进来会被误判成本页的排序拖拽。
+    /// 拖完把「界面上此刻的次序」翻译成 order。
+    /// 内置重排已经改过 <c>VM.ScopeTasks</c>（ItemsSource 就是它），这里只做落账与序号重编。
     /// </summary>
-    private void OnTaskGripDropCompleted(UIElement sender, DropCompletedEventArgs args) => _draggingTask = null;
-
-    private void OnTaskListDrop(object sender, DragEventArgs e)
-    {
-        var task = _draggingTask;
-        _draggingTask = null;
-
-        if (task is null)
-        {
-            return;
-        }
-
-        e.AcceptedOperation = DataPackageOperation.Move;
-        e.Handled = true;
-
-        VM.MoveTaskInScopeTo(task, ResolveDropIndex(task, e.GetPosition(TaskList).Y));
-    }
-
-    /// <summary>
-    /// 指针落在第几项：逐项比较容器在 <see cref="TaskList"/> 里的上边界，
-    /// 第一个「指针压在它的上半区」的项就是插入点；都没命中说明在末尾。
-    ///
-    /// 插入点在**抽走被拖项之后**要减一 —— 否则往后拖永远差一位
-    /// （A B C D 里把 A 拖到 C 上半区，期望 B A C D，而不是 B C A D）。
-    /// </summary>
-    private int ResolveDropIndex(TaskConfig task, double y)
-    {
-        var from = VM.ScopeTasks.IndexOf(task);
-        var insertBefore = TaskList.Items.Count;
-
-        for (var i = 0; i < TaskList.Items.Count; i++)
-        {
-            if (TaskList.ContainerFromIndex(i) is not FrameworkElement container)
-            {
-                continue;
-            }
-
-            var top = container.TransformToVisual(TaskList)
-                .TransformPoint(new Windows.Foundation.Point(0, 0)).Y;
-
-            if (y < top + container.ActualHeight / 2)
-            {
-                insertBefore = i;
-                break;
-            }
-        }
-
-        return from >= 0 && insertBefore > from ? insertBefore - 1 : insertBefore;
-    }
+    private void OnTaskItemsDragCompleted(ListViewBase sender, DragItemsCompletedEventArgs args)
+        => VM.ApplyScopeOrderFromView();
 
     private void OnSelectionChanged(object sender, SelectionChangedEventArgs e)
     {

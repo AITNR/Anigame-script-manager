@@ -355,35 +355,14 @@ public sealed class MainViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 拖放调整通道内的顺序（按住任务前面的抓手拖）。
-    /// <paramref name="targetIndex"/> 是**落点在通道内的最终位置**（0 基）。
+    /// 抓手拖放结束后落账：把 <see cref="ScopeTasks"/> **此刻的次序**翻译成 order。
     ///
-    /// 为什么用 <c>ObservableCollection.Move</c> 而不是 <c>RefreshScopeTasks()</c>：
-    /// 拖放手势还没走完就把集合整体替换，正是「集合整体替换 × 绑定源失效」那一类崩法；
-    /// 而 Move 恰好是 ListView 能无缝接收的变更 —— 行原地挪位，选中态也跟着对象走。
+    /// 拖动与落点都由 ListView 内置重排处理，它把移动直接写回了 ItemsSource（就是这个集合），
+    /// 所以这里不需要再算「从第几项到第几项」，只按当前顺序重排本组的 order 值 + 重编显示序号。
+    /// 重复调用是幂等的（次序没变时算出来还是同一批值）。
     /// </summary>
-    public void MoveTaskInScopeTo(TaskConfig? task, int targetIndex)
+    public void ApplyScopeOrderFromView()
     {
-        if (task is null)
-        {
-            return;
-        }
-
-        var from = ScopeTasks.IndexOf(task);
-        if (from < 0)
-        {
-            return;
-        }
-
-        var to = Math.Clamp(targetIndex, 0, ScopeTasks.Count - 1);
-        if (to == from)
-        {
-            return;
-        }
-
-        ScopeTasks.Move(from, to);
-
-        // 只重排本组的 order 值（多重集合不变），再刷新界面上显示的序号
         TaskScopePlanner.ApplyScopeSequence(ScopeTasks);
         TaskScopePlanner.RenumberScope(ScopeTasks);
     }
