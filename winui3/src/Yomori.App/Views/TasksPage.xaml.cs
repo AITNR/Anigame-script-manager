@@ -9,6 +9,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
 using Yomori.Helpers;
 using Yomori.Models;
 using Yomori.Services;
@@ -166,8 +167,14 @@ public sealed partial class TasksPage : Page
     private int _dropTarget = -1;
     private int _shiftedTarget = -1;
 
-    /// <summary>被「让位」视觉推开的那几行（拖动结束要还原）。</summary>
-    private readonly List<FrameworkElement> _shiftedRows = new();
+    /// <summary>被「让位」视觉推开的行 → 它身上的位移变换（拖动结束要整批还原）。</summary>
+    private readonly Dictionary<FrameworkElement, TranslateTransform> _rowTransforms = new();
+
+    /// <summary>
+    /// 正在播的位移动画。Storyboard 必须自己保活：只写局部变量的话可能播到一半被回收，
+    /// 表现就是"偶尔动一下、偶尔瞬移"。
+    /// </summary>
+    private readonly List<Storyboard> _activeAnimations = new();
 
     /// <summary>
     /// 抓手按下：抢在 ListViewItem 前面捕获指针。
@@ -376,9 +383,10 @@ public sealed partial class TasksPage : Page
     }
 
     /// <summary>
-    /// 让位：被拖行原位置与落点之间的其它行，整体上移/下移一个行高。
-    /// **只加 RenderTransform，不动布局、不动集合** —— 这是拖动期间唯一安全的"位移"方式。
-    /// 目标没变就直接跳过，避免每帧重建变换对象。
+    /// 让位：被拖行原位置与落点之间的其它行整体上移/下移一个行高，**带补间**。
+    ///
+    /// 只加 `RenderTransform`，布局与集合都不动 —— 这是拖动期间唯一既安全又能出效果的做法。
+    /// 目标值没变的行直接跳过，避免每次指针移动都重建动画。
     /// </summary>
     private void ShiftRows(int from, int to)
     {
@@ -387,38 +395,97 @@ public sealed partial class TasksPage : Page
             return;
         }
 
-        ClearShiftedRows();
         _shiftedTarget = to;
-
-        if (to == from || _rowHeight <= 0)
-        {
-            return;
-        }
 
         var up = to > from;
         var low = Math.Min(from, to);
         var high = Math.Max(from, to);
 
-        for (var i = low; i <= high; i++)
+        for (var i = 0; i < _rowTops.Length; i++)
         {
             if (i == from || TaskList.ContainerFromIndex(i) is not FrameworkElement row)
             {
                 continue;
             }
 
-            row.RenderTransform = new TranslateTransform { Y = up ? -_rowHeight : _rowHeight };
-            _shiftedRows.Add(row);
+            // 落在区间内的行让开一个行高，其余（包括退出区间的）回原位
+            var target = to != from && i >= low && i <= high ? (up ? -_rowHeight : _rowHeight) : 0.0;
+            MoveRowTo(row, target);
         }
     }
 
-    private void ClearShiftedRows()
+    /// <summary>把某一行推到 <paramref name="target"/>（0 = 原位），带补间。</summary>
+    private void MoveRowTo(FrameworkElement row, double target)
     {
-        foreach (var row in _shiftedRows)
+        if (!_rowTransforms.TryGetValue(row, out var transform))
         {
-            row.RenderTransform = null;
+            if (Math.Abs(target) < 0.5)
+            {
+                return;   // 本来就在原位，不用白建一个变换
+            }
+
+            transform = new TranslateTransform();
+            row.RenderTransform = transform;
+            _rowTransforms[row] = transform;
         }
 
-        _shiftedRows.Clear();
+        AnimateShift(transform, target);
+    }
+
+    /// <summary>
+    /// `TranslateTransform.Y` 的补间。
+    ///
+    /// 它是**独立动画**（不触发布局），所以不加 `EnableDependentAnimation` 也能跑；
+    /// 只给 `To`，起始值就是当前值，连续改变落点时能顺滑接力。
+    /// </summary>
+    private void AnimateShift(TranslateTransform transform, double target)
+    {
+        if (Math.Abs(transform.Y - target) < 0.5)
+        {
+            return;
+        }
+
+        var animation = new DoubleAnimation
+        {
+            To = target,
+            Duration = new Duration(TimeSpan.FromMilliseconds(120)),
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+        };
+
+        Storyboard.SetTarget(animation, transform);
+        Storyboard.SetTargetProperty(animation, "Y");
+
+        var board = new Storyboard();
+        board.Children.Add(animation);
+        board.Completed += (_, _) =>
+        {
+            _activeAnimations.Remove(board);
+
+            // 播完显式落值：HoldEnd 会让动画值长期压住属性，之后谁再改都不生效
+            transform.Y = target;
+        };
+
+        _activeAnimations.Add(board);
+        board.Begin();
+    }
+
+    /// <summary>整批还原：停掉动画、把位移归零、摘掉变换。</summary>
+    private void ClearRowTransforms()
+    {
+        foreach (var board in _activeAnimations.ToList())
+        {
+            board.Stop();
+        }
+
+        _activeAnimations.Clear();
+
+        foreach (var pair in _rowTransforms)
+        {
+            pair.Value.Y = 0;
+            pair.Key.RenderTransform = null;
+        }
+
+        _rowTransforms.Clear();
         _shiftedTarget = -1;
     }
 
@@ -432,7 +499,7 @@ public sealed partial class TasksPage : Page
             Canvas.SetZIndex(_dragContainer, 0);
         }
 
-        ClearShiftedRows();
+        ClearRowTransforms();
 
         // 先清状态再放捕获：ReleasePointerCapture 会同步抛 PointerCaptureLost，
         // 那时若 _dragTask 还在，就会又走一遍 EndDrag。

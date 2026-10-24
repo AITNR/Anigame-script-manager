@@ -248,7 +248,8 @@ public int ScopeOrder { get; set; }   // 通道内显示序号，由 RefreshScop
 「上移 / 下移」一次只能挪一位，排五六条任务时要点很多下。
 
 **做法**：任务行在序号前加抓手（`FontIcon` U+E76F，两条横线），**指针全由页面自己接管**。
-拖动时被拖那行追着指针走、其余行上下让位、一条提示线标出落点 ——
+拖动时被拖那行追着指针走（跟手，不补间）、其余行上下让位（120ms `CubicEase/EaseOut` 补间）、
+一条提示线标出落点 ——
 **三件事全是 `TranslateTransform` / 提示线，集合一个字节都不动**；松手那一刻才 `Move` 一次。
 
 | 位置 | 改动 |
@@ -275,15 +276,19 @@ public int ScopeOrder { get; set; }   // 通道内显示序号，由 RefreshScop
    行容器上（它们会被回收重建）。
 2. **拖动过程中绝不改集合** —— `Move` 会让 ListView 回收重建行容器，位移与捕获一起失效，
    症状就是「拖过一行就断开、直接跳到新位置」。排序只在 `PointerReleased` 做一次。
-3. **「让位」只能用 `RenderTransform`** —— 给中间那几行加 `TranslateTransform ±行高`，
-   布局与集合都不动。这是拖动期间唯一既安全又能出效果的做法。
+3. **「让位」只能用 `RenderTransform`，且要补间** —— 给中间那几行加 `TranslateTransform ±行高`，
+   布局与集合都不动。直接赋值会瞬移，观感很硬；用 `DoubleAnimation` 动 `TranslateTransform.Y`
+   是**独立动画**（不触发布局，不需要 `EnableDependentAnimation`），120ms + `CubicEase/EaseOut`
+   差不多是 Windows 列表重排的手感。**只给 `To` 不给 `From`**：起始值就是当前值，落点连续变化时能顺滑接力。
+   ⚠️ `Storyboard` 必须自己保活（存进 List，`Completed` 里再摘），只写局部变量可能在播到一半被回收。
 4. **行位置在起拖时缓存一次**（`_rowTops` / `_rowHeight` / `_dragSlotTop`）—— 拖动中布局不变，
    之后落点计算全是纯算术。别边拖边量：`TransformToVisual` 会把元素自身的 RenderTransform
    算进去，量出来的是「已经位移过的位置」，而且和"其他行也被推开了"叠在一起，越算越乱。
 5. **插入点要判断方向** —— 「插到第 i 行之前」在抽走被拖项后要减一，否则往后拖永远差一位
    （A B C D 把 A 拖到 C 上半区，期望 B A C D 而不是 B C A D）；落点与原地相同时不画线。
 6. **`EndDrag` 先清状态再 `ReleasePointerCapture`** —— 后者会同步抛 `PointerCaptureLost`，
-   状态没清就会再跑一遍 `EndDrag`。让位那几行的变换也要在这里还原。
+   状态没清就会再跑一遍 `EndDrag`。让位那几行的变换也要在这里还原（先 `Stop()` 动画，
+   再把 `Y` 显式落 0 —— `HoldEnd` 会让动画值长期压住属性，不显式落值之后改不动）。
 
 已知副作用：点抓手不再顺带选中这一行（按下被 Handled 掉了）。抓手只有二十来像素宽，
 点行内文字照常选中，可以接受。
