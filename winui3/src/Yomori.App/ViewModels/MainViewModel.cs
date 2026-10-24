@@ -355,6 +355,40 @@ public sealed class MainViewModel : ObservableObject
     }
 
     /// <summary>
+    /// 拖放调整通道内的顺序（按住任务前面的抓手拖）。
+    /// <paramref name="targetIndex"/> 是**落点在通道内的最终位置**（0 基）。
+    ///
+    /// 为什么用 <c>ObservableCollection.Move</c> 而不是 <c>RefreshScopeTasks()</c>：
+    /// 拖放手势还没走完就把集合整体替换，正是「集合整体替换 × 绑定源失效」那一类崩法；
+    /// 而 Move 恰好是 ListView 能无缝接收的变更 —— 行原地挪位，选中态也跟着对象走。
+    /// </summary>
+    public void MoveTaskInScopeTo(TaskConfig? task, int targetIndex)
+    {
+        if (task is null)
+        {
+            return;
+        }
+
+        var from = ScopeTasks.IndexOf(task);
+        if (from < 0)
+        {
+            return;
+        }
+
+        var to = Math.Clamp(targetIndex, 0, ScopeTasks.Count - 1);
+        if (to == from)
+        {
+            return;
+        }
+
+        ScopeTasks.Move(from, to);
+
+        // 只重排本组的 order 值（多重集合不变），再刷新界面上显示的序号
+        TaskScopePlanner.ApplyScopeSequence(ScopeTasks);
+        TaskScopePlanner.RenumberScope(ScopeTasks);
+    }
+
+    /// <summary>
     /// 把选中任务改派到另一条执行通道（含「本地执行」），落到目标通道末尾。
     /// 改完自动切到目标通道 —— 否则任务会从当前列表里凭空消失，看着像被删了。
     /// </summary>
@@ -1998,6 +2032,64 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(ScopeOwnerText));
         OnPropertyChanged(nameof(CanAddTaskToScope));
         RefreshScopeTasks();
+    }
+
+    /// <summary>防止「改 <c>scope.Enabled</c> → 触发 Toggled → 又回到这里」的自激。</summary>
+    private bool _syncingScopeToggle;
+
+    /// <summary>
+    /// 任务执行页左侧每条通道行上的开关：确认这一条通道本轮要不要执行。
+    ///
+    /// 写的是通道自己的 <c>enabled</c>（和「通道管理」页里那个「启用该通道」是**同一份配置**，
+    /// 所以两处开关永远同步）。执行规划 <see cref="RdpChannelPlanner.Plan"/> 本来就会跳过
+    /// 停用通道，因此执行链路一行都不用改。
+    ///
+    /// ⚠️ 刻意**不调** <see cref="RefreshChannelScopes"/>：那会整体重建 <c>ChannelScopes</c>，
+    /// 而这里正处在 ToggleSwitch 的 <c>Toggled</c> 里 —— 控件还绑着刚被换掉的旧对象，
+    /// 正是本项目反复出现的「集合整体替换 × 绑定源失效」崩法。改成就地刷这一行。
+    /// </summary>
+    public void SetScopeEnabled(ChannelScope? scope, bool enabled)
+    {
+        if (_syncingScopeToggle || scope is null || !scope.CanToggle)
+        {
+            return;
+        }
+
+        _syncingScopeToggle = true;
+        try
+        {
+            var channel = Config.Rdp.Channels.FirstOrDefault(
+                c => string.Equals(c.Id, scope.Id, StringComparison.OrdinalIgnoreCase));
+
+            if (channel is null)
+            {
+                // 通道已在别处被删：把开关退回「不是用户刚拨的那个值」，别留一个假状态
+                scope.Enabled = !enabled;
+                return;
+            }
+
+            // 列表项实体化时 x:Bind 会先填一次 IsOn，也会走到这里；值没变就空转，别落盘
+            if (channel.Enabled == enabled)
+            {
+                return;
+            }
+
+            channel.Enabled = enabled;
+            SaveConfig();
+
+            // 就地刷新（顺序无妨，都是各自通知各自的绑定）
+            scope.Enabled = channel.Enabled;
+            scope.Subtitle = channel.ListSubtitle;
+            scope.IsUsable = TaskScopePlanner.IsScopeUsable(channel, RdpSettings.Enabled);
+            scope.HintText = TaskScopePlanner.HintFor(channel, RdpSettings.Enabled);
+
+            AppendLog($"[会话通道] 通道「{channel.DisplayName}」已{(enabled ? "启用" : "停用")}"
+                      + "，改动在下一次「开始执行」生效。");
+        }
+        finally
+        {
+            _syncingScopeToggle = false;
+        }
     }
 
     /// <summary>按当前通道重算任务视图 + 通道内序号，并刷新各通道的任务数。</summary>

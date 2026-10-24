@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- 任务执行页：**按执行通道编排任务**（计划书 docs/tasks-by-channel-plan.md）。
 
-     左：执行通道（本地执行 + 各会话通道 + 未知通道）；
-     中：这条通道下的任务（序号 = 通道内次序，上移/下移只在本通道内生效）；
+     左：执行通道（本地执行 + 各会话通道 + 未知通道），每行右侧一个开关＝这条通道本轮要不要执行；
+     中：这条通道下的任务（序号 = 通道内次序；上移/下移与抓手拖放都只在本通道内生效）；
      右：任务详情。
 
      注意「通道」只是**组织方式**：任务仍然只有 config.tasks 一份扁平表，靠 channel_id 归属，
@@ -19,7 +19,7 @@
          「移到通道…」的菜单在代码里 new 出来，见 TasksPage.xaml.cs。 -->
     <Grid Padding="16,12" ColumnSpacing="12">
         <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="240" />
+            <ColumnDefinition Width="264" />
             <ColumnDefinition Width="300" />
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
@@ -48,36 +48,64 @@
                           SelectionChanged="OnScopeSelectionChanged">
                     <ListView.ItemTemplate>
                         <DataTemplate x:DataType="models:ChannelScope">
-                            <Grid Padding="8,6" RowSpacing="2" ColumnSpacing="8"
-                                  Opacity="{x:Bind RowOpacity, Mode=OneWay}">
-                                <Grid.RowDefinitions>
-                                    <RowDefinition Height="Auto" />
-                                    <RowDefinition Height="Auto" />
-                                    <RowDefinition Height="Auto" />
-                                </Grid.RowDefinitions>
+                            <Grid Padding="8,6" ColumnSpacing="6">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
 
-                                <TextBlock Grid.Row="0" Grid.Column="0"
-                                           Text="{x:Bind Name, Mode=OneWay}"
-                                           TextTrimming="CharacterEllipsis" />
-                                <TextBlock Grid.Row="0" Grid.Column="1"
-                                           Text="{x:Bind CountText, Mode=OneWay}"
-                                           FontSize="11" Opacity="0.6"
-                                           VerticalAlignment="Center" />
+                                <!-- 文字部分整体跟着「可用 / 不可用」变淡；开关不跟着淡，
+                                     否则关掉之后它自己看着像被禁用了。 -->
+                                <Grid Grid.Column="0" RowSpacing="2" ColumnSpacing="8"
+                                      Opacity="{x:Bind RowOpacity, Mode=OneWay}">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
 
-                                <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2"
-                                           Text="{x:Bind Subtitle, Mode=OneWay}"
-                                           FontSize="11" Opacity="0.55" TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Row="0" Grid.Column="0"
+                                               Text="{x:Bind Name, Mode=OneWay}"
+                                               TextTrimming="CharacterEllipsis" />
+                                    <TextBlock Grid.Row="0" Grid.Column="1"
+                                               Text="{x:Bind CountText, Mode=OneWay}"
+                                               FontSize="11" Opacity="0.6"
+                                               VerticalAlignment="Center" />
 
-                                <!-- 不可用原因（停用 / 未配账户 / 总开关关闭 / 未知通道）。
-                                     空串时文本块高度为 0，不需要额外的 Visibility 转换。 -->
-                                <TextBlock Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2"
-                                           Text="{x:Bind HintText, Mode=OneWay}"
-                                           FontSize="11" TextWrapping="Wrap"
-                                           Foreground="{ThemeResource SystemFillColorCautionBrush}" />
+                                    <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2"
+                                               Text="{x:Bind Subtitle, Mode=OneWay}"
+                                               FontSize="11" Opacity="0.55" TextTrimming="CharacterEllipsis" />
+
+                                    <!-- 不可用原因（停用 / 未配账户 / 总开关关闭 / 未知通道）。
+                                         空串时文本块高度为 0，不需要额外的 Visibility 转换。 -->
+                                    <TextBlock Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2"
+                                               Text="{x:Bind HintText, Mode=OneWay}"
+                                               FontSize="11" TextWrapping="Wrap"
+                                               Foreground="{ThemeResource SystemFillColorCautionBrush}" />
+                                </Grid>
+
+                                <!-- 通道级开关：这条通道本轮要不要执行。
+                                     本地执行（恒执行）与「未知通道」（配置已不存在）没有开关可拨 ——
+                                     用 x:Load 让它们连控件都不生成，省下那一列的宽度。
+                                     ⚠️ 别改成绑 Visibility 属性：ChannelScope 在 Models 里，
+                                     而冒烟工程是把 Models 的 .cs 直接链进纯 .NET 工程编译的，
+                                     引 Microsoft.UI.Xaml 会连编都编不过。 -->
+                                <ToggleSwitch Grid.Column="1"
+                                              x:Name="ScopeEnabledToggle"
+                                              x:Load="{x:Bind CanToggle, Mode=OneWay}"
+                                              IsOn="{x:Bind Enabled, Mode=TwoWay}"
+                                              OnContent="" OffContent=""
+                                              MinWidth="0"
+                                              VerticalAlignment="Center"
+                                              Toggled="OnScopeEnabledToggled">
+                                    <ToolTipService.ToolTip>
+                                        <ToolTip Content="这条通道本轮要不要执行：关掉后它的任务不会下发。改动即时保存，下一次「开始执行」生效；与「通道管理」页里的「启用该通道」是同一个开关。" />
+                                    </ToolTipService.ToolTip>
+                                </ToggleSwitch>
                             </Grid>
                         </DataTemplate>
                     </ListView.ItemTemplate>
@@ -118,29 +146,51 @@
                     <ListView x:Name="TaskList"
                               ItemsSource="{x:Bind VM.ScopeTasks, Mode=OneWay}"
                               SelectionMode="Single"
-                              SelectionChanged="OnSelectionChanged">
+                              SelectionChanged="OnSelectionChanged"
+                              AllowDrop="True"
+                              DragOver="OnTaskListDragOver"
+                              Drop="OnTaskListDrop">
                         <ListView.ItemTemplate>
                             <DataTemplate x:DataType="models:TaskConfig">
                                 <Grid Padding="8,6" ColumnSpacing="8">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
 
-                                    <TextBlock Grid.Column="0"
+                                    <!-- 拖动抓手：按住它拖可以调整**这条通道内**的顺序。
+                                         ⚠️ 只给抓手 CanDrag，不给整个 ListView 开 CanDragItems ——
+                                         否则鼠标在右侧开关上按住稍微一挪就会被当成拖拽，把开关拨不动。
+                                         码位 U+E76F（两条横线）已渲染核对；E700 是汉堡菜单、
+                                         E784 是两条竖线（像暂停）、E9E9 是滑杆（像调参），别混用。 -->
+                                    <Border Grid.Column="0"
+                                            CanDrag="True"
+                                            DragStarting="OnTaskGripDragStarting"
+                                            DropCompleted="OnTaskGripDropCompleted"
+                                            Background="Transparent"
+                                            Padding="2,0,4,0"
+                                            VerticalAlignment="Stretch">
+                                        <FontIcon Glyph="&#xE76F;" FontSize="14" Opacity="0.45" />
+                                        <ToolTipService.ToolTip>
+                                            <ToolTip Content="按住拖动，调整这条通道内的执行顺序（只影响本通道）。" />
+                                        </ToolTipService.ToolTip>
+                                    </Border>
+
+                                    <TextBlock Grid.Column="1"
                                                Text="{x:Bind ScopeOrderText, Mode=OneWay}"
                                                Opacity="0.55"
                                                VerticalAlignment="Center"
                                                FontSize="12" />
 
-                                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                    <StackPanel Grid.Column="2" VerticalAlignment="Center">
                                         <TextBlock Text="{x:Bind DisplayName, Mode=OneWay}" TextTrimming="CharacterEllipsis" />
                                         <TextBlock Text="{x:Bind ScriptPath, Mode=OneWay}"
                                                    FontSize="11" Opacity="0.55" TextTrimming="CharacterEllipsis" />
                                     </StackPanel>
 
-                                    <ToggleSwitch Grid.Column="2"
+                                    <ToggleSwitch Grid.Column="3"
                                                   IsOn="{x:Bind Enabled, Mode=TwoWay}"
                                                   OnContent="" OffContent=""
                                                   MinWidth="0" />

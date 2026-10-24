@@ -14,29 +14,82 @@ namespace Yomori.Models;
 ///                                  不然那些任务会变成"看不见、但执行时被静默跳过"的死角。
 ///
 /// 只做展示与计数，**不是数据源**：真正的任务仍然只有 <c>MainViewModel.Tasks</c> 一份。
+///
+/// ⚠️ 本类不能引 <c>Microsoft.UI.Xaml</c> 的类型（哪怕是 <c>Visibility</c>）：
+/// 冒烟工程 <c>_smoke</c> 是把这些 .cs 直接 <c>Compile Include</c> 进一个纯 .NET
+/// 工程编译的，一旦引了界面类型就编不过。界面侧要用 x:Load / 静态函数绑定绕开。
 /// </summary>
 public sealed class ChannelScope : ObservableObject
 {
     private int _taskCount;
+    private bool _enabled = true;
+    private bool _isUsable = true;
+    private string _hintText = string.Empty;
+    private string _subtitle = string.Empty;
 
     /// <summary>空串表示本地执行（与 <see cref="TaskConfig.ChannelId"/> 同一套语义）。</summary>
     public string Id { get; init; } = string.Empty;
 
     public string Name { get; init; } = string.Empty;
 
-    /// <summary>名称下面那行小字：目标主机 / 账户 / 凭据 / 停用。</summary>
-    public string Subtitle { get; init; } = string.Empty;
+    /// <summary>
+    /// 名称下面那行小字：目标主机 / 账户 / 凭据 / 停用。
+    /// 可写是为了**就地**跟着开关变化（停用后要补上「· 已停用」），
+    /// 不必为此重建整个 <c>ChannelScopes</c> 集合。
+    /// </summary>
+    public string Subtitle
+    {
+        get => _subtitle;
+        set => SetProperty(ref _subtitle, value);
+    }
 
     public bool IsLocal { get; init; }
 
     /// <summary>指向已删除的通道。</summary>
     public bool IsMissing { get; init; }
 
+    /// <summary>
+    /// 这一行的开关状态 —— **镜像 <see cref="RdpChannel.Enabled"/>，不是第二份数据源**。
+    /// 界面上的改动由 <c>MainViewModel.SetScopeEnabled</c> 写回通道配置并落盘；
+    /// 本地执行 / 未知通道没有开关，这个值对它们没有意义。
+    /// </summary>
+    public bool Enabled
+    {
+        get => _enabled;
+        set => SetProperty(ref _enabled, value);
+    }
+
+    /// <summary>
+    /// 这一行能不能切开关：本地执行恒执行（不跑远程也要跑本机）、
+    /// 未知通道的配置已经不存在（开关写不回去），都不给开关。
+    /// </summary>
+    public bool CanToggle => !IsLocal && !IsMissing;
+
     /// <summary>能不能往里排任务（通道停用 / 未配账户 / RDP 总开关关掉都为 false）。</summary>
-    public bool IsUsable { get; init; } = true;
+    public bool IsUsable
+    {
+        get => _isUsable;
+        set
+        {
+            if (SetProperty(ref _isUsable, value))
+            {
+                OnPropertyChanged(nameof(RowOpacity));
+            }
+        }
+    }
 
     /// <summary>不可用原因（停用 / 未配账户 / 总开关关闭 / 未知通道），可用时为空串。</summary>
-    public string HintText { get; init; } = string.Empty;
+    public string HintText
+    {
+        get => _hintText;
+        set
+        {
+            if (SetProperty(ref _hintText, value))
+            {
+                OnPropertyChanged(nameof(ShowHint));
+            }
+        }
+    }
 
     public int TaskCount
     {

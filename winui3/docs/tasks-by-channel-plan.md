@@ -125,12 +125,12 @@ public int ScopeOrder { get; set; }   // 通道内显示序号，由 RefreshScop
 └───────────────┴──────────────────┴────────────────────────────┘
 ```
 
-- **左栏**：`ListView` 绑 `VM.ChannelScopes`；每项显示名称 + 副标题 + 任务数；不可用的通道（停用 / 未配账户 / RDP 关闭 / 孤儿）用 `Opacity` + 一行小字标出原因。底部「通道管理」跳 `ChannelsPage`。
-- **中栏**：绑 `VM.ScopeTasks`；序号列绑 `ScopeOrder`；四项操作按钮只作用于当前通道。
+- **左栏**：`ListView` 绑 `VM.ChannelScopes`；每项显示名称 + 副标题 + 任务数；不可用的通道（停用 / 未配账户 / RDP 关闭 / 孤儿）用 `Opacity` + 一行小字标出原因。**每行右侧一个开关＝这条通道本轮要不要执行**（见 §9；本地执行与孤儿组没有开关）。底部「通道管理」跳 `ChannelsPage`。
+- **中栏**：绑 `VM.ScopeTasks`；序号列绑 `ScopeOrder`；四项操作按钮只作用于当前通道；序号前有抓手，可按住拖动调整本通道内顺序（见 §10）。
 - **右栏**：沿用现有表单（`FormHost`），**删掉 `ChannelBox` 下拉**，改为一行只读「所属：X」+ 一个「移到通道…」按钮（D4）。
 - **空态**：当前通道没任务 / 一个通道都没有，各自的 `InfoBar` 提示（本地执行永远存在，所以"没有任何通道"不阻塞使用）。
 
-宽度兜底：窗口最小 960×640 时 `240 + 300 + 间距/padding ≈ 576`，表单区余 ~380px，够用；表单区整体已在 `ScrollViewer` 内。
+宽度兜底：窗口最小 960×640 时 `264 + 300 + 间距/padding ≈ 600`，表单区余 ~360px，够用；表单区整体已在 `ScrollViewer` 内。（左栏原为 240，§9 的通道开关占了右侧一列，故加宽。）
 
 ### 3.4 删除通道的归属处理（D5）
 
@@ -207,3 +207,63 @@ public int ScopeOrder { get; set; }   // 通道内显示序号，由 RefreshScop
 | M3 | ✅ | 并发组 ToolTip 与跨通道日志、`ChannelsPage` 文案与「去任务页编排任务」跳转 |
 | M4 | ✅ | `_smoke/TaskScopeCheck.cs`（49 项断言，含**与 `RdpChannelPlanner.Plan` 分桶逐一相同**的等价性）；`Program.cs` 里两条旧的 M4 断言（下拉 / `ChannelDisplay`）已换成新形态 |
 | M5 | ✅ | `README` / `USER_GUIDE` / `CHANGELOG` 同步；剩真机走查（§6） |
+
+---
+
+## 9. 后续修订：通道行上的「本轮要不要执行」开关（2026-10-24）
+
+**起因**：AITNR 反馈「为每个通道加上单独的开关来确认是否执行该通道任务」——
+原先要停一条通道得切到「通道管理…」，还得先在那条通道的编辑卡里找到「启用该通道」，
+在"排任务"的现场看不到、也改不了。
+
+**做法**：左栏每行右侧加一个 `ToggleSwitch`，**写回通道配置里已有的 `enabled`**
+（与「通道管理」页的「启用该通道」是同一份，两处永远同步）。执行链路一行没动：
+`RdpChannelPlanner.Plan` 本来就跳过停用通道。
+
+| 位置 | 改动 |
+| --- | --- |
+| `Models/ChannelScope` | 加 `Enabled`（镜像 `RdpChannel.Enabled`）与 `CanToggle`；`Subtitle` / `IsUsable` / `HintText` 由 `init` 改为可写，供**就地刷新** |
+| `Models/TaskScopePlanner` | `BuildScopes` 填 `Enabled`；抽出 `IsScopeUsable` / `HintFor`，让"就地刷新"与"重建"共用同一套判定与文案 |
+| `MainViewModel` | 新增 `SetScopeEnabled(scope, enabled)`：改通道 `enabled` → `SaveConfig()` → 就地刷这一行 + 记日志 |
+| `Views/TasksPage.xaml` | 模板右列加开关（`x:Load="{x:Bind CanToggle}"`）；左栏 240 → 264 |
+
+**三条纪律（改这块时别踩）**：
+
+1. **不能在 `Toggled` 里调 `RefreshChannelScopes()`** —— 那会整体重建集合，而事件里控件
+   还绑着刚被换掉的旧对象，正是本项目反复出现的「集合整体替换 × 绑定源失效」崩法。
+   故 `ChannelScope` 的那几个展示属性必须保持可写，走就地刷新。
+2. **`ChannelScope` 不能引 `Microsoft.UI.Xaml`** —— 冒烟工程把这些 `.cs` 直接 `Compile Include`
+   进纯 .NET 工程编译，连 `Visibility` 都不行。所以模板里用 `x:Load`（配 `x:Name`，XAML 编译器
+   强制要求）而不是绑 `Visibility`。
+3. **本地执行与孤儿组不给开关** —— 本地执行恒执行（拨了也没处写），孤儿组的通道配置已不存在。
+
+---
+
+## 10. 后续修订：抓手拖放调整通道内顺序（2026-10-24）
+
+**起因**：AITNR 反馈「每个通道里面的任务的序号前应该加入一个托盘，可以按住拖动以改变顺序」——
+「上移 / 下移」一次只能挪一位，排五六条任务时要点很多下。
+
+**做法**：任务行在序号前加一个抓手（`FontIcon` U+E76F，两条横线），**只有抓手 `CanDrag`**；
+`TaskList` 作 `AllowDrop` 目标，`DragOver` 接受 `Move`，`Drop` 时算出落点并调
+`MainViewModel.MoveTaskInScopeTo(task, targetIndex)`。
+
+| 位置 | 改动 |
+| --- | --- |
+| `Models/TaskScopePlanner` | 新增 `ApplyScopeSequence`：只重排**本组已占用的 order 值**（取出来升序、按新次序发回），order 的多重集合不变 → 不会跟别的通道撞号，之后 `SaveConfig()` 里的 `NormalizeOrdersByChannel` 再收敛成 1..N |
+| `MainViewModel` | 新增 `MoveTaskInScopeTo(task, targetIndex)`：`ScopeTasks.Move(from, to)` → `ApplyScopeSequence` → `RenumberScope` |
+| `Views/TasksPage.xaml(.cs)` | 抓手列 + 三个拖放处理（`DragStarting` / `DragOver` / `Drop`）+ `DropCompleted` 清标记；`ResolveDropIndex` 按容器中点算插入点 |
+
+**四条纪律**：
+
+1. **不给 ListView 开 `CanDragItems`** —— 那样鼠标在右侧开关上按住稍微一挪就被当成拖拽，
+   开关直接拨不动。只给抓手 `CanDrag="True"`。
+2. **Drop 里用 `ObservableCollection.Move`，别调 `RefreshScopeTasks()`** —— 拖放手势还没走完
+   就整体替换集合是「集合整体替换 × 绑定源失效」那一类崩法；`Move` 才是 ListView 能无缝接收的变更。
+3. **插入点要判断方向** —— 「插到第 i 项之前」在抽走被拖项后要减一，否则往后拖永远差一位
+   （A B C D 把 A 拖到 C 上半区，期望 B A C D 而不是 B C A D）。
+4. **`DropCompleted` 必须清 `_draggingTask`** —— 中途按 Esc 取消时不会有 `Drop`；
+   标记不清掉的话，下一次从资源管理器拖文件进来会被误判成本页的排序拖拽。
+
+与「上移 / 下移」一致，顺序改动和其它任务字段一样**点「保存配置」才落盘**
+（任务页本来就是显式保存模型，拖一下就偷偷写盘会更让人意外）。

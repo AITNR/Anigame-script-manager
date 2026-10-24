@@ -15,7 +15,8 @@ namespace Yomori.Models;
 /// ⚠️ 与执行顺序的关系（§3.2 等价性）：<see cref="RdpChannelPlanner.Plan"/> 是
 /// 「全局 order 升序 → 稳定分桶 → 按通道配置顺序启动」。本类只做两件事：
 ///   1. 通道内上移/下移**只在同通道内**交换 order；
-///   2. 重编 order 时保持（本地 → 通道配置序 → 孤儿）的分组次序与组内相对次序。
+///   2. 拖放排序（<see cref="ApplyScopeSequence"/>）只重排该组已占用的 order 值；
+///   3. 重编 order 时保持（本地 → 通道配置序 → 孤儿）的分组次序与组内相对次序。
 /// 于是每条通道拿到的任务集合与顺序与改造前**逐一相同**，执行链路一行都不用改。
 /// </summary>
 public static class TaskScopePlanner
@@ -100,20 +101,14 @@ public static class TaskScopePlanner
                 continue;
             }
 
-            var usable = rdpEnabled && channel.Enabled && channel.IsConfigured;
-            var hint =
-                !rdpEnabled ? "总开关已关闭 —— 开始执行时这些任务会按本地跑"
-                : !channel.Enabled ? "通道已停用 —— 本轮不会下发"
-                : !channel.IsConfigured ? "通道未配置目标账户 —— 本轮不会下发"
-                : string.Empty;
-
             scopes.Add(new ChannelScope
             {
                 Id = channel.Id,
                 Name = channel.DisplayName,
                 Subtitle = channel.ListSubtitle,
-                IsUsable = usable,
-                HintText = hint,
+                Enabled = channel.Enabled,
+                IsUsable = IsScopeUsable(channel, rdpEnabled),
+                HintText = HintFor(channel, rdpEnabled),
                 TaskCount = CountForScope(list, channel.Id),
             });
         }
@@ -133,6 +128,37 @@ public static class TaskScopePlanner
         }
 
         return scopes;
+    }
+
+    /// <summary>
+    /// 通道这一行能不能用（能不能点开排任务、进不进入本轮执行）。
+    ///
+    /// 抽出来是为了让界面上的开关能**就地**刷新一行，而不必重建整个
+    /// <c>ChannelScopes</c> 集合 —— 开关是在 <c>Toggled</c> 事件里改的，
+    /// 此刻整体替换集合正好踩中本项目反复出现的「集合整体替换 × 绑定源失效」形状。
+    /// </summary>
+    public static bool IsScopeUsable(RdpChannel? channel, bool rdpEnabled) =>
+        channel is not null && rdpEnabled && channel.Enabled && channel.IsConfigured;
+
+    /// <summary>通道这一行不可用的原因（可用时为空串）。</summary>
+    public static string HintFor(RdpChannel? channel, bool rdpEnabled)
+    {
+        if (channel is null)
+        {
+            return string.Empty;
+        }
+
+        if (!rdpEnabled)
+        {
+            return "总开关已关闭 —— 开始执行时这些任务会按本地跑";
+        }
+
+        if (!channel.Enabled)
+        {
+            return "通道已停用 —— 本轮不会下发";
+        }
+
+        return channel.IsConfigured ? string.Empty : "通道未配置目标账户 —— 本轮不会下发";
     }
 
     /// <summary>写通道内显示序号（1..N，运行期属性，不落盘）。</summary>
@@ -203,6 +229,28 @@ public static class TaskScopePlanner
         (scope[index].Order, scope[target].Order) = (scope[target].Order, scope[index].Order);
         NormalizeOrdersByChannel(tasks, channelList);
         return true;
+    }
+
+    /// <summary>
+    /// 拖放排序后的收尾：把「通道内的新次序」翻译成 <see cref="TaskConfig.Order"/>。
+    ///
+    /// 做法是**只重排这一组已经占用的 order 值**（取出来升序排好，再按新次序发回去）——
+    /// order 的多重集合一点没变，所以既不会跟别的通道撞号，也不用先重编全局序号。
+    /// 之后任何一次 <see cref="NormalizeOrdersByChannel"/>（`SaveConfig()` 里就会调）
+    /// 都会把它收敛成 1..N 连续值，且保持这里定下的相对次序。
+    /// </summary>
+    public static void ApplyScopeSequence(IReadOnlyList<TaskConfig>? orderedInScope)
+    {
+        if (orderedInScope is null || orderedInScope.Count == 0)
+        {
+            return;
+        }
+
+        var slots = orderedInScope.Select(t => t.Order).OrderBy(v => v).ToList();
+        for (var i = 0; i < orderedInScope.Count; i++)
+        {
+            orderedInScope[i].Order = slots[i];
+        }
     }
 
     /// <summary>改任务归属：换到目标通道并落到它的末尾，然后统一重编 order。</summary>
