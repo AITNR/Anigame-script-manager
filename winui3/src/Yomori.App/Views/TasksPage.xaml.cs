@@ -8,8 +8,6 @@ using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
-using Microsoft.UI.Xaml.Media;
-using Windows.ApplicationModel.DataTransfer;
 using Yomori.Helpers;
 using Yomori.Models;
 using Yomori.Services;
@@ -52,12 +50,11 @@ public sealed partial class TasksPage : Page
         _vmPropertyChanged = OnViewModelPropertyChanged;
         VM.PropertyChanged += _vmPropertyChanged;
 
-        // 拖动排序要判断「这次按下是不是抓手」。ListViewItem 会把 PointerPressed 标成
-        // Handled，普通订阅收不到，所以必须 handledEventsToo: true。
-        TaskList.AddHandler(
-            UIElement.PointerPressedEvent,
-            new PointerEventHandler(OnTaskListPointerPressed),
-            handledEventsToo: true);
+        // 保险：即使抓手没抢到指针（被 ListViewItem 先捕获 / 被它标成 Handled），
+        // 移动与松开事件仍会从捕获元素冒泡到 ListView —— 在这里再收一道。
+        // 两个处理函数对「没在拖」是空转，重复触发无害（EndDrag 后 _dragTask 为 null）。
+        TaskList.AddHandler(UIElement.PointerMovedEvent, new PointerEventHandler(OnTaskGripPointerMoved), true);
+        TaskList.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler(OnTaskGripPointerReleased), true);
 
         // 页面离开可视树就退订。Frame 可能缓存页面，所以 Loaded 时要重新挂上，
         // 否则从别的页返回时选中态再也不跟着 VM 走。
@@ -145,69 +142,174 @@ public sealed partial class TasksPage : Page
 
     private void OnMoveDown(object sender, RoutedEventArgs e) => VM.MoveSelectedTaskInScope(1);
 
-    // ---------------- 中：拖放排序（抓手拖动） ----------------
+    // ---------------- 中：拖放排序（抓手拖动，自己接管指针） ----------------
+
+    /// <summary>正在拖的任务 / 抓手元素 / 指针 id / 是否越过起拖阈值 / 起始 Y / 当前落点。</summary>
+    private TaskConfig? _dragTask;
+    private FrameworkElement? _dragGrip;
+    private uint _dragPointerId;
+    private bool _dragActive;
+    private double _dragStartY;
+    private int _dropIndex;
 
     /// <summary>
-    /// 这次按住的是不是抓手。ListView 的拖放是**整行都能起拖**的（<c>CanDragItems</c>），
-    /// 所以要在 <c>DragItemsStarting</c> 里把「不是从抓手按下的」那些取消掉，
-    /// 否则在右侧开关上按住稍微一挪就开始拖动行，开关拨不动。
-    /// </summary>
-    private bool _dragFromGrip;
-
-    /// <summary>
-    /// 记录按下的位置是不是抓手。
+    /// 抓手按下：**抢在 ListViewItem 前面把指针捕获过来**。
     ///
-    /// ① 用 <c>AddHandler(..., handledEventsToo: true)</c>：ListViewItem 会把 PointerPressed
-    ///    标成 Handled，普通订阅收不到；
-    /// ② 只在这里判源、不另挂抓手的 PointerPressed：冒泡顺序是「源元素 → 祖先」，
-    ///    两处都挂反而要靠顺序猜，容易写成"先置真再被清零"。
-    /// </summary>
-    private void OnTaskListPointerPressed(object sender, PointerRoutedEventArgs e)
-    {
-        var node = e.OriginalSource as DependencyObject;
-        var fromGrip = false;
-
-        while (node is not null && !ReferenceEquals(node, TaskList))
-        {
-            if (node is FrameworkElement { Tag: "TaskGrip" })
-            {
-                fromGrip = true;
-                break;
-            }
-
-            node = VisualTreeHelper.GetParent(node);
-        }
-
-        _dragFromGrip = fromGrip;
-    }
-
-    /// <summary>
-    /// 只有从抓手起拖才放行。
+    /// 这是整套能动的关键。之前两版都栽在这里：
+    ///   ① 抓手挂 `CanDrag="True"` 自己做 DragStarting/Drop —— 指针被 ListViewItem 的
+    ///      按下/选择逻辑接走，子元素的拖拽手势根本不启动；
+    ///   ② 改用 ListView 内置重排（`CanReorderItems` + `ReorderMode`）—— 同样按不动。
+    /// 所以这里既不看 WinUI 的拖放，也不让它插手：`CapturePointer` 之后移动/松开事件都归抓手，
+    /// 再 `e.Handled = true` 挡住 ListViewItem 自己的按下处理（否则它随后又把指针抢回去）。
     ///
-    /// 为什么最后用了 ListView **内置**的拖放重排（<c>CanReorderItems</c> + <c>ReorderMode</c>）：
-    /// 一开始是给抓手挂 <c>CanDrag="True"</c> 自己做 DragStarting/DragOver/Drop，实测**拖不动** ——
-    /// 指针被 ListViewItem 的按下/选择逻辑接走，子元素的拖拽手势根本不启动。
-    /// 内置重排是平台自己实现的那一套，还能白拿一条插入位置指示线。
+    /// 代价：点抓手不再顺带选中那一行 —— 抓手只有二十来像素宽，点行内文字照常选中。
     /// </summary>
-    private void OnTaskItemsDragStarting(object sender, DragItemsStartingEventArgs args)
+    private void OnTaskGripPointerPressed(object sender, PointerRoutedEventArgs e)
     {
-        if (!_dragFromGrip)
+        if (sender is not FrameworkElement grip || grip.DataContext is not TaskConfig task)
         {
-            args.Cancel = true;
             return;
         }
 
-        _dragFromGrip = false;
-        args.Data.RequestedOperation = DataPackageOperation.Move;
-        args.Data.SetText("reorder");
+        _dragTask = task;
+        _dragGrip = grip;
+        _dragPointerId = e.Pointer.PointerId;
+        _dragStartY = e.GetCurrentPoint(TaskList).Position.Y;
+        _dropIndex = VM.ScopeTasks.IndexOf(task);
+        _dragActive = false;
+
+        grip.CapturePointer(e.Pointer);
+        e.Handled = true;
+    }
+
+    /// <summary>移动：过 4px 阈值才算拖动（否则点击会被判成拖动），然后更新落点提示线。</summary>
+    private void OnTaskGripPointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (_dragTask is null || e.Pointer.PointerId != _dragPointerId)
+        {
+            return;
+        }
+
+        var y = e.GetCurrentPoint(TaskList).Position.Y;
+
+        if (!_dragActive)
+        {
+            if (Math.Abs(y - _dragStartY) < 4)
+            {
+                return;
+            }
+
+            _dragActive = true;
+            SetRowOpacity(_dragTask, 0.4);
+        }
+
+        _dropIndex = ResolveDropIndex(y);
+        UpdateDropLine(_dropIndex);
+        e.Handled = true;
+    }
+
+    private void OnTaskGripPointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (_dragTask is null || e.Pointer.PointerId != _dragPointerId)
+        {
+            return;
+        }
+
+        var task = _dragTask;
+        var moved = _dragActive;
+        var index = _dropIndex;
+
+        EndDrag(e);
+
+        if (moved)
+        {
+            VM.MoveTaskInScopeTo(task, index);
+        }
+    }
+
+    /// <summary>指针被系统抢走（滚动、窗口失焦、Esc）时收尾，别把行留在半透明状态。</summary>
+    private void OnTaskGripPointerCaptureLost(object sender, PointerRoutedEventArgs e) =>
+        EndDrag(null);
+
+    private void EndDrag(PointerRoutedEventArgs? e)
+    {
+        if (_dragTask is not null)
+        {
+            SetRowOpacity(_dragTask, 1);
+        }
+
+        if (_dragGrip is not null && e is not null)
+        {
+            _dragGrip.ReleasePointerCapture(e.Pointer);
+        }
+
+        _dragTask = null;
+        _dragGrip = null;
+        _dragActive = false;
+        DropLine.Visibility = Visibility.Collapsed;
+    }
+
+    private void SetRowOpacity(TaskConfig task, double opacity)
+    {
+        if (TaskList.ContainerFromItem(task) is FrameworkElement container)
+        {
+            container.Opacity = opacity;
+        }
     }
 
     /// <summary>
-    /// 拖完把「界面上此刻的次序」翻译成 order。
-    /// 内置重排已经改过 <c>VM.ScopeTasks</c>（ItemsSource 就是它），这里只做落账与序号重编。
+    /// 指针落在第几项：逐项比较容器在 <see cref="TaskList"/> 里的上边界，
+    /// 第一个「指针压在它的上半区」的项就是插入点；都没命中说明落在末尾。
+    ///
+    /// 插入点在**抽走被拖项之后**要减一 —— 否则往后拖永远差一位
+    /// （A B C D 里把 A 拖到 C 上半区，期望 B A C D，而不是 B C A D）。
     /// </summary>
-    private void OnTaskItemsDragCompleted(ListViewBase sender, DragItemsCompletedEventArgs args)
-        => VM.ApplyScopeOrderFromView();
+    private int ResolveDropIndex(double y)
+    {
+        var from = _dragTask is null ? -1 : VM.ScopeTasks.IndexOf(_dragTask);
+        var insertBefore = TaskList.Items.Count;
+
+        for (var i = 0; i < TaskList.Items.Count; i++)
+        {
+            if (TaskList.ContainerFromIndex(i) is not FrameworkElement container)
+            {
+                continue;
+            }
+
+            if (y < TopOf(container) + container.ActualHeight / 2)
+            {
+                insertBefore = i;
+                break;
+            }
+        }
+
+        return from >= 0 && insertBefore > from ? insertBefore - 1 : insertBefore;
+    }
+
+    /// <summary>把提示线挪到落点位置（画在外层 Grid 里，坐标按 TaskList 算再补 1px 边框）。</summary>
+    private void UpdateDropLine(int index)
+    {
+        var y = 0.0;
+
+        if (index >= TaskList.Items.Count)
+        {
+            if (TaskList.Items.Count > 0
+                && TaskList.ContainerFromIndex(TaskList.Items.Count - 1) is FrameworkElement last)
+            {
+                y = TopOf(last) + last.ActualHeight;
+            }
+        }
+        else if (TaskList.ContainerFromIndex(index) is FrameworkElement target)
+        {
+            y = TopOf(target);
+        }
+
+        DropLine.Margin = new Thickness(1, Math.Max(0, y), 1, 0);
+        DropLine.Visibility = Visibility.Visible;
+    }
+
+    private double TopOf(FrameworkElement element) =>
+        element.TransformToVisual(TaskList).TransformPoint(new Windows.Foundation.Point(0, 0)).Y;
 
     private void OnSelectionChanged(object sender, SelectionChangedEventArgs e)
     {

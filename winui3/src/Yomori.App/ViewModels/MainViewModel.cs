@@ -355,14 +355,33 @@ public sealed class MainViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 抓手拖放结束后落账：把 <see cref="ScopeTasks"/> **此刻的次序**翻译成 order。
+    /// 抓手拖动落位：把 <paramref name="task"/> 挪到通道内的第 <paramref name="targetIndex"/> 位。
     ///
-    /// 拖动与落点都由 ListView 内置重排处理，它把移动直接写回了 ItemsSource（就是这个集合），
-    /// 所以这里不需要再算「从第几项到第几项」，只按当前顺序重排本组的 order 值 + 重编显示序号。
-    /// 重复调用是幂等的（次序没变时算出来还是同一批值）。
+    /// 用 <c>ObservableCollection.Move</c> 而不是刷新重建 —— 行原地挪位，ListView 能无缝接收，
+    /// 选中态也跟着对象走；重建（<c>Clear()+Add</c>）会让界面闪一下并把选中态打散。
     /// </summary>
-    public void ApplyScopeOrderFromView()
+    public void MoveTaskInScopeTo(TaskConfig? task, int targetIndex)
     {
+        if (task is null)
+        {
+            return;
+        }
+
+        var from = ScopeTasks.IndexOf(task);
+        if (from < 0)
+        {
+            return;
+        }
+
+        var to = Math.Clamp(targetIndex, 0, ScopeTasks.Count - 1);
+        if (to == from)
+        {
+            return;
+        }
+
+        ScopeTasks.Move(from, to);
+
+        // 只重排本组已占用的 order 值（多重集合不变），再刷新界面上显示的序号
         TaskScopePlanner.ApplyScopeSequence(ScopeTasks);
         TaskScopePlanner.RenumberScope(ScopeTasks);
     }

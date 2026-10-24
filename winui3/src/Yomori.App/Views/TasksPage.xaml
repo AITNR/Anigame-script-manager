@@ -146,13 +146,7 @@
                     <ListView x:Name="TaskList"
                               ItemsSource="{x:Bind VM.ScopeTasks, Mode=OneWay}"
                               SelectionMode="Single"
-                              SelectionChanged="OnSelectionChanged"
-                              AllowDrop="True"
-                              CanDragItems="True"
-                              CanReorderItems="True"
-                              ReorderMode="Enabled"
-                              DragItemsStarting="OnTaskItemsDragStarting"
-                              DragItemsCompleted="OnTaskItemsDragCompleted">
+                              SelectionChanged="OnSelectionChanged">
                         <ListView.ItemTemplate>
                             <DataTemplate x:DataType="models:TaskConfig">
                                 <Grid Padding="8,6" ColumnSpacing="8">
@@ -164,19 +158,27 @@
                                     </Grid.ColumnDefinitions>
 
                                     <!-- 拖动抓手：按住它拖可以调整**这条通道内**的顺序。
-                                         真正的拖动/落点由 ListView 内置重排负责（CanReorderItems +
-                                         ReorderMode），这个 Border 只干两件事：画出抓手、
-                                         用 Tag="TaskGrip" 让 DragItemsStarting 认出「这次是从抓手起拖的」
-                                         （不是的会被 cancel，否则在右侧开关上按住一挪就拖行）。
-                                         ⚠️ 别再给这里挂 CanDrag 自己做 DragStarting/Drop ——
-                                         实测拖不动：指针被 ListViewItem 的按下/选择逻辑接走了。
+                                         指针全由自己接管（PointerPressed 抢 CapturePointer →
+                                         PointerMoved 算落点 → PointerReleased 落位），
+                                         不走 WinUI 的拖放机制。
+                                         ⚠️ 两次实测都拖不动，别再换回去：
+                                         ① 给这里挂 CanDrag="True" 自己做 DragStarting —— 指针被
+                                            ListViewItem 的按下/选择逻辑接走，子元素的拖拽手势不启动；
+                                         ② 换 ListView 内置重排（CanReorderItems + ReorderMode）——
+                                            在这个页面上同样按不动。
+                                         所以按下时必须 e.Handled=true 抢在 ListViewItem 前面。
                                          码位 U+E76F（两条横线）已渲染核对；E700 是汉堡菜单、
                                          E784 是两条竖线（像暂停）、E9E9 是滑杆（像调参），别混用。 -->
                                     <Border Grid.Column="0"
                                             Tag="TaskGrip"
                                             Background="Transparent"
                                             Padding="2,0,4,0"
-                                            VerticalAlignment="Stretch">
+                                            VerticalAlignment="Stretch"
+                                            PointerPressed="OnTaskGripPointerPressed"
+                                            PointerMoved="OnTaskGripPointerMoved"
+                                            PointerReleased="OnTaskGripPointerReleased"
+                                            PointerCaptureLost="OnTaskGripPointerCaptureLost"
+                                            PointerCanceled="OnTaskGripPointerCaptureLost">
                                         <FontIcon Glyph="&#xE76F;" FontSize="14" Opacity="0.45" />
                                         <ToolTipService.ToolTip>
                                             <ToolTip Content="按住拖动，调整这条通道内的执行顺序（只影响本通道）。" />
@@ -204,6 +206,18 @@
                         </ListView.ItemTemplate>
                     </ListView>
                 </Border>
+
+                <!-- 拖动时的落点提示线：自己接管指针后 WinUI 不会再画插入位置，
+                     这条线是唯一"拖到哪"的反馈。位置由代码设 Margin.Top（相对外层 Grid）。 -->
+                <Border x:Name="DropLine"
+                        Height="2"
+                        CornerRadius="1"
+                        VerticalAlignment="Top"
+                        HorizontalAlignment="Stretch"
+                        Margin="1,0,1,0"
+                        IsHitTestVisible="False"
+                        Visibility="Collapsed"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}" />
 
                 <Border x:Name="ScopeEmptyState"
                         Padding="16"

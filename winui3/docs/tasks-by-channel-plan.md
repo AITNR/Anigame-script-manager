@@ -247,33 +247,39 @@ public int ScopeOrder { get; set; }   // 通道内显示序号，由 RefreshScop
 **起因**：AITNR 反馈「每个通道里面的任务的序号前应该加入一个托盘，可以按住拖动以改变顺序」——
 「上移 / 下移」一次只能挪一位，排五六条任务时要点很多下。
 
-**做法**：任务行在序号前加抓手（`FontIcon` U+E76F，两条横线），拖动与落点**交给 ListView 内置重排**
-（`CanReorderItems` + `CanDragItems` + `ReorderMode="Enabled"`），拖完由
-`MainViewModel.ApplyScopeOrderFromView()` 按此刻的次序落账。
+**做法**：任务行在序号前加抓手（`FontIcon` U+E76F，两条横线），**指针全由页面自己接管**：
+`PointerPressed` 里 `CapturePointer` + `e.Handled=true` → `PointerMoved` 算落点并画提示线 →
+`PointerReleased` 调 `MainViewModel.MoveTaskInScopeTo(task, index)`。完全不碰 WinUI 的拖放机制。
 
 | 位置 | 改动 |
 | --- | --- |
 | `Models/TaskScopePlanner` | 新增 `ApplyScopeSequence`：只重排**本组已占用的 order 值**（取出来升序、按新次序发回），order 的多重集合不变 → 不会跟别的通道撞号，之后 `SaveConfig()` 里的 `NormalizeOrdersByChannel` 再收敛成 1..N |
-| `MainViewModel` | 新增 `ApplyScopeOrderFromView()`：按 `ScopeTasks` 当前次序 `ApplyScopeSequence` + `RenumberScope`（幂等，重复调用无害） |
-| `Views/TasksPage.xaml(.cs)` | 抓手 `Border`（只做视觉 + `Tag="TaskGrip"` 起拖判定）；`DragItemsStarting` 里取消非抓手起拖；`DragItemsCompleted` 落账；`AddHandler(PointerPressedEvent, handledEventsToo: true)` 记录按下位置 |
+| `MainViewModel` | 新增 `MoveTaskInScopeTo(task, targetIndex)`：`ScopeTasks.Move(from, to)` → `ApplyScopeSequence` → `RenumberScope` |
+| `Views/TasksPage.xaml(.cs)` | 抓手 `Border` 四个指针事件；`DropLine` 提示线；`ResolveDropIndex` / `TopOf`；4px 起拖阈值；ListView 层用 `AddHandler(..., handledEventsToo: true)` 再收一道移动/松开 |
 
-**踩过的两个坑（第一版就是这么错的）**：
+### 拖不动的两次失败（别再走回头路）
 
-1. **别给抓手挂 `CanDrag="True"` 自己做 DragStarting/DragOver/Drop** —— 实测**拖不动**：
-   指针被 `ListViewItem` 的按下/选择逻辑接走了，子元素的拖拽手势根本不启动。
-   正解是让 ListView 内置重排来拖（顺手白拿一条插入位置指示线），再用
-   `DragItemsStarting` 把「不是从抓手按下的」取消掉 —— `CanDragItems` 是整行都能起拖的，
-   不取消的话在右侧开关上按住稍微一挪就开始拖行。
-2. **起拖判定要用 `AddHandler(..., handledEventsToo: true)`** —— `ListViewItem` 会把
-   `PointerPressed` 标成 Handled，普通订阅收不到。然后从 `e.OriginalSource` 往上找
-   `Tag="TaskGrip"`；别在两处都挂（冒泡顺序「源 → 祖先」容易写成"先置真再被清零"）。
+| # | 尝试 | 结果 |
+| --- | --- | --- |
+| ① | 抓手 `CanDrag="True"` + 自己做 `DragStarting`/`DragOver`/`Drop` | **拖不动**：指针被 `ListViewItem` 的按下/选择逻辑接走，子元素的拖拽手势根本不启动 |
+| ② | ListView 内置重排（`CanReorderItems` + `CanDragItems` + `ReorderMode`） | **同样按不动**（本页面上这套机制不生效） |
+| ③ | 页面自己接管指针（当前实现） | 按下即 `CapturePointer` + `Handled`，移动/松开都归自己 |
 
-**两条纪律**：
+**四条纪律**：
 
-1. **落账只翻译次序，不要重建集合** —— `RefreshScopeTasks()` 会 `Clear()+Add`，
-   而此刻可能还在拖放链路上，是「集合整体替换 × 绑定源失效」那一类崩法。
-2. **`ApplyScopeSequence` 只重排本组已占用的 order 值** —— 重编全局 1..N 交给
-   `SaveConfig()` 里的 `NormalizeOrdersByChannel`，避免两次重编互相打架。
+1. **`PointerPressed` 里必须 `e.Handled = true`** —— 否则 `ListViewItem` 随后又把指针抢回去，
+   `PointerMoved` 一条都收不到（这就是 ①② 失败的同一条根因）。
+2. **ListView 层再接一道 `PointerMoved` / `PointerReleased`（`handledEventsToo: true`）** ——
+   万一没能抢到指针，事件仍会从捕获元素冒泡到 ListView，拖动照样能走完；两个处理函数
+   对「没在拖」是空转，重复触发无害。
+3. **落账只翻译次序，不要重建集合** —— `RefreshScopeTasks()` 会 `Clear()+Add`，
+   松手瞬间重建是「集合整体替换 × 绑定源失效」那一类崩法；`ObservableCollection.Move` 才是
+   ListView 能无缝接收的变更。
+4. **插入点要判断方向** —— 「插到第 i 项之前」在抽走被拖项后要减一，否则往后拖永远差一位
+   （A B C D 把 A 拖到 C 上半区，期望 B A C D 而不是 B C A D）。
+
+已知副作用：点抓手不再顺带选中这一行（按下被 Handled 掉了）。抓手只有二十来像素宽，
+点行内文字照常选中，可以接受。
 
 与「上移 / 下移」一致，顺序改动和其它任务字段一样**点「保存配置」才落盘**
 （任务页本来就是显式保存模型，拖一下就偷偷写盘会更让人意外）。
