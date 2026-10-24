@@ -51,9 +51,9 @@ public sealed partial class TasksPage : Page
         _vmPropertyChanged = OnViewModelPropertyChanged;
         VM.PropertyChanged += _vmPropertyChanged;
 
-        // 保险：即使抓手没抢到指针（被 ListViewItem 先捕获 / 被它标成 Handled），
-        // 移动与松开事件仍会从捕获元素冒泡到 ListView —— 在这里再收一道。
-        // 两个处理函数对「没在拖」是空转，重复触发无害（EndDrag 后 _dragTask 为 null）。
+        // 捕获挂在 TaskList 上，移动/松开/捕获丢失都在这一层接：
+        // handledEventsToo 是保险（万一 ListViewItem 先抢了指针并标了 Handled，
+        // 事件仍会冒泡上来）；三个处理函数对「没在拖」是空转，重复触发无害。
         TaskList.AddHandler(UIElement.PointerMovedEvent, new PointerEventHandler(OnTaskGripPointerMoved), true);
         TaskList.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler(OnTaskGripPointerReleased), true);
         TaskList.AddHandler(UIElement.PointerCaptureLostEvent, new PointerEventHandler(OnDragCaptureLost), true);
@@ -144,12 +144,11 @@ public sealed partial class TasksPage : Page
 
     private void OnMoveDown(object sender, RoutedEventArgs e) => VM.MoveSelectedTaskInScope(1);
 
-    // ---------------- 中：拖放排序（抓手拖动，实时重排） ----------------
+    // ---------------- 中：拖放排序（抓手拖动） ----------------
 
     /// <summary>
-    /// 拖动用到的全部状态：
-    /// 被拖的任务 / 该任务的容器（ListViewItem）/ 施加在容器上的位移 /
-    /// 指针 id / 是否已过起拖阈值 / 按下时的 Y / 抓取点在行内的偏移 / 最近一次指针 Y。
+    /// 拖动状态：被拖的任务 / 它的容器 / 容器上的位移 / 指针 id / 是否已过起拖阈值 /
+    /// 按下时的 Y / 抓取点在行内的偏移 / 最近一次指针 Y / 松手时要落到的位置。
     /// </summary>
     private TaskConfig? _dragTask;
     private FrameworkElement? _dragContainer;
@@ -159,16 +158,18 @@ public sealed partial class TasksPage : Page
     private double _dragStartY;
     private double _dragGrabOffset;
     private double _lastPointerY;
+    private int _dropTarget;
 
     /// <summary>
-    /// 抓手按下：**抢在 ListViewItem 前面把指针捕获过来**。
+    /// 抓手按下：抢在 ListViewItem 前面捕获指针。
     ///
-    /// 这是整套能动的关键。之前两版都栽在这里：
-    ///   ① 抓手挂 `CanDrag="True"` 自己做 DragStarting/Drop —— 指针被 ListViewItem 的
-    ///      按下/选择逻辑接走，子元素的拖拽手势根本不启动；
-    ///   ② 改用 ListView 内置重排（`CanReorderItems` + `ReorderMode`）—— 同样按不动。
-    /// 所以这里既不看 WinUI 的拖放，也不让它插手：`CapturePointer` 之后移动/松开事件都归抓手，
-    /// 再 `e.Handled = true` 挡住 ListViewItem 自己的按下处理（否则它随后又把指针抢回去）。
+    /// 之前两版都栽在这里：① 抓手挂 `CanDrag` 自己做 DragStarting/Drop —— 指针被
+    /// ListViewItem 的按下/选择逻辑接走，子元素的拖拽手势根本不启动；② 改用 ListView
+    /// 内置重排（`CanReorderItems` + `ReorderMode`）—— 同样按不动。
+    ///
+    /// 捕获挂在 **`TaskList`** 上而不是抓手/行容器上：拖动中容器可能被回收重建，
+    /// 挂在它身上会连带丢失捕获、拖动当场断开。`e.Handled = true` 则挡住 ListViewItem
+    /// 自己的按下处理（否则它随后又把指针抢回去）。
     ///
     /// 代价：点抓手不再顺带选中那一行 —— 抓手只有二十来像素宽，点行内文字照常选中。
     /// </summary>
@@ -183,21 +184,19 @@ public sealed partial class TasksPage : Page
         _dragPointerId = e.Pointer.PointerId;
         _dragStartY = e.GetCurrentPoint(TaskList).Position.Y;
         _lastPointerY = _dragStartY;
+        _dropTarget = VM.ScopeTasks.IndexOf(task);
         _dragActive = false;
 
-        // 捕获落在 ListView 上，**不落在抓手/Border 上**：
-        // 拖动过程中实时重排会挪动集合，ListView 可能把那一行的容器回收/重建，
-        // 抓手元素随之失效 → 捕获丢失 → PointerCaptureLost → 拖动当场断开
-        // （用户实测：其他行让位的瞬间"直接刷新到新位置并断开拖动"）。
-        // ListView 自己不会被回收，捕获挂在它身上就稳。
         TaskList.CapturePointer(e.Pointer);
         e.Handled = true;
     }
 
     /// <summary>
-    /// 移动：过了 4px 阈值才真正起拖（否则点击会被判成拖动），之后
-    /// ① 让被拖的行追着指针走；② 指针越过相邻行中线就把它在集合里挪过去 ——
-    /// 集合一动，别的行就自动让位/复位，这就是"其它控件避开"的效果。
+    /// 移动：过 4px 阈值才算起拖，之后让被拖的行追着指针走、并更新落点提示线。
+    ///
+    /// ⚠️ **拖动过程中一律不改集合**。改一次 ListView 就会回收/重建那一行的容器，
+    /// 位移和捕获一起失效 —— 症状就是「拖过一行就断开、直接跳到新位置」。
+    /// 真正的排序只在松手时做一次。
     /// </summary>
     private void OnTaskGripPointerMoved(object sender, PointerRoutedEventArgs e)
     {
@@ -224,7 +223,7 @@ public sealed partial class TasksPage : Page
         }
 
         FollowPointer();
-        StepTowardsPointer();
+        UpdateDropTarget();
         e.Handled = true;
     }
 
@@ -235,13 +234,22 @@ public sealed partial class TasksPage : Page
             return;
         }
 
+        var task = _dragTask;
+        var moved = _dragActive;
+        var target = _dropTarget;
+
         EndDrag(e);
+
+        // 松手才排序：一整段拖动只改一次集合
+        if (moved)
+        {
+            VM.MoveTaskInScopeTo(task, target);
+        }
     }
 
     /// <summary>
     /// 捕获真丢了（Esc、窗口失焦、被别的元素抢走）才收尾。
-    ///
-    /// ⚠️ 拖动中「容器被回收」不再走这里 —— 捕获在 ListView 上，容器挪动不影响它。
+    /// 拖动中容器被回收**不会**再走到这里 —— 捕获在 ListView 上，容器挪动不影响它。
     /// </summary>
     private void OnDragCaptureLost(object sender, PointerRoutedEventArgs e)
     {
@@ -251,9 +259,9 @@ public sealed partial class TasksPage : Page
         }
     }
 
-    // ---------------- 拖动的三段内部逻辑 ----------------
+    // ---------------- 拖动的内部逻辑 ----------------
 
-    /// <summary>起拖：给被拖那行的容器挂上位移变换、压暗一点、抬到兄弟之上。</summary>
+    /// <summary>起拖：给被拖那行的容器挂位移变换、压暗一点、抬到兄弟之上。</summary>
     private bool BeginDragVisual()
     {
         if (_dragTask is null)
@@ -272,21 +280,16 @@ public sealed partial class TasksPage : Page
         _dragContainer.Opacity = 0.92;
         Canvas.SetZIndex(_dragContainer, 100);
 
-        // 位移为 0 时量一次，记下抓取点在行内的偏移 —— 之后不管行挪到哪都保持这个手感
+        // 位移为 0 时量一次，记下抓取点在行内的偏移 —— 之后不管指针移到哪都保持这个手感
         _dragGrabOffset = _lastPointerY - TopOf(_dragContainer);
-
-        // 集合 Move 之后布局会重排，位移基准跟着变，必须重算一次（否则会看到跳动）
-        TaskList.LayoutUpdated += OnDragLayoutUpdated;
         return true;
     }
 
-    private void OnDragLayoutUpdated(object? sender, object e) => FollowPointer();
-
     /// <summary>
-    /// 让被拖的行跟住指针：把「行顶 = 指针 - 抓取偏移」这条不变量重新满足一遍。
+    /// 让被拖的行跟住指针：维持「行顶 = 指针 − 抓取偏移」。
     ///
     /// 量之前必须把位移归零 —— `TransformToVisual` 会把元素自身的 RenderTransform 算进去，
-    /// 不归零就成了「位移取决于位移」的自指。
+    /// 不归零就是「位移取决于位移」的自指，会越拖越飘。
     /// </summary>
     private void FollowPointer()
     {
@@ -307,12 +310,10 @@ public sealed partial class TasksPage : Page
     }
 
     /// <summary>
-    /// 指针越过下一行 / 上一行的中线就交换一位。
-    ///
-    /// 一次移动事件最多走一位：`Move` 之后布局还没跑完，同一 tick 里连读容器位置会读到旧值。
-    /// 拖动时移动事件很密，跟得上；也不会因为一次跳跃而算错落点。
+    /// 算落点并画提示线：从「指针压在某行的上半区」得出插到它前面，
+    /// 再把「插到第 i 行之前」折算成 `Move` 的最终索引（抽走被拖项之后要减一）。
     /// </summary>
-    private void StepTowardsPointer()
+    private void UpdateDropTarget()
     {
         if (_dragTask is null)
         {
@@ -325,35 +326,52 @@ public sealed partial class TasksPage : Page
             return;
         }
 
-        var below = from + 1;
-        if (below < TaskList.Items.Count
-            && TaskList.ContainerFromIndex(below) is FrameworkElement next
-            && _lastPointerY > TopOf(next) + next.ActualHeight / 2)
-        {
-            VM.MoveTaskInScopeTo(_dragTask, below);
+        var count = TaskList.Items.Count;
+        var insertBefore = count;
 
-            // 挪完立刻按「当前」布局重新回贴一次：布局还没跑时读到的是旧槽位，
-            // 算出来正好还是指针所在的位置；等布局跑完 LayoutUpdated 再兜一次。
-            // 不在这里补这一下，用户会看到行先跳到新槽位再被拽回来。
-            FollowPointer();
+        for (var i = 0; i < count; i++)
+        {
+            if (i == from || TaskList.ContainerFromIndex(i) is not FrameworkElement container)
+            {
+                continue;
+            }
+
+            if (_lastPointerY < TopOf(container) + container.ActualHeight / 2)
+            {
+                insertBefore = i;
+                break;
+            }
+        }
+
+        _dropTarget = insertBefore >= count ? count - 1 : insertBefore > from ? insertBefore - 1 : insertBefore;
+
+        // 落点就是原位时不给线：没有要发生的移动
+        if (_dropTarget == from)
+        {
+            DropLine.Visibility = Visibility.Collapsed;
             return;
         }
 
-        var above = from - 1;
-        if (above >= 0
-            && TaskList.ContainerFromIndex(above) is FrameworkElement previous
-            && _lastPointerY < TopOf(previous) + previous.ActualHeight / 2)
+        var y = 0.0;
+        if (insertBefore >= count)
         {
-            VM.MoveTaskInScopeTo(_dragTask, above);
-            FollowPointer();
+            if (count > 0 && TaskList.ContainerFromIndex(count - 1) is FrameworkElement last)
+            {
+                y = TopOf(last) + last.ActualHeight;
+            }
         }
+        else if (TaskList.ContainerFromIndex(insertBefore) is FrameworkElement target)
+        {
+            y = TopOf(target);
+        }
+
+        DropLine.Margin = new Thickness(1, Math.Max(0, y), 1, 0);
+        DropLine.Visibility = Visibility.Visible;
     }
 
     /// <summary>
-    /// 确认位移还挂在「装着这条任务」的容器上。
-    ///
-    /// `ObservableCollection.Move` 之后容器有可能被回收给别的行（按位置复用），
-    /// 那样位移就会跟着跑偏到别的行上 —— 发现装错项就把位移摘下来挂回正确的那只。
+    /// 确认位移还挂在「装着这条任务」的容器上；容器被换掉时把位移摘下来挂回正确的那只。
+    /// 拖动中集合不变，这里基本只是兜底。
     /// </summary>
     private void SyncDragContainer()
     {
@@ -364,14 +382,13 @@ public sealed partial class TasksPage : Page
 
         if (_dragContainer is not null && ReferenceEquals(TaskList.ItemFromContainer(_dragContainer), _dragTask))
         {
-            return;   // 位移还挂在正确的行上
+            return;
         }
 
         var target = TaskList.ContainerFromItem(_dragTask) as FrameworkElement;
         if (target is null)
         {
-            // 容器还没来得及建出来（Move 之后这一帧）：**先别摘**旧的那份。
-            // 摘了就这一帧没有位移，行会闪回槽位；等下一帧布局完这里会重新收一遍。
+            // 容器还没来得及建出来：先别摘旧的，摘了就这一帧没有位移、行会闪回槽位
             return;
         }
 
@@ -388,14 +405,9 @@ public sealed partial class TasksPage : Page
         Canvas.SetZIndex(_dragContainer, 100);
     }
 
-    /// <summary>
-    /// 收尾：摘位移、恢复不透明度与层级。次序已经在拖动过程中即时改过了，
-    /// 这里不再做任何落位动作 —— 摘掉位移后行会"落"进它此刻的位置。
-    /// </summary>
+    /// <summary>收尾：摘位移、恢复不透明度与层级、隐藏提示线。排序在调用方做。</summary>
     private void EndDrag(PointerRoutedEventArgs? e)
     {
-        TaskList.LayoutUpdated -= OnDragLayoutUpdated;
-
         if (_dragContainer is not null)
         {
             _dragContainer.RenderTransform = null;
@@ -409,6 +421,7 @@ public sealed partial class TasksPage : Page
         _dragContainer = null;
         _dragTranslate = null;
         _dragActive = false;
+        DropLine.Visibility = Visibility.Collapsed;
 
         if (e is not null)
         {

@@ -247,45 +247,39 @@ public int ScopeOrder { get; set; }   // 通道内显示序号，由 RefreshScop
 **起因**：AITNR 反馈「每个通道里面的任务的序号前应该加入一个托盘，可以按住拖动以改变顺序」——
 「上移 / 下移」一次只能挪一位，排五六条任务时要点很多下。
 
-**做法**：任务行在序号前加抓手（`FontIcon` U+E76F，两条横线），**指针全由页面自己接管**；
-拖动过程中**实时重排**：被拖的那行用 `TranslateTransform` 追着指针走，指针越过相邻行中线
-就在 `ObservableCollection` 里 `Move` 一次 —— 集合一动，其余行自动让位/复位。
-完全不碰 WinUI 的拖放机制。
+**做法**：任务行在序号前加抓手（`FontIcon` U+E76F，两条横线），**指针全由页面自己接管**。
+拖动时只做两件事：被拖的那行用 `TranslateTransform` 追着指针走、落点提示线跟着移动；
+**集合一个字节都不动**。松手那一刻才 `Move` 一次。
 
 | 位置 | 改动 |
 | --- | --- |
 | `Models/TaskScopePlanner` | 新增 `ApplyScopeSequence`：只重排**本组已占用的 order 值**（取出来升序、按新次序发回），order 的多重集合不变 → 不会跟别的通道撞号，之后 `SaveConfig()` 里的 `NormalizeOrdersByChannel` 再收敛成 1..N |
 | `MainViewModel` | 新增 `MoveTaskInScopeTo(task, targetIndex)`：`ScopeTasks.Move(from, to)` → `ApplyScopeSequence` → `RenumberScope` |
-| `Views/TasksPage.xaml(.cs)` | 抓手 `Border` 四个指针事件；`BeginDragVisual` / `FollowPointer` / `StepTowardsPointer` / `SyncDragContainer` / `EndDrag`；4px 起拖阈值；ListView 层用 `AddHandler(..., handledEventsToo: true)` 再收一道移动/松开 |
+| `Views/TasksPage.xaml(.cs)` | 抓手 `Border`（只挂 `PointerPressed`）；`BeginDragVisual` / `FollowPointer` / `UpdateDropTarget` / `SyncDragContainer` / `EndDrag`；`DropLine` 提示线；4px 起拖阈值；ListView 层用 `AddHandler(..., handledEventsToo: true)` 接移动/松开/捕获丢失 |
 
-### 拖不动的两次失败（别再走回头路）
+### 走错的四条路（别再走回头路）
 
 | # | 尝试 | 结果 |
 | --- | --- | --- |
 | ① | 抓手 `CanDrag="True"` + 自己做 `DragStarting`/`DragOver`/`Drop` | **拖不动**：指针被 `ListViewItem` 的按下/选择逻辑接走，子元素的拖拽手势根本不启动 |
 | ② | ListView 内置重排（`CanReorderItems` + `CanDragItems` + `ReorderMode`） | **同样按不动**（本页面上这套机制不生效） |
-| ③ | 页面自己接管指针（当前实现） | 按下即 `CapturePointer` + `Handled`，移动/松开都归自己 |
+| ③ | 自己接管指针 + **拖动中实时 `Move`**（边拖边重排） | 能拖了，但**拖过一行就断开**：`Move` 让 ListView 回收/重建那一行的容器，位移与指针捕获一起失效 |
+| ④ | 同上，但捕获挪到 `ListView` 上 | 仍然断 —— 容器一换，行本身被重建，问题不在捕获 |
+| ⑤ | **拖动中不动集合，松手才排序**（当前实现） | 稳定 |
 
-**八条纪律**：
+**五条纪律**：
 
-1. **`PointerPressed` 里必须 `e.Handled = true`** —— 否则 `ListViewItem` 随后又把指针抢回去，
-   `PointerMoved` 一条都收不到（这就是 ①② 失败的同一条根因）。
-2. **ListView 层再接一道 `PointerMoved` / `PointerReleased`（`handledEventsToo: true`）** ——
-   万一没能抢到指针，事件仍会从捕获元素冒泡到 ListView，拖动照样能走完；两个处理函数
-   对「没在拖」是空转，重复触发无害。
-3. **量行位置前必须把 `TranslateTransform.Y` 归零** —— `TransformToVisual` 会把元素自身的
+1. **`PointerPressed` 里必须 `e.Handled = true`，并在 `TaskList` 上 `CapturePointer`** ——
+   否则 `ListViewItem` 随后把指针抢回去，`PointerMoved` 一条都收不到；捕获也别挂在抓手 /
+   行容器上（它们会被回收重建）。
+2. **拖动过程中绝不改集合** —— 这是 ③④ 失败换来的：`Move` 会让 ListView 回收重建行容器，
+   位移与捕获一起失效，症状就是「拖过一行就断开、直接跳到新位置」。排序只在 `PointerReleased` 做一次。
+3. **量行位置前把 `TranslateTransform.Y` 归零** —— `TransformToVisual` 会把元素自身的
    RenderTransform 算进去，不归零就是「位移取决于位移」的自指，会越拖越飘。
-4. **`Move` 之后要在 `LayoutUpdated` 里重算位移** —— 行的布局槽变了，位移基准跟着变，
-   不重算会看到一次跳动。
-5. **一次指针事件最多挪一位** —— `Move` 之后布局还没跑完，同一 tick 里连读容器位置读到的是旧值。
-6. **`SyncDragContainer` 要核对位移挂在谁身上** —— 容器按位置复用，`Move` 之后可能被回收给
-   别的行；发现 `ItemFromContainer` 不等于被拖任务，就把位移摘下来挂回正确的那只。
-   若 `ContainerFromItem` 这一帧还查不到新容器，**先别摘旧的**，否则这一帧没有位移、行会闪回槽位。
-7. **指针捕获挂在 ListView 上，别挂在抓手 / 行容器上** —— 实时重排会挪集合，ListView 可能把
-   那一行的容器回收重建，抓手随之失效 → 捕获丢失 → 拖动当场断开。用户实测症状就是这个：
-   「其他行让位的瞬间就直接刷新到新位置、拖动断了」。ListView 自己不会被回收，挂在它身上才稳。
-8. **每次 `Move` 之后立刻再 `FollowPointer()` 一次** —— 布局还没跑时读到的是旧槽位，算出来正好
-   还是指针位置；不补这一下会看到行先跳到新槽位再被拽回来。
+4. **插入点要判断方向** —— 「插到第 i 行之前」在抽走被拖项后要减一，否则往后拖永远差一位
+   （A B C D 把 A 拖到 C 上半区，期望 B A C D 而不是 B C A D）；落点与原地相同时不画线。
+5. **`EndDrag` 先清状态再 `ReleasePointerCapture`** —— 后者会同步抛 `PointerCaptureLost`，
+   状态没清就会再跑一遍 `EndDrag`。
 
 已知副作用：点抓手不再顺带选中这一行（按下被 Handled 掉了）。抓手只有二十来像素宽，
 点行内文字照常选中，可以接受。

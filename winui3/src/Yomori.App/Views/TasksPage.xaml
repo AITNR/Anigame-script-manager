@@ -206,6 +206,18 @@
                     </ListView>
                 </Border>
 
+                <!-- 拖动时的落点提示线：拖动过程中**不改集合**（改了就回收容器、捕获丢失、
+                     拖动当场断），所以落点只能靠这条线表达。位置由代码设 Margin.Top。 -->
+                <Border x:Name="DropLine"
+                        Height="2"
+                        CornerRadius="1"
+                        VerticalAlignment="Top"
+                        HorizontalAlignment="Stretch"
+                        Margin="1,0,1,0"
+                        IsHitTestVisible="False"
+                        Visibility="Collapsed"
+                        Background="{ThemeResource AccentFillColorDefaultBrush}" />
+
                 <Border x:Name="ScopeEmptyState"
                         Padding="16"
                         Visibility="Collapsed"
