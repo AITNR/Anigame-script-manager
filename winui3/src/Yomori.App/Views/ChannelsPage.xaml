@@ -252,8 +252,6 @@
                     </Grid>
 
                     <StackPanel Orientation="Horizontal" Spacing="8">
-                        <Button Content="开启远程桌面" Click="OnEnableRemoteDesktop"
-                                ToolTipService.ToolTip="需要管理员权限：写入注册表并放行防火墙（对整机生效，与具体通道无关）" />
                         <Button Content="部署会话代理" Click="OnDeployChannelAgent"
                                 ToolTipService.ToolTip="把代理放进所有用户共享的启动目录，目标账户登录后自动接管任务（整机共用一份）" />
                         <Button Content="移除代理" Click="OnRemoveAgent" />
@@ -287,14 +285,17 @@
                     <CheckBox Content="内嵌模式下在本机播放远端声音"
                               IsChecked="{x:Bind VM.RdpSettings.AudioEnabled, Mode=TwoWay}" />
 
-                    <ComboBox Header="内嵌画面渲染后端"
-                              ItemsSource="{x:Bind VM.RenderBackendItems}"
+                    <!-- ItemsSource 在代码里（构造函数）显式赋值，不用 x:Bind：
+                         x:Bind 的求值顺序会把 SelectedValue 排在 ItemsSource 之前，
+                         列表还空着时那次赋值被直接丢弃，之后再填选项也不会重新匹配 → 下拉框显示空白。 -->
+                    <ComboBox x:Name="RenderBackendCombo"
+                              Header="内嵌画面渲染后端"
                               DisplayMemberPath="Value"
                               SelectedValuePath="Key"
                               SelectedValue="{x:Bind VM.RdpSettings.RenderBackend, Mode=TwoWay}"
                               HorizontalAlignment="Stretch"
                               ToolTipService.ToolTip="D3D 在某些显卡 / 虚拟显示驱动组合下可能把整个窗口卡死（进程还活着但点不动）。碰到就切到软渲染，不用等新版本。改完下次连接生效。" />
-                    <CheckBox Content="GFX 全帧管线（实验性：撕裂根治，需重连生效）"
+                    <CheckBox Content="GFX 全帧管线（撕裂根治，需重连生效）"
                               IsChecked="{x:Bind VM.RdpSettings.GfxEnabled, Mode=TwoWay}"
                               ToolTipService.ToolTip="走 RDP 图形管道协商 progressive 全帧，远端快速变化时不再撕裂；默认关闭" />
 
@@ -454,7 +455,7 @@
                     Padding="14">
                 <StackPanel Spacing="10">
                     <StackPanel Orientation="Horizontal" Spacing="8">
-                        <TextBlock x:Name="EmbedCardTitle" Text="内嵌画面（实验性）" FontWeight="SemiBold" VerticalAlignment="Center" />
+                        <TextBlock x:Name="EmbedCardTitle" Text="内嵌画面" FontWeight="SemiBold" VerticalAlignment="Center" />
                         <TextBlock Text="连接方式选「内嵌」时，画面显示在多画面页与各通道子页里；这里只在自检模式下使用。"
                                    Opacity="0.6" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap" />
                     </StackPanel>

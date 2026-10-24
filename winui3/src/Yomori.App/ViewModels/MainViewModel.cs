@@ -1977,7 +1977,6 @@ public sealed class MainViewModel : ObservableObject
     private string _rdpSessionSummary = "－";
     private string _rdpAgentStatusText = "－";
 
-    private RelayCommand? _enableRemoteDesktopCommand;
     private RelayCommand? _deployAgentCommand;
     private RelayCommand? _removeAgentCommand;
     private AsyncRelayCommand? _connectAndRunCommand;
@@ -4083,9 +4082,6 @@ public sealed class MainViewModel : ObservableObject
 
     // ---------------- 命令 ----------------
 
-    public ICommand EnableRemoteDesktopCommand =>
-        _enableRemoteDesktopCommand ??= new RelayCommand(EnableRemoteDesktop);
-
     public ICommand DeployAgentCommand => _deployAgentCommand ??= new RelayCommand(DeployRdpAgent);
 
     public ICommand RemoveAgentCommand => _removeAgentCommand ??= new RelayCommand(RemoveRdpAgent);
@@ -4105,7 +4101,6 @@ public sealed class MainViewModel : ObservableObject
     private void NotifyRdpCommands()
     {
         _connectAndRunCommand?.RaiseCanExecuteChanged();
-        _enableRemoteDesktopCommand?.RaiseCanExecuteChanged();
         _deployAgentCommand?.RaiseCanExecuteChanged();
         _removeAgentCommand?.RaiseCanExecuteChanged();
         _disconnectSessionCommand?.RaiseCanExecuteChanged();
@@ -4219,21 +4214,6 @@ public sealed class MainViewModel : ObservableObject
         RdpSettings.CredentialSaved = false;
         SaveConfig();
         AppendLog("已删除保存的目标账户凭据。");
-        RefreshRdpReadiness();
-    }
-
-    private void EnableRemoteDesktop()
-    {
-        if (RdpSessionService.EnableRemoteDesktop(out var message))
-        {
-            AppendLog($"远程桌面：{message}");
-        }
-        else
-        {
-            _ = DialogHelper.ShowMessageAsync("开启失败", message);
-            AppendLog($"开启远程桌面失败：{message}");
-        }
-
         RefreshRdpReadiness();
     }
 
@@ -4559,7 +4539,7 @@ public sealed class MainViewModel : ObservableObject
 
         if (isLocal && !readiness.RemoteDesktopEnabled)
         {
-            _ = DialogHelper.ShowMessageAsync("无法连接", $"系统尚未开启远程桌面，通道「{tag}」无法连接。请先点击「开启远程桌面」。");
+            _ = DialogHelper.ShowMessageAsync("无法连接", $"系统尚未开启远程桌面，通道「{tag}」无法连接。请先在目标机器的「设置 → 系统 → 远程桌面」里开启。");
             return false;
         }
 

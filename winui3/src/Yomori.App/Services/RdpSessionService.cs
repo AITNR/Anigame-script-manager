@@ -305,7 +305,12 @@ public static class RdpSessionService
         }
     }
 
-    /// <summary>开启远程桌面并放行防火墙规则，需要管理员权限。</summary>
+    /// <summary>
+    /// 开启远程桌面并放行防火墙规则，需要管理员权限。
+    ///
+    /// 界面已不再提供一键入口（2026-10-24 按需求移除「开启远程桌面」按钮），
+    /// 由用户在目标机器的系统设置里自行开启；这里保留能力，预检仍只读检测不开写。
+    /// </summary>
     public static bool EnableRemoteDesktop(out string message)
     {
         message = string.Empty;

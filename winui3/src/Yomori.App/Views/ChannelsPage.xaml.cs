@@ -34,6 +34,13 @@ public sealed partial class ChannelsPage : Page
 
         _selfCheckEmbed = Program.EmbedVmArgs is not null;
 
+        // 渲染后端下拉框的数据源与选中值都在这里先摆好，早于 x:Bind 的求值。
+        // 走 x:Bind 时它们的相对顺序是 SelectedValue 在前、ItemsSource 在后 ——
+        // ComboBox 在列表还空着的时候赋 SelectedValue 会被丢弃，之后再填选项也不会重新匹配，
+        // 结果就是下拉框永远空白（"连接方式"没这毛病：它的 ItemsSource 恰好排在前面）。
+        RenderBackendCombo.ItemsSource = RenderBackends.Items;
+        SyncRenderBackendSelection();
+
         // 画面控件诊断直接进运行日志（便于无人值守验收）
         EmbedView.DiagnosticLog = VM.AppendLog;
 
@@ -52,6 +59,13 @@ public sealed partial class ChannelsPage : Page
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         VM.PropertyChanged += OnViewModelPropertyChanged;
+
+        // x:Bind 的求值顺序是 RdpSettings（→ SelectedValue）排在 RenderBackendItems（→ ItemsSource）之前。
+        // ComboBox 在 Items 还是空的时候赋 SelectedValue 会被直接丢弃，之后填 Items 也不会重新匹配，
+        // 于是下拉框永远显示空白（"连接方式"没这毛病：它的 ItemsSource 恰好排在前面）。
+        // Loaded 在 x:Bind 全部 Loading 之后触发，在这里补一次即可保证每次进页面都看得见当前值。
+        SyncRenderBackendSelection();
+
         VM.RefreshRdpReadiness();
         VM.RefreshChannelReadiness();
         SyncChannelChrome();
@@ -125,6 +139,19 @@ public sealed partial class ChannelsPage : Page
         CurrentChannelHint.Text = VM.ActiveSession is null
             ? "本轮尚未开始"
             : $"最靠前的通道：{VM.ActiveSession.DisplayName}";
+    }
+
+    /// <summary>
+    /// 把渲染后端下拉框拉回配置里的当前值（见 <see cref="OnLoaded"/> 里关于求值顺序的说明）。
+    /// 空配置一律归一成 auto（D3D11），所以不会出现"没有选中项"的状态。
+    /// </summary>
+    private void SyncRenderBackendSelection()
+    {
+        var key = RenderBackends.Normalize(VM.RdpSettings.RenderBackend);
+        if (!string.Equals(RenderBackendCombo.SelectedValue as string, key, StringComparison.Ordinal))
+        {
+            RenderBackendCombo.SelectedValue = key;
+        }
     }
 
     /// <summary>自检模式：折叠本页除画面卡以外的全部内容，让画面直接进视口。</summary>
@@ -225,12 +252,6 @@ public sealed partial class ChannelsPage : Page
     private void OnClearChannelCredential(object sender, RoutedEventArgs e)
     {
         VM.ClearChannelCredential();
-        SyncChannelChrome();
-    }
-
-    private void OnEnableRemoteDesktop(object sender, RoutedEventArgs e)
-    {
-        VM.EnableRemoteDesktopCommand.Execute(null);
         SyncChannelChrome();
     }
 

@@ -22,7 +22,7 @@ public static class ClientModes
         new List<KeyValuePair<string, string>>
         {
             new(Mstsc, "独立远程桌面窗口（mstsc，稳定）"),
-            new(Embedded, "内嵌到Yomori窗口（实验性）"),
+            new(Embedded, "内嵌到Yomori窗口"),
         };
 
     public static string Normalize(string? value)
@@ -635,7 +635,7 @@ public sealed class RdpConfig : ObservableObject, ICloneable
         set => SetProperty(ref _audioEnabled, value);
     }
 
-    /// <summary>内嵌 GFX 全帧管线（gfx_enabled，实验性；撕裂根治，自动协商 progressive）。</summary>
+    /// <summary>内嵌 GFX 全帧管线（gfx_enabled；撕裂根治，自动协商 progressive）。</summary>
     [JsonPropertyName("gfx_enabled")]
     public bool GfxEnabled
     {
