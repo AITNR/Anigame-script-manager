@@ -158,8 +158,11 @@
                                     </Grid.ColumnDefinitions>
 
                                     <!-- 拖动抓手：按住它拖可以调整**这条通道内**的顺序。
+                                         效果是「整行跟着指针走、别的行让位」——拖动中就真在
+                                         集合里重排（ObservableCollection.Move），被拖的那行用
+                                         TranslateTransform 追着指针走。
                                          指针全由自己接管（PointerPressed 抢 CapturePointer →
-                                         PointerMoved 算落点 → PointerReleased 落位），
+                                         PointerMoved 追指针 + 挪位 → PointerReleased 收尾），
                                          不走 WinUI 的拖放机制。
                                          ⚠️ 两次实测都拖不动，别再换回去：
                                          ① 给这里挂 CanDrag="True" 自己做 DragStarting —— 指针被
@@ -206,18 +209,6 @@
                         </ListView.ItemTemplate>
                     </ListView>
                 </Border>
-
-                <!-- 拖动时的落点提示线：自己接管指针后 WinUI 不会再画插入位置，
-                     这条线是唯一"拖到哪"的反馈。位置由代码设 Margin.Top（相对外层 Grid）。 -->
-                <Border x:Name="DropLine"
-                        Height="2"
-                        CornerRadius="1"
-                        VerticalAlignment="Top"
-                        HorizontalAlignment="Stretch"
-                        Margin="1,0,1,0"
-                        IsHitTestVisible="False"
-                        Visibility="Collapsed"
-                        Background="{ThemeResource AccentFillColorDefaultBrush}" />
 
                 <Border x:Name="ScopeEmptyState"
                         Padding="16"
