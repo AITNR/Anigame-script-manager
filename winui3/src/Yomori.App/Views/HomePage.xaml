@@ -4,8 +4,9 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
-    <!-- 主页（2026-10-23 改版）：
-         版式参考「横幅图 + 卡片区」：顶部一张通栏图（贴窗口左右边、撑满剩余高度、右键更换），
+    <!-- 首页（2026-10-23 改版，2026-10-24 横幅改随机图库）：
+         版式参考「横幅图 + 卡片区」：顶部一张通栏图（贴窗口左右边、撑满剩余高度），
+         图从 assets/home_banners/ 里随机抽，每次进首页重抽，右键可换/钉死；
          图左上角叠应用名；图下方是内容区，标题行 + 四张功能入口卡。
          原来的「总览」标题 + 描述 + 状态四格换成了这张图，底部「会话通道」概览整块删除。 -->
     <Grid>
@@ -59,18 +60,18 @@
                        FontWeight="SemiBold"
                        Foreground="White" />
 
-            <!-- 没设置图片（或默认图也丢了）时的占位 -->
+            <!-- 图库空/图全读不出来时的占位（正常情况一进页面就会被随机图替换掉） -->
             <StackPanel x:Name="BannerPlaceholder"
                         HorizontalAlignment="Center"
                         VerticalAlignment="Center"
                         MaxWidth="460"
                         Spacing="8">
                 <TextBlock x:Name="PlaceholderTitle"
-                           Text="还没有设置首页图片"
+                           Text="首页图库是空的"
                            HorizontalAlignment="Center"
                            Style="{StaticResource SubtitleTextBlockStyle}" />
                 <TextBlock x:Name="PlaceholderHint"
-                           Text="在任意位置点右键，选一张图片放到这里。"
+                           Text="把 png / jpg 图片放进程序目录的 assets\home_banners 文件夹。"
                            HorizontalAlignment="Center"
                            TextAlignment="Center"
                            TextWrapping="Wrap"
@@ -87,13 +88,15 @@
                     CornerRadius="4"
                     Background="#66000000"
                     Visibility="Collapsed">
-                <TextBlock Text="右键更换图片" FontSize="11" Foreground="White" />
+                <TextBlock Text="右键换一张" FontSize="11" Foreground="White" />
             </Border>
 
             <Grid.ContextFlyout>
                 <MenuFlyout Opening="OnBannerMenuOpening">
+                    <MenuFlyoutItem x:Name="ShuffleBannerItem" Text="换一张" Click="OnShuffleBanner" />
                     <MenuFlyoutItem Text="更换图片…" Click="OnChangeBannerImage" />
-                    <MenuFlyoutItem x:Name="ClearBannerItem" Text="恢复默认图片" Click="OnRestoreDefaultBanner" />
+                    <MenuFlyoutSeparator />
+                    <MenuFlyoutItem x:Name="ClearBannerItem" Text="恢复随机展示" Click="OnRestoreRandomBanner" />
                 </MenuFlyout>
             </Grid.ContextFlyout>
         </Grid>

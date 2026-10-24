@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media.Imaging;
+using Microsoft.UI.Xaml.Navigation;
 using Windows.Storage.Streams;
 using Yomori.Helpers;
 using Yomori.Services;
@@ -13,10 +14,13 @@ using Yomori.ViewModels;
 namespace Yomori.Views;
 
 /// <summary>
-/// 主页：顶部一张可右键更换的图 + 三张入口卡。
+/// 首页：顶部一张横幅图 + 四张入口卡。
 ///
 /// 2026-10-23 改版：原来的「总览」标题 + 状态四格换成这张图，底部「会话通道」概览整块删除
-/// （通道入口在左侧菜单，状态在右侧状态栏，主页不必再列一遍）。
+/// （通道入口在左侧菜单，状态在右侧状态栏，首页不必再列一遍）。
+///
+/// 2026-10-24：横幅不再是"一张固定默认图"，改成**从 <c>assets/home_banners/</c> 图库里随机抽一张**，
+/// 每次进首页重抽（见 <see cref="OnNavigatedTo"/>）。右键「更换图片…」仍可钉死某一张。
 /// </summary>
 public sealed partial class HomePage : Page
 {
@@ -29,12 +33,32 @@ public sealed partial class HomePage : Page
     /// </summary>
     private const int BannerDecodeWidth = 2048;
 
+    /// <summary>
+    /// 上一次随机抽中的图。唯一用途是"下一次别又抽到同一张"：
+    /// 三张图的图库里，不排除的话有 1/3 概率切回来看着像没随机。
+    ///
+    /// ⚠️ 必须是 <c>static</c>：页面每次导航都会 new 一个实例（没开 NavigationCacheMode），
+    /// 用实例字段的话这个"上一次"永远是 null，避重复等于没写。
+    /// 只在 UI 线程写（导航回调 / 右键菜单），不需要加锁。
+    /// </summary>
+    private static string? _lastRandomBanner;
+
     public HomePage()
     {
         InitializeComponent();
         ShowProblemReportIfNeeded();
+    }
 
-        // 图片加载要 await 解码，构造里不能 await，发了就走（异常全在内部接住）
+    /// <summary>
+    /// 每次导航到首页都重抽一张。挂在导航事件而不是构造里：
+    /// 页面没设 <c>NavigationCacheMode</c>，现在每次切页都会 new 一个实例，构造函数碰巧也能跑；
+    /// 但那是**实现细节**，哪天给页面开了缓存，随机就悄悄退化成"只在启动时随机"。导航事件才是可靠信号。
+    /// </summary>
+    protected override void OnNavigatedTo(NavigationEventArgs e)
+    {
+        base.OnNavigatedTo(e);
+
+        // 图片加载要 await 解码，导航回调里不能 await，发了就走（异常全在内部接住）
         _ = UpdateBannerAsync();
     }
 
@@ -70,30 +94,46 @@ public sealed partial class HomePage : Page
     /// <summary>通道管理页（与左侧菜单「会话通道 → 通道管理…」同一个 tag）。</summary>
     private void OnOpenChannels(object sender, RoutedEventArgs e) => VM.Navigate("channel-mgmt");
 
-    // ---------------- 首页大图 ----------------
+    // ---------------- 首页横幅图 ----------------
 
-    /// <summary>随程序发布的默认首页图（<c>assets/home_banner.jpg</c>，与 exe 同级落地）。</summary>
-    private static string DefaultBannerPath => Path.Combine(AppPaths.AssetsDir, "home_banner.jpg");
+    /// <summary>
+    /// 随程序发布的首页图库（<c>assets/home_banners/</c>，与 exe 同级落地）。
+    /// 每次进首页从里面随机抽一张；用户往这个文件夹里加图，下次进首页就会参与抽取。
+    /// </summary>
+    private static string BannerFolder => Path.Combine(AppPaths.AssetsDir, "home_banners");
 
     /// <summary>
     /// 按配置重新加载首页图。
     ///
-    /// 优先级：配置里指定的图 → 随程序发布的默认图 → 占位。
-    /// 配置的图**只是找不到**（被删/移动/盘没挂）时静默回退默认图，不打扰；
+    /// 优先级：配置里钉死的图 → 图库里随机抽一张 → 占位。
+    /// 配置的图**只是找不到**（被删/移动/盘没挂）时静默回退随机图，不打扰；
     /// 但"找到了却读不出来/打不开"是真问题，必须写清原因，否则用户只会看到一片空白。
     /// </summary>
     private async Task UpdateBannerAsync()
     {
         var configured = (VM.Config.HomeBannerPath ?? string.Empty).Trim();
-        var useDefault = configured.Length == 0 || !File.Exists(configured);
-        var path = useDefault ? DefaultBannerPath : configured;
 
-        if (!File.Exists(path))
+        string path;
+        var pinned = configured.Length > 0 && File.Exists(configured);
+
+        if (pinned)
         {
-            SetPlaceholder(
-                "还没有设置首页图片",
-                "在任意位置点右键，选一张图片放到这里。");
-            return;
+            path = configured;
+        }
+        else
+        {
+            var picked = HomeBannerPicker.PickRandom(BannerFolder, _lastRandomBanner);
+            if (picked is null)
+            {
+                SetPlaceholder(
+                    "首页图库是空的",
+                    "把 png / jpg 图片放进程序目录的 assets\\home_banners 文件夹，"
+                    + "之后每次进入首页都会随机显示其中一张。");
+                return;
+            }
+
+            path = picked;
+            _lastRandomBanner = picked;
         }
 
         byte[] bytes;
@@ -142,7 +182,7 @@ public sealed partial class HomePage : Page
         catch (Exception ex)
         {
             SetPlaceholder(
-                useDefault ? "默认首页图打不开" : "这张图打不开",
+                pinned ? "这张图打不开" : "图库里的这张图打不开",
                 $"支持 png / jpg / bmp / gif / webp。{ex.Message}");
             return;
         }
@@ -187,9 +227,20 @@ public sealed partial class HomePage : Page
         PlaceholderHint.Text = hint;
     }
 
-    /// <summary>用的就是默认图时，「恢复默认图片」没有意义，灰掉。</summary>
-    private void OnBannerMenuOpening(object sender, object e) =>
-        ClearBannerItem.IsEnabled = (VM.Config.HomeBannerPath ?? string.Empty).Trim().Length > 0;
+    /// <summary>
+    /// 右键菜单随状态变化：
+    /// 钉死了某张图时「换一张」「恢复随机展示」各是各的 —— 抽随机没意义、恢复随机才有；
+    /// 没钉死（正在随机）时反过来。
+    /// </summary>
+    private void OnBannerMenuOpening(object sender, object e)
+    {
+        var pinned = (VM.Config.HomeBannerPath ?? string.Empty).Trim().Length > 0;
+        ShuffleBannerItem.IsEnabled = !pinned;
+        ClearBannerItem.IsEnabled = pinned;
+    }
+
+    /// <summary>原地换一张随机图：不用切走再切回来。</summary>
+    private async void OnShuffleBanner(object sender, RoutedEventArgs e) => await UpdateBannerAsync();
 
     private async void OnChangeBannerImage(object sender, RoutedEventArgs e)
     {
@@ -212,7 +263,8 @@ public sealed partial class HomePage : Page
         await UpdateBannerAsync();
     }
 
-    private async void OnRestoreDefaultBanner(object sender, RoutedEventArgs e)
+    /// <summary>清掉钉死的那张图，回到「每次进首页随机抽一张」。</summary>
+    private async void OnRestoreRandomBanner(object sender, RoutedEventArgs e)
     {
         VM.SaveHomeBanner(string.Empty);
         await UpdateBannerAsync();

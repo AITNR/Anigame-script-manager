@@ -155,10 +155,11 @@ public sealed class AppConfig : ObservableObject
     public WindowConfig Window { get; set; } = new();
 
     /// <summary>
-    /// 主页大图的图片路径（绝对路径）。空串 = 没设置，用随程序发布的 <c>assets/home_banner.jpg</c>。
+    /// 钉死在首页横幅上的图片路径（绝对路径）。空串 = 不钉死，从随程序发布的图库
+    /// <c>assets/home_banners/</c> 里随机抽一张（每次进首页重抽）。
     ///
     /// 只记路径、不复制文件：换图后原图可以随便挪，只要路径还指得到就行；
-    /// 图片被删/移走时主页回退到默认图，不影响启动与任务执行。
+    /// 图片被删/移走时首页回退到随机图库，不影响启动与任务执行。
     /// </summary>
     [JsonPropertyName("home_banner")]
     public string HomeBannerPath { get; set; } = string.Empty;
@@ -195,7 +196,7 @@ public sealed class AppConfig : ObservableObject
 
         Theme = allowed || LegacyThemes.Contains(theme) ? theme : "system";
         ShutdownDelaySeconds = Math.Max(0, ShutdownDelaySeconds);
-        // 只做去空白：路径失效（盘符拔了、文件被删）由主页自己回退默认图，
+        // 只做去空白：路径失效（盘符拔了、文件被删）由首页自己回退到图库随机，
         // 不能在这里清空 —— 临时拔一次 U 盘就把用户的选择抹掉太粗暴。
         HomeBannerPath = (HomeBannerPath ?? string.Empty).Trim();
         UpdateChannel = UpdateChannels.Normalize(UpdateChannel);
