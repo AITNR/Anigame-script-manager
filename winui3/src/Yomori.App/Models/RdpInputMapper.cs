@@ -50,6 +50,28 @@ namespace Yomori.Models
             };
 
         /// <summary>
+        /// 解析 WH_KEYBOARD_LL 回调的 lParam（指向 <see cref="KbdllHookStruct"/>）→
+        /// (VK, 硬件扫描码, 是否扩展键)。
+        ///
+        /// 🔑 <b>必须用结构体，不许手算偏移</b>（2026-10-24 修，全屏键盘"映射不对"的根因）。
+        /// 原代码按「每个 DWORD 占 8 字节」把 lParam 读成 vkCode(0)/scanCode(8)/flags(16)，
+        /// 而 Win32 实际是 0/4/8/12/16 —— 于是：
+        /// <list type="bullet">
+        /// <item><c>scanCode</c> 读到的是 <b>flags</b>：keydown 时 0、<b>keyup 时 0x80</b>
+        ///   （LLKHF_UP），被当成扫描码 0x80 发给服务器 → 服务器认不出 → <b>按键永远收不到抬起</b>，
+        ///   表现为粘键 / 字符连续重复 / 后续按键变组合键；</item>
+        /// <item><c>flags</c> 读到的是 <c>dwExtraInfo</c>：普通硬件键恒 0 → extended 位全丢。</item>
+        /// </list>
+        /// 偏移写错不会编译报错、也不会抛异常，只会静默读错字段 —— 所以这里换成
+        /// <see cref="Marshal.PtrToStructure{T}(IntPtr)"/>，并让冒烟用真实布局做断言。
+        /// </summary>
+        public static (ulong VirtualKey, ushort ScanCode, bool Extended) ReadHookKey(IntPtr lParam)
+        {
+            var data = Marshal.PtrToStructure<KbdllHookStruct>(lParam);
+            return (data.VkCode, (ushort)data.ScanCode, (data.Flags & KbdHookFlags.Extended) != 0);
+        }
+
+        /// <summary>
         /// 把一次按键规范化为 (基础扫描码, extended)。
         /// scanCode 为 WinUI KeyStatus.ScanCode（Set 1 硬件码）；virtualKey 为 Key 枚举整数值。
         /// 优先级：固定表 > 硬件码直通（+扩展位）> MapVirtualKey 兜底（WinUI ScanCode 常为 0）。
@@ -153,6 +175,43 @@ namespace Yomori.Models
             uint flags = wheelDelta > 0 ? 0u : YcnPointerFlags.WheelNegative;
             return (YcnPointerFlags.Wheel | flags, units, repeats);
         }
+    }
+
+    /// <summary>
+    /// WH_KEYBOARD_LL 回调里 lParam 指向的结构（Win32 <c>KBDLLHOOKSTRUCT</c>）。
+    ///
+    /// ⚠️ 字段顺序与宽度是 Win32 的硬定义（<c>DWORD ×4 + ULONG_PTR</c>），**禁止手算偏移**：
+    /// x64 下 size=24、偏移 0/4/8/12/16；x86 下 4/8 也一样（DWORD 固定 4 字节）。
+    /// 冒烟 <c>RdpInputMapperCheck</c> 用 <see cref="Marshal.OffsetOf{T}(string)"/> 锁住了这些偏移，
+    /// 改动本结构体前先看那条断言为什么会红。
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct KbdllHookStruct
+    {
+        public uint VkCode;       // offs 0
+        public uint ScanCode;     // offs 4  ← 曾经被误读成 flags
+        public uint Flags;        // offs 8  ← 曾经被误读成 dwExtraInfo
+        public uint Time;         // offs 12
+        public IntPtr ExtraInfo;  // offs 16（x64 8 字节）
+    }
+
+    /// <summary>KBDLLHOOKSTRUCT.flags 的位定义（winuser.h 的 LLKHF_*）。</summary>
+    public static class KbdHookFlags
+    {
+        /// <summary>扩展键（方向键 / Right Ctrl / 小键盘除号等）。</summary>
+        public const uint Extended = 0x01;
+
+        /// <summary>由 SendInput 注入（低完整性级别）。</summary>
+        public const uint LowerIlInjected = 0x02;
+
+        /// <summary>由 SendInput 注入。</summary>
+        public const uint Injected = 0x10;
+
+        /// <summary>Alt 处于按下状态（WM_SYSKEY*）。</summary>
+        public const uint AltDown = 0x20;
+
+        /// <summary>本次是抬起消息。⚠️ 这个位就在 flags 里 —— 曾经因为偏移错位被当成扫描码 0x80 发出去。</summary>
+        public const uint Up = 0x80;
     }
 
     /// <summary>PTR_FLAGS 组合常量（与 FreeRDP input.h 同值；单测引用用，避免 _smoke 链 interop）。

@@ -61,11 +61,10 @@ namespace Yomori.Services
         {
             if (code >= 0)
             {
-                // KBDLLHOOKSTRUCT：vkCode(0) / scanCode(8) / flags(16)，LLKHF_EXTENDED = 0x01
-                var vk = (ulong)Marshal.ReadInt32(lParam);
-                var scanCode = (ushort)Marshal.ReadInt32(lParam, 8);
-                var flags = Marshal.ReadInt32(lParam, 16);
-                var extended = (flags & 0x01) != 0;
+                // ⚠️ lParam 是 KBDLLHOOKSTRUCT*，字段偏移必须走结构体（Models/RdpInputMapper.ReadHookKey）。
+                // 这里曾经手算成 scanCode(8)/flags(16)，实际是 scanCode(4)/flags(8) ——
+                // 于是 keyup 把 flags 的 LLKHF_UP(0x80) 当成扫描码发出去，远端永远收不到抬起。
+                var (vk, scanCode, extended) = Yomori.Models.RdpInputMapper.ReadHookKey(lParam);
                 var msg = wParam.ToInt64();
                 var isDown = msg is WM_KEYDOWN or WM_SYSKEYDOWN;
                 try

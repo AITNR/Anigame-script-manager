@@ -38,6 +38,12 @@ internal sealed class RdpFullScreenCoordinator : IDisposable
     private RdpFullScreenWindow? _fullWindow;
     private bool _detached;
 
+    /// <summary>上一次钩子回调时全屏窗口是否在前台（用于检测"重新聚焦"这一次跳变）。</summary>
+    private bool _wasForeground;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
     /// <param name="host">页面内的画面控件（全屏期間它挂起渲染，退出后恢复）。</param>
     /// <param name="log">写运行日志（进主控端日志区）。</param>
     /// <param name="onStateChanged">全屏状态变化回调：true = 已进入。用于切按钮文案。</param>
@@ -87,6 +93,15 @@ internal sealed class RdpFullScreenCoordinator : IDisposable
             s_active.Exit();
         }
 
+        // 进入全屏时对齐一次锁状态（NumLock / CapsLock / ScrollLock）。
+        //
+        // 为什么必须有：小键盘 0-9 与 Insert/Home/PgUp/End/PgDn/方向键在 Set1 里**共用扫描码**，
+        // 只靠 extended 位 + **服务器侧 NumLock** 区分。连接时 RdpView 同步过一次，
+        // 但用户可能在窗口模式里改过本机锁状态（窗口模式的同步时机与全屏不同），
+        // 进全屏时补一次，避免"全屏后小键盘变成方向键"。
+        // 连接未就绪时原生侧直接拒（返回 false，不抛），安全。
+        client.SyncKeyboardState();
+
         var window = new RdpFullScreenWindow(client);
         _fullWindow = window;
         s_active = this;
@@ -103,6 +118,7 @@ internal sealed class RdpFullScreenCoordinator : IDisposable
             var wasFullScreen = IsFullScreen;
             _fullWindow = null;
             IsFullScreen = false;
+            _wasForeground = false;
 
             if (ReferenceEquals(s_active, this))
             {
@@ -124,6 +140,7 @@ internal sealed class RdpFullScreenCoordinator : IDisposable
         // 宿主挂起，避免全屏期间双路渲染（CPU 翻倍）
         _host.SuspendRendering();
 
+        _wasForeground = false;   // 首拍由钩子自己判断当前是不是前台
         _kbdHook ??= new LowLevelKeyboardHook(Intercept, _log);
         _kbdHook.Install();
 
@@ -142,6 +159,14 @@ internal sealed class RdpFullScreenCoordinator : IDisposable
         // 钩子纪律：先摘钩子，再关窗。反过来的话关窗那几毫秒里本地键盘会失灵
         _kbdHook?.Remove();
         IsFullScreen = false;
+        _wasForeground = false;
+
+        // 摘钩子后 keyup 就再也到不了远端了 —— 用户按着 Ctrl/Shift 退出全屏的话，
+        // 远端会一直认为那个键还在按着。关窗前补一轮抬起。
+        if (_fullWindow?.View is { } exitingView)
+        {
+            ReleaseModifiers(exitingView);
+        }
 
         var window = _fullWindow;
         _fullWindow = null;
@@ -173,10 +198,37 @@ internal sealed class RdpFullScreenCoordinator : IDisposable
             return false;
         }
 
-        var view = _fullWindow?.View;
-        if (view is null)
+        var window = _fullWindow;
+        var view = window?.View;
+        if (window is null || view is null)
         {
             return false;
+        }
+
+        // 🔑 只有全屏窗口真的是**前台窗口**时才接管键盘。
+        //
+        // 钩子是全局的（WH_KEYBOARD_LL 覆盖整个桌面），原先只看 IsFullScreen —— 于是用户在全屏状态下
+        // 点了主窗口 / 别的程序之后，键盘输入仍然全部被转投远端、本地一个字都打不进去，
+        // 表现为"整机键盘失灵"。失焦就放行，让按键回到它该去的地方。
+        //
+        // 失焦期间按下的键会在远端漏掉 up，所以重新聚焦时补一次修饰键释放（见 ReleaseModifiers）。
+        if (GetForegroundWindow() != window.Handle)
+        {
+            // 只在「刚失焦」这一次跳变上补释放，不要每个键都补（否则每次按键都白发一轮 up）
+            if (_wasForeground)
+            {
+                _wasForeground = false;
+                ReleaseModifiers(view);
+            }
+
+            return false;
+        }
+
+        if (!_wasForeground)
+        {
+            _wasForeground = true;
+            // 重新拿到焦点：把焦点切换期间可能卡在远端的修饰键放掉
+            ReleaseModifiers(view);
         }
 
         // F11（0x7A）：退出全屏。down 触发一次，up 只拦不放
@@ -184,7 +236,7 @@ internal sealed class RdpFullScreenCoordinator : IDisposable
         {
             if (isDown)
             {
-                _ = _fullWindow?.DispatcherQueue.TryEnqueue(Exit);
+                _ = window.DispatcherQueue.TryEnqueue(Exit);
             }
 
             return true;
@@ -198,6 +250,37 @@ internal sealed class RdpFullScreenCoordinator : IDisposable
         }
 
         return view.SendKey(isDown, ext, sc);
+    }
+
+    /// <summary>
+    /// 把可能卡在远端的修饰键补一个抬起。
+    ///
+    /// 场景：全屏里按住 Ctrl/Shift 时窗口失去焦点（或退出全屏）→ 这些键的 keyup 被放行到本地、
+    /// 永远到不了远端 → 远端一直认为 Ctrl 按着，之后所有点击都变成 Ctrl+点击。
+    /// 多发一个 up 是无害的（远端对未按下的键收到 up 直接忽略）。
+    /// </summary>
+    private void ReleaseModifiers(RdpView view)
+    {
+        TrySendUp(view, 0x2A, false);  // Left Shift
+        TrySendUp(view, 0x36, false);  // Right Shift
+        TrySendUp(view, 0x1D, false);  // Left Ctrl
+        TrySendUp(view, 0x1D, true);   // Right Ctrl
+        TrySendUp(view, 0x38, false);  // Left Alt
+        TrySendUp(view, 0x38, true);   // Right Alt
+        TrySendUp(view, 0x5B, true);   // Left Win
+        TrySendUp(view, 0x5C, true);   // Right Win
+    }
+
+    private static void TrySendUp(RdpView view, ushort scanCode, bool extended)
+    {
+        try
+        {
+            view.SendKey(false, extended, scanCode);
+        }
+        catch
+        {
+            // 弹窗路径里不能因为一次转发失败把钩子带崩
+        }
     }
 
     /// <summary>
