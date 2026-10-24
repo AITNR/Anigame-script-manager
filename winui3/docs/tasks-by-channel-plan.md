@@ -248,38 +248,42 @@ public int ScopeOrder { get; set; }   // 通道内显示序号，由 RefreshScop
 「上移 / 下移」一次只能挪一位，排五六条任务时要点很多下。
 
 **做法**：任务行在序号前加抓手（`FontIcon` U+E76F，两条横线），**指针全由页面自己接管**。
-拖动时只做两件事：被拖的那行用 `TranslateTransform` 追着指针走、落点提示线跟着移动；
-**集合一个字节都不动**。松手那一刻才 `Move` 一次。
+拖动时被拖那行追着指针走、其余行上下让位、一条提示线标出落点 ——
+**三件事全是 `TranslateTransform` / 提示线，集合一个字节都不动**；松手那一刻才 `Move` 一次。
 
 | 位置 | 改动 |
 | --- | --- |
 | `Models/TaskScopePlanner` | 新增 `ApplyScopeSequence`：只重排**本组已占用的 order 值**（取出来升序、按新次序发回），order 的多重集合不变 → 不会跟别的通道撞号，之后 `SaveConfig()` 里的 `NormalizeOrdersByChannel` 再收敛成 1..N |
 | `MainViewModel` | 新增 `MoveTaskInScopeTo(task, targetIndex)`：`ScopeTasks.Move(from, to)` → `ApplyScopeSequence` → `RenumberScope` |
-| `Views/TasksPage.xaml(.cs)` | 抓手 `Border`（只挂 `PointerPressed`）；`BeginDragVisual` / `FollowPointer` / `UpdateDropTarget` / `SyncDragContainer` / `EndDrag`；`DropLine` 提示线；4px 起拖阈值；ListView 层用 `AddHandler(..., handledEventsToo: true)` 接移动/松开/捕获丢失 |
+| `Views/TasksPage.xaml(.cs)` | 抓手 `Border`（只挂 `PointerPressed`）；`BeginDragVisual` / `FollowPointer` / `UpdateDropTarget` / `ShiftRows` / `ClearShiftedRows` / `EndDrag`；`DropLine`；4px 起拖阈值；ListView 层 `AddHandler(..., handledEventsToo: true)` 接移动/松开/捕获丢失 |
 
-### 走错的四条路（别再走回头路）
+### 走错的五条路（别再走回头路）
 
 | # | 尝试 | 结果 |
 | --- | --- | --- |
 | ① | 抓手 `CanDrag="True"` + 自己做 `DragStarting`/`DragOver`/`Drop` | **拖不动**：指针被 `ListViewItem` 的按下/选择逻辑接走，子元素的拖拽手势根本不启动 |
 | ② | ListView 内置重排（`CanReorderItems` + `CanDragItems` + `ReorderMode`） | **同样按不动**（本页面上这套机制不生效） |
-| ③ | 自己接管指针 + **拖动中实时 `Move`**（边拖边重排） | 能拖了，但**拖过一行就断开**：`Move` 让 ListView 回收/重建那一行的容器，位移与指针捕获一起失效 |
-| ④ | 同上，但捕获挪到 `ListView` 上 | 仍然断 —— 容器一换，行本身被重建，问题不在捕获 |
-| ⑤ | **拖动中不动集合，松手才排序**（当前实现） | 稳定 |
+| ③ | 自己接管指针 + **拖动中实时 `Move`** | 能拖了，但**拖过一行就断开**：`Move` 让 ListView 回收/重建那一行的容器 |
+| ④ | ③ 但捕获挪到 `ListView` 上 | 仍然断 —— 问题不在捕获，在"行被重建" |
+| ⑤ | 只松手排序、拖动中只画一条线 | 稳了，但丢了「其他行让位」的观感 |
+| ⑥ | **让位改为纯视觉位移**（当前实现） | 两者兼得 |
 
-**五条纪律**：
+**六条纪律**：
 
 1. **`PointerPressed` 里必须 `e.Handled = true`，并在 `TaskList` 上 `CapturePointer`** ——
    否则 `ListViewItem` 随后把指针抢回去，`PointerMoved` 一条都收不到；捕获也别挂在抓手 /
    行容器上（它们会被回收重建）。
-2. **拖动过程中绝不改集合** —— 这是 ③④ 失败换来的：`Move` 会让 ListView 回收重建行容器，
-   位移与捕获一起失效，症状就是「拖过一行就断开、直接跳到新位置」。排序只在 `PointerReleased` 做一次。
-3. **量行位置前把 `TranslateTransform.Y` 归零** —— `TransformToVisual` 会把元素自身的
-   RenderTransform 算进去，不归零就是「位移取决于位移」的自指，会越拖越飘。
-4. **插入点要判断方向** —— 「插到第 i 行之前」在抽走被拖项后要减一，否则往后拖永远差一位
+2. **拖动过程中绝不改集合** —— `Move` 会让 ListView 回收重建行容器，位移与捕获一起失效，
+   症状就是「拖过一行就断开、直接跳到新位置」。排序只在 `PointerReleased` 做一次。
+3. **「让位」只能用 `RenderTransform`** —— 给中间那几行加 `TranslateTransform ±行高`，
+   布局与集合都不动。这是拖动期间唯一既安全又能出效果的做法。
+4. **行位置在起拖时缓存一次**（`_rowTops` / `_rowHeight` / `_dragSlotTop`）—— 拖动中布局不变，
+   之后落点计算全是纯算术。别边拖边量：`TransformToVisual` 会把元素自身的 RenderTransform
+   算进去，量出来的是「已经位移过的位置」，而且和"其他行也被推开了"叠在一起，越算越乱。
+5. **插入点要判断方向** —— 「插到第 i 行之前」在抽走被拖项后要减一，否则往后拖永远差一位
    （A B C D 把 A 拖到 C 上半区，期望 B A C D 而不是 B C A D）；落点与原地相同时不画线。
-5. **`EndDrag` 先清状态再 `ReleasePointerCapture`** —— 后者会同步抛 `PointerCaptureLost`，
-   状态没清就会再跑一遍 `EndDrag`。
+6. **`EndDrag` 先清状态再 `ReleasePointerCapture`** —— 后者会同步抛 `PointerCaptureLost`，
+   状态没清就会再跑一遍 `EndDrag`。让位那几行的变换也要在这里还原。
 
 已知副作用：点抓手不再顺带选中这一行（按下被 Handled 掉了）。抓手只有二十来像素宽，
 点行内文字照常选中，可以接受。
